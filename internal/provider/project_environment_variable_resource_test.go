@@ -17,6 +17,7 @@ import (
 )
 
 func TestAccProjectEnvironmentVariableResource(t *testing.T) {
+	projectSlug := testProjectSlug(t)
 	name := fmt.Sprintf("N%s", rand.Text())
 	value := rand.Text()
 	resource.Test(t, resource.TestCase{
@@ -25,7 +26,7 @@ func TestAccProjectEnvironmentVariableResource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccProjectEnvironmentVariableResourceConfig(name, value, "circleci/8e4z1Akd74woxagxnvLT5q/CzMcAU8dvQo4FJhyj87QsA"),
+				Config: testAccProjectEnvironmentVariableResourceConfig(name, value, projectSlug),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_project_environment_variable.test_env",
@@ -40,7 +41,7 @@ func TestAccProjectEnvironmentVariableResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project_environment_variable.test_env",
 						tfjsonpath.New("project_slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q/CzMcAU8dvQo4FJhyj87QsA"),
+						knownvalue.StringExact(projectSlug),
 					),
 				},
 			},
@@ -69,6 +70,7 @@ func TestAccProjectEnvironmentVariableResource(t *testing.T) {
 }
 
 func TestAccProjectEnvironmentVariableResourceUpdate(t *testing.T) {
+	projectSlug := testProjectSlug(t)
 	name := fmt.Sprintf("N%s", rand.Text())
 	value := rand.Text()
 	updatedValue := rand.Text()
@@ -78,7 +80,7 @@ func TestAccProjectEnvironmentVariableResourceUpdate(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccProjectEnvironmentVariableResourceConfig(name, value, "circleci/8e4z1Akd74woxagxnvLT5q/CzMcAU8dvQo4FJhyj87QsA"),
+				Config: testAccProjectEnvironmentVariableResourceConfig(name, value, projectSlug),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_project_environment_variable.test_env",
@@ -94,7 +96,7 @@ func TestAccProjectEnvironmentVariableResourceUpdate(t *testing.T) {
 			},
 			// Update (triggers replace) and Read testing
 			{
-				Config: testAccProjectEnvironmentVariableResourceConfig(name, updatedValue, "circleci/8e4z1Akd74woxagxnvLT5q/CzMcAU8dvQo4FJhyj87QsA"),
+				Config: testAccProjectEnvironmentVariableResourceConfig(name, updatedValue, projectSlug),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_project_environment_variable.test_env",

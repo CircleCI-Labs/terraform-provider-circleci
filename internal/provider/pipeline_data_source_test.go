@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -13,23 +14,25 @@ import (
 )
 
 func TestAccPipelineDataSource(t *testing.T) {
+	projectID := testProjectID(t)
+	pipelineID := testPipelineID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testPipelineDataSourceConfig,
+				Config: testPipelineDataSourceConfig(pipelineID, projectID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_pipeline.test_pipeline",
 						tfjsonpath.New("id"),
-						knownvalue.StringExact("fefb451c-9966-4b75-b555-d4d94d7116ef"),
+						knownvalue.StringExact(pipelineID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_pipeline.test_pipeline",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("61169e84-93ee-415d-8d65-ddf6dc0d2939"),
+						knownvalue.StringExact(projectID),
 					),
 				},
 			},
@@ -37,13 +40,15 @@ func TestAccPipelineDataSource(t *testing.T) {
 	})
 }
 
-const testPipelineDataSourceConfig = `
+func testPipelineDataSourceConfig(pipelineID, projectID string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
 
 data "circleci_pipeline" "test_pipeline" {
-  id         = "fefb451c-9966-4b75-b555-d4d94d7116ef"
-  project_id = "61169e84-93ee-415d-8d65-ddf6dc0d2939"
+  id         = %[1]q
+  project_id = %[2]q
 }
-`
+`, pipelineID, projectID)
+}

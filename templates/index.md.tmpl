@@ -1,0 +1,112 @@
+---
+page_title: "circleci Provider"
+subcategory: ""
+description: |-
+  Manage CircleCI organizations, projects, pipelines and settings as code.
+---
+
+# circleci Provider
+
+Manage CircleCI organizations, projects, pipelines and settings with Terraform,
+using the same infrastructure-as-code patterns you already use for your VCS
+repositories. For large organizations this enables automated project onboarding
+for new teams.
+
+## Example Usage
+
+```terraform
+terraform {
+  required_providers {
+    circleci = {
+      source  = "CircleCI-Public/circleci"
+      version = "~> 0.4"
+    }
+  }
+}
+
+# CircleCI Cloud (the default).
+provider "circleci" {
+  # key is best supplied with the CIRCLE_TOKEN environment variable
+}
+```
+
+### CircleCI Server
+
+```terraform
+provider "circleci" {
+  host        = "https://circleci.example.com"
+  deployment  = "server"
+  runner_host = "https://circleci.example.com"
+}
+```
+
+## Authentication
+
+The provider authenticates with a CircleCI [personal access
+token](https://circleci.com/docs/managing-api-tokens/). Supply it with the
+`CIRCLE_TOKEN` environment variable rather than in configuration, so it is not
+committed to source control:
+
+```shell
+export CIRCLE_TOKEN="..."
+```
+
+Some resources need a token belonging to a user with organization admin
+permissions. Notably, creating a `user-key` checkout key requires a personal
+token rather than a project token.
+
+## Environment variables
+
+Every provider attribute may be set with an environment variable. A value set in
+configuration takes precedence.
+
+| Attribute | Environment variable | Default |
+|---|---|---|
+| `host` | `CIRCLE_HOST` | `https://circleci.com` |
+| `key` | `CIRCLE_TOKEN` | — (required) |
+| `runner_host` | `CIRCLE_RUNNER_HOST` | `https://runner.circleci.com` |
+| `deployment` | `CIRCLE_DEPLOYMENT` | `cloud` |
+
+## CircleCI Cloud and CircleCI Server
+
+The `deployment` attribute tells the provider which kind of installation `host`
+refers to, and it selects the API version used for each resource.
+
+CircleCI Server does not route the v3 API, so with `deployment = "server"` the
+provider uses v2 throughout. Resources that exist only on v3 are unavailable
+there and report an explicit error rather than a confusing HTTP 404.
+
+Each resource's documentation states its availability. In summary:
+
+| Area | Cloud | Server |
+|---|---|---|
+| Contexts, context restrictions, context environment variables | yes | yes |
+| Projects, project settings, project environment variables | yes | yes |
+| Checkout keys | yes[^ckeyvcs] | yes |
+| Context restrictions (`project`, `expression`) | yes | yes |
+| Groups, group membership, project role grants | yes[^standalone] | **no** |
+| Webhooks | yes | yes |
+| Self-hosted runner resource classes and tokens | yes | yes (set `runner_host`) |
+| URL orb allow list | yes | yes |
+| Pipeline definitions and triggers | yes | **no** |
+| Organization settings | yes | **no** |
+
+~> **Note** `circleci_pipeline` and `circleci_trigger` are unavailable on
+CircleCI Server. The `pipeline-definitions` and `triggers` endpoints they depend
+on are not exposed by a Server installation.
+
+### The `host` attribute
+
+`host` is a bare origin, such as `https://circleci.com`. The API version is
+chosen per request and must not be included.
+
+Provider versions up to and including v0.4.0 documented
+`host = "https://circleci.com/api/v2"`. That value still works — the version
+suffix is stripped automatically — but the provider emits a warning. Remove the
+`/api/v2` suffix to silence it.
+
+{{ .SchemaMarkdown | trimspace }}
+
+[^standalone]: Requires a `circleci` type (standalone) organization. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud.
+
+[^ckeyvcs]: Not available to projects that use GitLab or the GitHub App; those check out over HTTPS and need no keys. See the compatibility table in the README.

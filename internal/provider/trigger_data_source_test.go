@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"fmt"
 	"regexp"
 	"testing"
 
@@ -14,6 +15,10 @@ import (
 )
 
 func TestAccTriggerDataSource(t *testing.T) {
+	triggerID := testTriggerID(t)
+	projectID := testTriggerProjectID(t)
+	repoExternalID := testGithubAppRepoExternalID(t)
+	repoName := testGithubAppRepoName(t)
 	dateRegex, err := regexp.Compile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$`)
 	if err != nil {
 		t.Fatal("Could not create Date Regex for testing.")
@@ -24,17 +29,17 @@ func TestAccTriggerDataSource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testTriggerDataSourceConfig,
+				Config: testTriggerDataSourceConfig(triggerID, projectID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
 						tfjsonpath.New("id"),
-						knownvalue.StringExact("a7a10a1c-4818-464e-b233-50fd57e3c892"),
+						knownvalue.StringExact(triggerID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("7d4d46da-49d1-4b3a-9a1b-3356ddfa67d6"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
@@ -59,12 +64,12 @@ func TestAccTriggerDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
 						tfjsonpath.New("event_source_repository_external_id"),
-						knownvalue.StringExact("952038793"),
+						knownvalue.StringExact(repoExternalID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
 						tfjsonpath.New("event_source_repository_name"),
-						knownvalue.StringExact("cci-terraform-test/test-repo"),
+						knownvalue.StringExact(repoName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
@@ -83,6 +88,8 @@ func TestAccTriggerDataSource(t *testing.T) {
 }
 
 func TestAccScheduledTriggerDataSource(t *testing.T) {
+	triggerID := testScheduledTriggerID(t)
+	projectID := testStaticProjectID(t)
 	dateRegex, err := regexp.Compile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$`)
 	if err != nil {
 		t.Fatal("Could not create Date Regex for testing.")
@@ -93,17 +100,17 @@ func TestAccScheduledTriggerDataSource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testScheduledTriggerDataSourceConfig,
+				Config: testScheduledTriggerDataSourceConfig(triggerID, projectID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
 						tfjsonpath.New("id"),
-						knownvalue.StringExact("f668f7d1-d2ce-466f-aa96-bae888e26138"),
+						knownvalue.StringExact(triggerID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("e2e8ae23-57dc-4e95-bc67-633fdeb4ac33"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_trigger.trigger_test",
@@ -156,24 +163,28 @@ func TestAccScheduledTriggerDataSource(t *testing.T) {
 	})
 }
 
-const testTriggerDataSourceConfig = `
+func testTriggerDataSourceConfig(triggerID, projectID string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
 
 data "circleci_trigger" "trigger_test" {
-  id = "a7a10a1c-4818-464e-b233-50fd57e3c892"
-  project_id = "7d4d46da-49d1-4b3a-9a1b-3356ddfa67d6"
+  id = %[1]q
+  project_id = %[2]q
 }
-`
+`, triggerID, projectID)
+}
 
-const testScheduledTriggerDataSourceConfig = `
+func testScheduledTriggerDataSourceConfig(triggerID, projectID string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
 
 data "circleci_trigger" "trigger_test" {
-  id = "f668f7d1-d2ce-466f-aa96-bae888e26138"
-  project_id = "e2e8ae23-57dc-4e95-bc67-633fdeb4ac33"
+  id = %[1]q
+  project_id = %[2]q
 }
-`
+`, triggerID, projectID)
+}

@@ -1,0 +1,42 @@
+---
+page_title: "circleci_project_groups Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches the groups granted a role on a CircleCI project.
+---
+
+# circleci_project_groups (Data Source)
+
+Fetches the groups granted a role on a CircleCI project, together with the role
+each one holds.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | no |
+
+This data source uses
+`/api/v2/organizations/{organization_id}/projects/{project_id}/groups`. That path
+is **not** in the routes served a CircleCI Server installation forwards to the
+public API service: Server exposes only `/api/v2/organizations/[^/]+/groups`, and
+`.../projects/{project_id}/groups` is a different prefix. Against CircleCI Server
+the request does not reach the API and fails. Use this data source on CircleCI
+Cloud only.
+
+~> **This API is not part of the published CircleCI OpenAPI specification** and
+may change without notice.
+
+Pagination is followed internally, so the result covers every group rather than
+one page.
+
+Each group's `role` is one of `project-admin`, `project-contributor` or
+`project-viewer`. See the
+[`circleci_project_group`](../resources/project_group) resource for what each one
+grants.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_project_groups/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

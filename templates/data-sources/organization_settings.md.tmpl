@@ -1,0 +1,45 @@
+---
+page_title: "circleci_organization_settings Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches the organization-wide settings for a CircleCI organization.
+---
+
+# circleci_organization_settings (Data Source)
+
+Fetches the organization-wide settings for a CircleCI organization.
+
+## Availability
+
+**CircleCI Cloud only.** These settings are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Configuring the provider with `deployment = "server"` and using this data source reports an explicit error rather than a confusing HTTP 404.
+
+Unlike the `circleci_organization_settings` resource, every attribute here reports the value CircleCI currently holds. A read-only view has no notion of an unmanaged toggle, so all of them are populated.
+
+## Settings that gate other resources
+
+| Setting | What it gates |
+| --- | --- |
+| `is_runner_terms_of_service_accepted` | Self-hosted runner onboarding. Runner resource classes and tokens are unavailable while this is `false`. |
+| `enable_private_orbs` | Private orbs. The organization can neither publish nor reference a private orb while this is `false`. |
+| `is_user_checkout_keys_disabled` | Checkout keys. When `true`, deploy keys are the only checkout credential. |
+| `is_context_group_restriction_required` | Context restrictions. When `true`, every context must carry at least one restriction. |
+
+## Example Usage
+
+```terraform
+data "circleci_organization_settings" "example" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+}
+
+# Runner onboarding is gated on the terms of service, so check before creating
+# runner resources.
+output "runners_available" {
+  value = data.circleci_organization_settings.example.is_runner_terms_of_service_accepted
+}
+
+output "private_orbs_available" {
+  value = data.circleci_organization_settings.example.enable_private_orbs
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}

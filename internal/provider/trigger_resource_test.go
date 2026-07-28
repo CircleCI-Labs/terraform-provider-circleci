@@ -20,23 +20,26 @@ import (
 )
 
 func TestAccTriggerResourceGithub(t *testing.T) {
+	projectID := testProjectID(t)
+	pipelineID := testPipelineID(t)
+	repoExternalID := testGithubAppRepoExternalID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccTriggerResourceGithubAppConfig("61169e84-93ee-415d-8d65-ddf6dc0d2939", "fefb451c-9966-4b75-b555-d4d94d7116ef"),
+				Config: testAccTriggerResourceGithubAppConfig(projectID, pipelineID, repoExternalID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_github",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("61169e84-93ee-415d-8d65-ddf6dc0d2939"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_github",
 						tfjsonpath.New("pipeline_id"),
-						knownvalue.StringExact("fefb451c-9966-4b75-b555-d4d94d7116ef"),
+						knownvalue.StringExact(pipelineID),
 					),
 				},
 			},
@@ -63,6 +66,8 @@ func TestAccTriggerResourceGithub(t *testing.T) {
 }
 
 func TestAccTriggerResourceWebhook(t *testing.T) {
+	projectID := testProjectID(t)
+	pipelineID := testPipelineID(t)
 	webhookTriggerName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -70,17 +75,17 @@ func TestAccTriggerResourceWebhook(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccTriggerResourceWebhookConfig(webhookTriggerName, "61169e84-93ee-415d-8d65-ddf6dc0d2939", "fefb451c-9966-4b75-b555-d4d94d7116ef", nil),
+				Config: testAccTriggerResourceWebhookConfig(webhookTriggerName, projectID, pipelineID, nil),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_webhook",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("61169e84-93ee-415d-8d65-ddf6dc0d2939"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_webhook",
 						tfjsonpath.New("pipeline_id"),
-						knownvalue.StringExact("fefb451c-9966-4b75-b555-d4d94d7116ef"),
+						knownvalue.StringExact(pipelineID),
 					),
 				},
 			},
@@ -107,23 +112,26 @@ func TestAccTriggerResourceWebhook(t *testing.T) {
 }
 
 func TestAccTriggerResourceGithubServer(t *testing.T) {
+	projectID := testGithubServerProjectID(t)
+	pipelineID := testGithubServerPipelineID(t)
+	repoExternalID := testGithubServerRepoExternalID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccTriggerResourceGithubServerConfig("20209578-aa1c-4b4c-9ca5-f6e38a47cf73", "9c7c4e85-5022-41d0-a6b0-705cfa856485"),
+				Config: testAccTriggerResourceGithubServerConfig(projectID, pipelineID, repoExternalID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_github_server",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("20209578-aa1c-4b4c-9ca5-f6e38a47cf73"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_github_server",
 						tfjsonpath.New("pipeline_id"),
-						knownvalue.StringExact("9c7c4e85-5022-41d0-a6b0-705cfa856485"),
+						knownvalue.StringExact(pipelineID),
 					),
 				},
 			},
@@ -150,6 +158,8 @@ func TestAccTriggerResourceGithubServer(t *testing.T) {
 }
 
 func TestAccTriggerResourceScheduled(t *testing.T) {
+	projectID := testProjectID(t)
+	repoExternalID := testGithubAppRepoExternalID(t)
 	pipelineName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -158,6 +168,8 @@ func TestAccTriggerResourceScheduled(t *testing.T) {
 			// Create and Read testing
 			{
 				Config: testAccTriggerResourceScheduledConfig(
+					projectID,
+					repoExternalID,
 					pipelineName,
 					"0 * * * *",
 					false,
@@ -167,7 +179,7 @@ func TestAccTriggerResourceScheduled(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_scheduled",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("61169e84-93ee-415d-8d65-ddf6dc0d2939"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_scheduled",
@@ -197,6 +209,8 @@ func TestAccTriggerResourceScheduled(t *testing.T) {
 			// Update testing — change cron expression, disable the trigger, and flip one parameter
 			{
 				Config: testAccTriggerResourceScheduledConfig(
+					projectID,
+					repoExternalID,
 					pipelineName,
 					"0 12 * * *",
 					true,
@@ -226,6 +240,8 @@ func TestAccTriggerResourceScheduled(t *testing.T) {
 			// Removing the parameters block should clear them on the API
 			{
 				Config: testAccTriggerResourceScheduledConfig(
+					projectID,
+					repoExternalID,
 					pipelineName,
 					"0 12 * * *",
 					true,
@@ -262,6 +278,8 @@ func TestAccTriggerResourceScheduled(t *testing.T) {
 }
 
 func TestAccTriggerResourceScheduledNoParameters(t *testing.T) {
+	projectID := testProjectID(t)
+	repoExternalID := testGithubAppRepoExternalID(t)
 	pipelineName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -269,6 +287,8 @@ func TestAccTriggerResourceScheduledNoParameters(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: testAccTriggerResourceScheduledConfig(
+					projectID,
+					repoExternalID,
 					pipelineName,
 					"0 * * * *",
 					false,
@@ -304,6 +324,8 @@ func TestAccTriggerResourceScheduledNoParameters(t *testing.T) {
 }
 
 func TestAccTriggerResourceWebhookRejectsParameters(t *testing.T) {
+	projectID := testProjectID(t)
+	pipelineID := testPipelineID(t)
 	webhookTriggerName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -312,8 +334,8 @@ func TestAccTriggerResourceWebhookRejectsParameters(t *testing.T) {
 			{
 				Config: testAccTriggerResourceWebhookConfig(
 					webhookTriggerName,
-					"61169e84-93ee-415d-8d65-ddf6dc0d2939",
-					"fefb451c-9966-4b75-b555-d4d94d7116ef",
+					projectID,
+					pipelineID,
 					map[string]string{"foo": "bar"},
 				),
 				ExpectError: regexp.MustCompile("does not support parameters"),
@@ -322,17 +344,17 @@ func TestAccTriggerResourceWebhookRejectsParameters(t *testing.T) {
 	})
 }
 
-func testAccTriggerResourceScheduledConfig(pipeline_name, cron_expression string, disabled bool, parameters map[string]string) string {
+func testAccTriggerResourceScheduledConfig(project_id, repo_external_id, pipeline_name, cron_expression string, disabled bool, parameters map[string]string) string {
 	return fmt.Sprintf(`
 resource "circleci_pipeline" "test_pipeline_scheduled" {
-  project_id                       = "61169e84-93ee-415d-8d65-ddf6dc0d2939"
+  project_id                       = %[5]q
   name                             = %[1]q
   description                      = "pipeline for scheduled trigger acceptance test"
   config_source_provider           = "github_app"
   config_source_file_path          = ".circleci/config.yml"
-  config_source_repo_external_id   = "952038793"
+  config_source_repo_external_id   = %[6]q
   checkout_source_provider         = "github_app"
-  checkout_source_repo_external_id = "952038793"
+  checkout_source_repo_external_id = %[6]q
 }
 
 resource "circleci_trigger" "test_trigger_scheduled" {
@@ -346,7 +368,7 @@ resource "circleci_trigger" "test_trigger_scheduled" {
   event_source_schedule_attribution_actor = "system"
   disabled                                = %[3]t
 %[4]s}
-`, pipeline_name, cron_expression, disabled, renderParametersHCL(parameters))
+`, pipeline_name, cron_expression, disabled, renderParametersHCL(parameters), project_id, repo_external_id)
 }
 
 func renderParametersHCL(parameters map[string]string) string {
@@ -367,32 +389,32 @@ func renderParametersHCL(parameters map[string]string) string {
 	return b.String()
 }
 
-func testAccTriggerResourceGithubServerConfig(project_id, pipeline_id string) string {
+func testAccTriggerResourceGithubServerConfig(project_id, pipeline_id, repo_external_id string) string {
 	return fmt.Sprintf(`
 resource "circleci_trigger" "test_trigger_github_server" {
   project_id                     = %[1]q
   pipeline_id                    = %[2]q
   event_source_provider          = "github_server"
-  event_source_repo_external_id  = "2259"
+  event_source_repo_external_id  = %[3]q
   event_preset                   = "all-pushes"
   disabled                       = false
 }
-`, project_id, pipeline_id)
+`, project_id, pipeline_id, repo_external_id)
 }
 
-func testAccTriggerResourceGithubAppConfig(project_id, pipeline_id string) string {
+func testAccTriggerResourceGithubAppConfig(project_id, pipeline_id, repo_external_id string) string {
 	return fmt.Sprintf(`
 resource "circleci_trigger" "test_trigger_github" {
   project_id 				= %[1]q
   pipeline_id 				= %[2]q
   event_source_provider = "github_app"
-  event_source_repo_external_id = "952038793"
+  event_source_repo_external_id = %[3]q
   event_preset = "all-pushes"
   checkout_ref = "some checkout ref github"
   config_ref = "some config ref github"
   disabled = false
 }
-`, project_id, pipeline_id)
+`, project_id, pipeline_id, repo_external_id)
 }
 
 func testAccTriggerResourceGithubAppConfigNoRepoExternalId(project_id, pipeline_id string) string {
@@ -425,22 +447,25 @@ resource "circleci_trigger" "test_trigger_webhook" {
 }
 
 func TestAccTriggerResourceUpdateRemovesRepoExternalId(t *testing.T) {
+	projectID := testProjectID(t)
+	pipelineID := testPipelineID(t)
+	repoExternalID := testGithubAppRepoExternalID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: testAccTriggerResourceGithubAppConfig("61169e84-93ee-415d-8d65-ddf6dc0d2939", "fefb451c-9966-4b75-b555-d4d94d7116ef"),
+				Config: testAccTriggerResourceGithubAppConfig(projectID, pipelineID, repoExternalID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_trigger.test_trigger_github",
 						tfjsonpath.New("event_source_repo_external_id"),
-						knownvalue.StringExact("952038793"),
+						knownvalue.StringExact(repoExternalID),
 					),
 				},
 			},
 			{
-				Config:      testAccTriggerResourceGithubAppConfigNoRepoExternalId("61169e84-93ee-415d-8d65-ddf6dc0d2939", "fefb451c-9966-4b75-b555-d4d94d7116ef"),
+				Config:      testAccTriggerResourceGithubAppConfigNoRepoExternalId(projectID, pipelineID),
 				ExpectError: regexp.MustCompile(`requires[\s]+event_source_repo_external_id`),
 			},
 		},
@@ -448,19 +473,21 @@ func TestAccTriggerResourceUpdateRemovesRepoExternalId(t *testing.T) {
 }
 
 func TestAccTriggerResourceMissingRepoExternalId(t *testing.T) {
+	projectID := testProjectID(t)
+	pipelineID := testPipelineID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: `
+				Config: fmt.Sprintf(`
 resource "circleci_trigger" "test_missing_repo_id" {
-  project_id            = "61169e84-93ee-415d-8d65-ddf6dc0d2939"
-  pipeline_id           = "fefb451c-9966-4b75-b555-d4d94d7116ef"
+  project_id            = %[1]q
+  pipeline_id           = %[2]q
   event_source_provider = "github_app"
   event_preset          = "all-pushes"
 }
-`,
+`, projectID, pipelineID),
 				// [\s]+ tolerates the newline Terraform CLI inserts when word-wrapping diagnostics.
 				ExpectError: regexp.MustCompile(`requires[\s]+event_source_repo_external_id`),
 			},

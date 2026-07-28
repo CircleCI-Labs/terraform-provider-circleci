@@ -7,12 +7,19 @@ orbs:
   go: circleci/go@3.0.3
   terraform: circleci/terraform@3.7.0
 
+# The Go image must match the `go` directive in go.mod. The provider needs 1.26
+# because internal/httpcl uses errors.AsType from the 1.26 standard library.
+executors:
+  go:
+    docker:
+      - image: cimg/go:1.26.1
+
 commands:
   store_results:
     steps:
-      - store_artifacts:
-          path: test-reports
       - store_test_results:
+          path: test-reports
+      - store_artifacts:
           path: test-reports
 
   setup:
@@ -22,120 +29,80 @@ commands:
     steps:
       - checkout
       - run: task mod-download
+      # The acceptance tests drive a real terraform binary, and `task ci:diff`
+      # runs `terraform fmt` over examples/.
       - terraform/install:
           terraform_version: <<parameters.terraform-version>>
+
 jobs:
-  build-and-test-terraform-12:
-    environment:
-      GOPRIVATE: "github.com/CircleCI-Public/circleci-sdk-go"
-      TF_ACC: 1
-    docker:
-      - image: cimg/go:1.26.1
-
-    steps:
-      - setup:
-          terraform-version: "1.12.2"
-      - add_ssh_keys:
-          fingerprints:
-            - "SHA256:nsu4paPTXIfsGjm1DxG4wi8y72wv5kfuqTSrRH5rcKQ"
-      - run: task build
-
-      - run:
-          name: Update PATH and Define Environment Variable at Runtime
-          # Add source command to execute code and make variables
-          # available in current step.
-          command: |
-            echo "export CIRCLE_TOKEN=${CCIPERSONALACCESSTOKEN_ASKSEC_310}" >> "$BASH_ENV"
-            source "$BASH_ENV"
-      - go/with-cache:
-          steps:
-            - run: task ci:test
-      - store_results
-
-  build-and-test-terraform-13:
-    environment:
-      GOPRIVATE: "github.com/CircleCI-Public/circleci-sdk-go"
-      TF_ACC: 1
-    docker:
-      - image: cimg/go:1.26.1
-
-    steps:
-      - setup:
-          terraform-version: "1.13.5"
-      - add_ssh_keys:
-          fingerprints:
-            - "SHA256:nsu4paPTXIfsGjm1DxG4wi8y72wv5kfuqTSrRH5rcKQ"
-      - run: task build
-
-      - run:
-          name: Update PATH and Define Environment Variable at Runtime
-          # Add source command to execute code and make variables
-          # available in current step.
-          command: |
-            echo "export CIRCLE_TOKEN=${CCIPERSONALACCESSTOKEN_ASKSEC_310}" >> "$BASH_ENV"
-            source "$BASH_ENV"
-      - go/with-cache:
-          steps:
-            - run: task ci:test
-      - store_results
-
-  build-and-test-terraform-14:
-    environment:
-      GOPRIVATE: "github.com/CircleCI-Public/circleci-sdk-go"
-      TF_ACC: 1
-    docker:
-      - image: cimg/go:1.26.1
-
-    steps:
-      - setup:
-          terraform-version: "1.14.6"
-      - add_ssh_keys:
-          fingerprints:
-            - "SHA256:nsu4paPTXIfsGjm1DxG4wi8y72wv5kfuqTSrRH5rcKQ"
-      - run: task build
-
-      - run:
-          name: Update PATH and Define Environment Variable at Runtime
-          # Add source command to execute code and make variables
-          # available in current step.
-          command: |
-            echo "export CIRCLE_TOKEN=${CCIPERSONALACCESSTOKEN_ASKSEC_310}" >> "$BASH_ENV"
-            source "$BASH_ENV"
-      - go/with-cache:
-          steps:
-            - run: task ci:test
-      - store_results
-
   lint:
-    executor:
-      name: go/default
-      tag: '1.24'
+    executor: go
     steps:
       - setup:
           terraform-version: "1.12.2"
       - go/with-cache:
           golangci-lint: true
           steps:
-            - run: task ci:diff
             - run: task ci:lint
+            # Verifies that generated documentation, formatting and go.mod are
+            # committed. This regenerates docs, so it needs terraform on PATH.
+            - run: task ci:diff
       - store_results
 
+  build-and-test:
+    parameters:
+      terraform-version:
+        type: string
+    executor: go
+    steps:
+      - setup:
+          terraform-version: <<parameters.terraform-version>>
+      - run: task build
+      - go/with-cache:
+          steps:
+            - run: task ci:test
+      - run:
+          name: Summarize coverage
+          when: always
+          command: |
+            mkdir -p test-reports
+            go tool cover -func=test-reports/coverage.out \
+              | tee test-reports/coverage.txt \
+              | tail -1
+      - store_results
 
 workflows:
   build-and-test:
     jobs:
       - lint
-      - build-and-test-terraform-12:
-          context: CircleCITestOrg-ccipat
+      # One job per supported Terraform version, run in parallel. These used to
+      # be chained with `requires`, which serialized three near-identical jobs
+      # for no reason: they share no state.
+      - build-and-test:
+          name: build-and-test-terraform-<<matrix.terraform-version>>
           requires:
             - lint
-      - build-and-test-terraform-13:
-          context: CircleCITestOrg-ccipat
-          requires:
-            - lint
-            - build-and-test-terraform-12
-      - build-and-test-terraform-14:
-          context: CircleCITestOrg-ccipat
-          requires:
-            - lint
-            - build-and-test-terraform-13
+          matrix:
+            parameters:
+              terraform-version:
+                - "1.12.2"
+                - "1.13.5"
+                - "1.14.6"
+
+# Enabling the acceptance tests against a real organization
+#
+# `task ci:test` sets TF_ACC=1, so the acceptance tests are always attempted.
+# Each one skips with a named-variable message unless its fixture is configured,
+# so the build is green without any credentials — but it is also only exercising
+# the mock-backed tests.
+#
+# To run them for real, create a context holding CIRCLE_TOKEN plus the
+# CIRCLECI_TEST_* variables listed in the README, then add it to the
+# build-and-test job:
+#
+#   - build-and-test:
+#       context: <your-context-name>
+#       ...
+#
+# Do not point these at a production organization: the tests create and delete
+# contexts, projects, groups and runner resource classes.

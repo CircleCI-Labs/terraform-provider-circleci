@@ -9,6 +9,22 @@ description: |-
 
 Manages a CircleCI pipeline trigger. Triggers define when and how a pipeline runs — via GitHub events, webhooks, or a cron schedule.
 
+A trigger with `event_source_provider = "schedule"` is the current way to run a
+pipeline on a cron schedule. See
+[Migrating scheduled pipelines](../guides/migrating-scheduled-pipelines) if you
+are moving off the legacy schedule API or a community provider's
+`circleci_schedule`.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server** This resource uses the
+`/api/v2/projects/{project_id}/triggers` endpoints, which a CircleCI Server
+installation does not expose.
+
 ## Example Usage
 
 ### GitHub App Trigger
@@ -61,7 +77,11 @@ resource "circleci_trigger" "webhook" {
 
 ### Required
 
-- `event_source_provider` (String) The event source provider. Must be one of: `github_app`, `github_server`, `webhook`, `schedule`.
+- `event_source_provider` (String) The event source provider: `github_app`, `github_server`, `github_oauth`, `webhook` or `schedule`.
+
+~> The required attributes differ per provider, because this one endpoint covers several contracts. `event_name` is required for `webhook` and `schedule` only. `checkout_ref` and `config_ref` are required for `webhook` and `schedule`. `event_preset` is required for `github_oauth` and accepts only `all-pushes` or `only-build-prs` there, is optional for `github_app` and `github_server`, and must be omitted for `webhook` and `schedule`. `disabled` is unsupported for `github_oauth`, and `parameters` is supported only for `schedule`.
+
+GitLab and Bitbucket Cloud pipelines cannot be given triggers through this API.
 - `pipeline_id` (String) The ID of the pipeline this trigger is associated with.
 - `project_id` (String) The ID of the project this trigger belongs to.
 

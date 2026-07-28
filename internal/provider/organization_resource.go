@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/CircleCI-Public/circleci-sdk-go/organization"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -177,14 +178,60 @@ func (r *organizationResource) Delete(ctx context.Context, req resource.DeleteRe
 		return
 	}
 
-	err := r.client.Delete(ctx, state.Id.ValueString())
-	if err != nil {
+	// Destroy must mirror what Create actually did, and that differs by vcs_type.
+	//
+	// For a VCS-backed organization, POST /api/v2/organization is a find-or-create:
+	// it does not create anything on the VCS, it verifies the caller is an admin and
+	// syncs CircleCI's record of an organization that already existed. Create
+	// therefore only ever *adopted* the organization.
+	//
+	// DELETE /api/v2/organization/{id} has no such distinction. It tears down the
+	// organization's VCS connections and deletes the organization, and the API spec
+	// says that deletes "all projects including all build data".
+	//
+	// Calling it here would mean `terraform destroy` irreversibly destroying an
+	// organization that Terraform never created — including projects and history
+	// belonging to people who have never heard of this configuration. So an adopted
+	// organization is released from state instead, which is the symmetric inverse
+	// of adopting it.
+	if !organizationIsStandalone(state.VcsType.ValueString()) {
+		resp.Diagnostics.AddWarning(
+			"CircleCI organization released from state, not deleted",
+			fmt.Sprintf(
+				"Organization %q (vcs_type = %q) was adopted rather than created: for a VCS-backed "+
+					"organization the CircleCI API only verifies admin access and synchronizes its "+
+					"record. It has been removed from Terraform state and left intact.\n\n"+
+					"Deleting it would also delete every project in it and all of their build "+
+					"history, which Terraform did not create and cannot restore. If you genuinely "+
+					"intend to delete the organization, do it deliberately in the CircleCI web "+
+					"application.",
+				state.Name.ValueString(), state.VcsType.ValueString(),
+			),
+		)
+
+		return
+	}
+
+	// A standalone organization really was created by Create, so destroying it here
+	// is symmetric.
+	if err := r.client.Delete(ctx, state.Id.ValueString()); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Deleting CircleCI Organization",
 			"Could not delete organization, unexpected error: "+err.Error(),
 		)
+
 		return
 	}
+}
+
+// organizationIsStandalone reports whether vcsType denotes a CircleCI-native
+// ("standalone") organization, whose slug looks like `circleci/<uuid>`.
+//
+// Only for these does POST /api/v2/organization genuinely create an
+// organization; every other value resolves an organization that already exists
+// on the VCS.
+func organizationIsStandalone(vcsType string) bool {
+	return strings.EqualFold(strings.TrimSpace(vcsType), "circleci")
 }
 
 // Configure adds the provider configured client to the resource.

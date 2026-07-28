@@ -1,0 +1,40 @@
+---
+page_title: "circleci_group_membership Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches the users that are members of a CircleCI group.
+---
+
+# circleci_group_membership (Data Source)
+
+Fetches the users that are members of a CircleCI group.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+This data source uses
+`/api/v2/organizations/{organization_id}/groups/{group_id}/users`, which sits
+under the `/api/v2/organizations/{organization_id}/groups` prefix that a CircleCI
+Server installation forwards to the public API service, so it works against both
+Cloud and Server.
+
+~> **This API is not part of the published CircleCI OpenAPI specification** and
+may change without notice.
+
+~> **Only the first page of members is returned.** The response carries a
+`next_page_token`, but the endpoint does not forward a page token to the service
+behind it, so requesting a later page returns the first page again. There is no
+way to read past the first page, and the provider does not try.
+
+Members are exposed two ways: `user_ids` is the flat set of UUIDs that the
+`circleci_group_membership` resource consumes, and `members` carries the display
+fields the API returns alongside each id.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_group_membership/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

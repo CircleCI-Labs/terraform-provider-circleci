@@ -25,7 +25,11 @@ resource "circleci_context_restriction" "example" {
 ### Required
 
 - `context_id` (String) The ID of the context to restrict. Changing this value forces a new resource to be created.
-- `type` (String) The type of restriction (e.g., `project`). Changing this value forces a new resource to be created.
+- `type` (String) The kind of restriction: `project` restricts the context to a project, `expression` restricts it with an expression, and `group` restricts it to a group.
+
+~> `group` is ambiguous and not fully documented by the API. CircleCI has two unrelated concepts called "group": VCS security groups, which the contexts documentation states are available for `github` type organizations only and require the GitHub OAuth integration; and CircleCI RBAC groups (see `circleci_group`), which require a `circleci` type organization. Those requirements are mutually exclusive, and the API does not say which one `restriction_type = "group"` expects. Verify against your organization before relying on it.
+
+Changing this value forces a new resource to be created.
 - `value` (String) The value associated with the restriction type (e.g., the project ID). Changing this value forces a new resource to be created.
 
 ### Read-Only

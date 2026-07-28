@@ -1,0 +1,81 @@
+---
+page_title: "circleci_project_settings Resource - circleci"
+subcategory: ""
+description: |-
+  Manages the advanced settings of an existing CircleCI project.
+---
+
+# circleci_project_settings (Resource)
+
+Manages the advanced settings of an existing CircleCI project: the toggles found under Project Settings > Advanced in the CircleCI web application.
+
+Works against both **CircleCI Cloud and CircleCI Server** — project settings are served by the v2 API, which both provide.
+
+## `circleci_project_settings` or `circleci_project`?
+
+Use **one or the other for a given project, never both.** Both write the same settings record through the same API, so two resources managing one project will fight: each apply reverts what the other last wrote, and the diff never settles.
+
+| | `circleci_project` | `circleci_project_settings` |
+| --- | --- | --- |
+| Creates and destroys the project | yes | no |
+| Manages the project's settings | yes, all of them | yes, only the ones you name |
+| Works for a project Terraform did not create | no | yes |
+| Settings left out of the configuration | written as `false` | left untouched |
+
+So: manage a project Terraform creates with `circleci_project`, and manage a project that already exists with `circleci_project_settings`.
+
+## Only what you name is written
+
+Every setting is optional and none is computed. A setting the configuration does not mention is left out of the request entirely, stays `null` in state, and keeps whatever value CircleCI holds for it. That has three consequences worth knowing:
+
+- **Nothing is adopted silently.** Reading the project's current settings into state would make "not managed" indistinguishable from "managed as `false`", and the next apply would start writing settings you never asked for.
+- **Two configurations may manage disjoint settings** on the same project without fighting, which is what makes this usable alongside a team that manages other settings by hand.
+- **Removing a setting from the configuration stops managing it; it does not revert it.** CircleCI has no route that restores a default, so the setting keeps the value Terraform last applied. The provider warns when this happens.
+
+## Example Usage
+
+```terraform
+# Manage the advanced settings of a project that already exists in CircleCI.
+# Only the settings named here are written; everything else is left as it is.
+resource "circleci_project_settings" "example" {
+  slug = "github/my-org/my-repo"
+
+  auto_cancel_builds            = true
+  build_fork_prs                = false
+  forks_receive_secret_env_vars = false
+  set_github_status             = true
+}
+
+# Build only branches with an open pull request, with exceptions.
+resource "circleci_project_settings" "prs_only" {
+  slug = "github/my-org/my-other-repo"
+
+  build_prs_only           = true
+  pr_only_branch_overrides = ["main", "develop"]
+}
+
+# Adopt a project's settings without managing any of them yet. Useful as a first
+# step: import the resource, then add settings one at a time.
+resource "circleci_project_settings" "adopted" {
+  slug = "circleci/9a1b2c3d-4e5f-6789-abcd-ef0123456789/my-repo"
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the project slug (`vcs-type/org-name/repo-name`):
+
+```shell
+terraform import circleci_project_settings.example "github/my-org/my-repo"
+```
+
+The import records only the slug and leaves every setting `null`, so the first plan afterwards shows exactly the settings your configuration asks to manage rather than every setting the project happens to have.
+
+## Notes
+
+- **`oss` is only honoured for genuinely open source repositories.** CircleCI answers successfully and leaves the setting unchanged for anything else, so the provider compares what it asked for with what CircleCI reports and fails with an explanation rather than showing a diff that can never converge.
+- **`pr_only_branch_overrides` replaces the whole list.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches.
+- **`write_settings_requires_admin = true` can lock the provider out** of further changes if its token does not belong to an organization administrator.
+- **`terraform destroy` writes nothing.** Settings cannot be deleted or reset, so destroying this resource only drops it from state and the project keeps its current values.

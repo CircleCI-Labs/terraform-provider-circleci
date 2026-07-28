@@ -107,8 +107,16 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:            true,
 			},
 			"event_source_provider": schema.StringAttribute{
-				MarkdownDescription: "The event source provider. Must be one of: `github_app`, `github_server`, `webhook`, `schedule`.",
-				Required:            true,
+				MarkdownDescription: "The event source provider: `github_app`, `github_server`, `github_oauth`, `webhook` or `schedule`.\n\n" +
+					"~> The required attributes differ per provider, because this one endpoint covers " +
+					"several contracts. `event_name` is required for `webhook` and `schedule` only. " +
+					"`checkout_ref` and `config_ref` are required for `webhook` and `schedule`. " +
+					"`event_preset` is required for `github_oauth` and accepts only `all-pushes` or " +
+					"`only-build-prs` there, is optional for `github_app` and `github_server`, and must " +
+					"be omitted for `webhook` and `schedule`. `disabled` is unsupported for " +
+					"`github_oauth`, and `parameters` is supported only for `schedule`.\n\n" +
+					"GitLab and Bitbucket Cloud pipelines cannot be given triggers through this API.",
+				Required: true,
 			},
 			"event_source_repo_full_name": schema.StringAttribute{
 				MarkdownDescription: "The full name of the event source repository.",

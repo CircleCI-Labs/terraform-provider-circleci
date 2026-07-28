@@ -17,6 +17,7 @@ import (
 )
 
 func TestAccContextEnvironmentVariableResource(t *testing.T) {
+	contextID := testContextID(t)
 	name := fmt.Sprintf("N%s", rand.Text())
 	value := rand.Text()
 	resource.Test(t, resource.TestCase{
@@ -25,12 +26,12 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccContextEnvironmentVariableResourceConfig(name, value),
+				Config: testAccContextEnvironmentVariableResourceConfig(contextID, name, value),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
 						tfjsonpath.New("context_id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
@@ -46,12 +47,12 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 			},
 			// Update and Read testing
 			{
-				Config: testAccContextEnvironmentVariableResourceConfig("one", "second_value"),
+				Config: testAccContextEnvironmentVariableResourceConfig(contextID, "one", "second_value"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
 						tfjsonpath.New("context_id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
@@ -86,12 +87,12 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 			},
 			// Re-apply config after import to reconcile value in state
 			{
-				Config: testAccContextEnvironmentVariableResourceConfig("one", "second_value"),
+				Config: testAccContextEnvironmentVariableResourceConfig(contextID, "one", "second_value"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
 						tfjsonpath.New("context_id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
@@ -110,10 +111,10 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 	})
 }
 
-func testAccContextEnvironmentVariableResourceConfig(name, value string) string {
+func testAccContextEnvironmentVariableResourceConfig(contextID, name, value string) string {
 	return fmt.Sprintf(`
 data "circleci_context" "test_context" {
-  id = "e51158a2-f59c-4740-9eb4-d20609baa07e"
+  id = %[3]q
 }
 
 resource "circleci_context_environment_variable" "test_env" {
@@ -121,5 +122,5 @@ resource "circleci_context_environment_variable" "test_env" {
   name       = %[1]q
   value      = %[2]q
 }
-`, name, value)
+`, name, value, contextID)
 }

@@ -24,7 +24,7 @@ resource "circleci_runner_resource_class" "example" {
 
 ### Required
 
-- `organization_id` (String) The organization id.
+- `organization_id` (String) The UUID of the organization that owns the resource class.
 - `resource_class` (String) The resource class name in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.
 
 ### Optional

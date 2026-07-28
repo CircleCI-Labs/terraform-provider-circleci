@@ -11,6 +11,7 @@ import (
 	"github.com/CircleCI-Public/circleci-sdk-go/common"
 	"github.com/CircleCI-Public/circleci-sdk-go/project"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -28,24 +29,24 @@ var (
 
 // projectResourceModel maps the output schema.
 type projectResourceModel struct {
-	Id                        types.String `tfsdk:"id"`
-	Name                      types.String `tfsdk:"name"`
-	Slug                      types.String `tfsdk:"slug"`
-	OrganizationName          types.String `tfsdk:"organization_name"`
-	OrganizationSlug          types.String `tfsdk:"organization_slug"`
-	OrganizationId            types.String `tfsdk:"organization_id"`
-	VcsInfoUrl                types.String `tfsdk:"vcs_info_url"`
-	VcsInfoProvider           types.String `tfsdk:"vcs_info_provider"`
-	VcsInfoDefaultBranch      types.String `tfsdk:"vcs_info_default_branch"`
-	AutoCancelBuilds          types.Bool   `tfsdk:"auto_cancel_builds"`
-	BuildForkPrs              types.Bool   `tfsdk:"build_fork_prs"`
-	DisableSSH                types.Bool   `tfsdk:"disable_ssh"`
-	ForksReceiveSecretEnvVars types.Bool   `tfsdk:"forks_receive_secret_env_vars"`
-	//OSS                        types.Bool   `tfsdk:"oss"`
-	SetGithubStatus            types.Bool `tfsdk:"set_github_status"`
-	SetupWorkflows             types.Bool `tfsdk:"setup_workflows"`
-	WriteSettingsRequiresAdmin types.Bool `tfsdk:"write_settings_requires_admin"`
-	PROnlyBranchOverrides      types.List `tfsdk:"pr_only_branch_overrides"`
+	Id                         types.String `tfsdk:"id"`
+	Name                       types.String `tfsdk:"name"`
+	Slug                       types.String `tfsdk:"slug"`
+	OrganizationName           types.String `tfsdk:"organization_name"`
+	OrganizationSlug           types.String `tfsdk:"organization_slug"`
+	OrganizationId             types.String `tfsdk:"organization_id"`
+	VcsInfoUrl                 types.String `tfsdk:"vcs_info_url"`
+	VcsInfoProvider            types.String `tfsdk:"vcs_info_provider"`
+	VcsInfoDefaultBranch       types.String `tfsdk:"vcs_info_default_branch"`
+	AutoCancelBuilds           types.Bool   `tfsdk:"auto_cancel_builds"`
+	BuildForkPrs               types.Bool   `tfsdk:"build_fork_prs"`
+	DisableSSH                 types.Bool   `tfsdk:"disable_ssh"`
+	ForksReceiveSecretEnvVars  types.Bool   `tfsdk:"forks_receive_secret_env_vars"`
+	OSS                        types.Bool   `tfsdk:"oss"`
+	SetGithubStatus            types.Bool   `tfsdk:"set_github_status"`
+	SetupWorkflows             types.Bool   `tfsdk:"setup_workflows"`
+	WriteSettingsRequiresAdmin types.Bool   `tfsdk:"write_settings_requires_admin"`
+	PROnlyBranchOverrides      types.List   `tfsdk:"pr_only_branch_overrides"`
 }
 
 // NewProjectResource is a helper function to simplify the provider implementation.
@@ -130,10 +131,14 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:            true,
 				Computed:            true,
 			},
-			/*"oss": schema.BoolAttribute{
-				MarkdownDescription: "Whether the project is open source.",
-				Optional:            true,
-			},*/
+			"oss": schema.BoolAttribute{
+				MarkdownDescription: "Whether the project is free and open source, which grants additional " +
+					"credits and makes builds visible to everyone. CircleCI only honours `true` for a " +
+					"repository that is genuinely open source; it reports success and leaves the setting " +
+					"unchanged otherwise, which this resource surfaces as an error.",
+				Optional: true,
+				Computed: true,
+			},
 			"set_github_status": schema.BoolAttribute{
 				MarkdownDescription: "Whether to set GitHub commit status on builds.",
 				Optional:            true,
@@ -201,11 +206,14 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		newAdvancedSettings.DisableSSH = common.Bool(false)
 	}
 
-	/*if !plan.OSS.IsNull() {
+	// Kept before the API response overwrites plan.OSS, so that what was asked
+	// for can be compared with what CircleCI actually applied.
+	planOSS := plan.OSS
+	if !plan.OSS.IsNull() {
 		newAdvancedSettings.OSS = plan.OSS.ValueBoolPointer()
 	} else {
 		newAdvancedSettings.OSS = common.Bool(false)
-	}*/
+	}
 
 	if !plan.ForksReceiveSecretEnvVars.IsNull() {
 		newAdvancedSettings.ForksReceiveSecretEnvVars = plan.ForksReceiveSecretEnvVars.ValueBoolPointer()
@@ -228,10 +236,10 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	if !plan.PROnlyBranchOverrides.IsNull() {
-		prElements := plan.PROnlyBranchOverrides.Elements()
-		branches := make([]string, len(prElements))
-		for index, branch := range prElements {
-			branches[index] = branch.String()
+		branches, diags := branchOverrides(ctx, plan.PROnlyBranchOverrides)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
 		}
 		newAdvancedSettings.PROnlyBranchOverrides = branches
 	}
@@ -247,13 +255,18 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.VcsInfoProvider = types.StringValue(newCreatedProject.VcsInfo.Provider)
 	plan.VcsInfoDefaultBranch = types.StringValue(newCreatedProject.VcsInfo.DefaultBranch)
 
-	slug := strings.Split(newCreatedProject.Slug, "/")
+	vcsType, orgName, projectName, slugDiags := parseProjectSlug(newCreatedProject.Slug)
+	resp.Diagnostics.Append(slugDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	newProjectSettings, err := r.client.UpdateSettings(
 		ctx,
 		project.ProjectSettings{Advanced: newAdvancedSettings},
-		slug[0],
-		slug[1],
-		slug[2],
+		vcsType,
+		orgName,
+		projectName,
 	)
 
 	if err != nil {
@@ -268,7 +281,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.BuildForkPrs = types.BoolPointerValue(newProjectSettings.Advanced.BuildForkPrs)
 	plan.DisableSSH = types.BoolPointerValue(newProjectSettings.Advanced.DisableSSH)
 	plan.ForksReceiveSecretEnvVars = types.BoolPointerValue(newProjectSettings.Advanced.ForksReceiveSecretEnvVars)
-	//plan.OSS = types.BoolPointerValue(newProjectSettings.Advanced.OSS)
+	plan.OSS = types.BoolPointerValue(newProjectSettings.Advanced.OSS)
 	plan.SetGithubStatus = types.BoolPointerValue(newProjectSettings.Advanced.SetGithubStatus)
 	plan.SetupWorkflows = types.BoolPointerValue(newProjectSettings.Advanced.SetupWorkflows)
 	plan.WriteSettingsRequiresAdmin = types.BoolPointerValue(newProjectSettings.Advanced.WriteSettingsRequiresAdmin)
@@ -294,6 +307,10 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	// Reported only after the state is saved: the project exists by now, so
+	// returning early here would leave it behind with nothing tracking it.
+	checkOSSApplied(planOSS, newProjectSettings.Advanced.OSS, newCreatedProject.Slug, &resp.Diagnostics)
 }
 
 // Read refreshes the Terraform state with the latest data.
@@ -334,12 +351,17 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	projectState.VcsInfoProvider = types.StringValue(apiProject.VcsInfo.Provider)
 	projectState.VcsInfoUrl = types.StringValue(apiProject.VcsInfo.VcsUrl)
 
-	slug := strings.Split(projectState.Slug.ValueString(), "/")
+	vcsType, orgName, projectName, slugDiags := parseProjectSlug(projectState.Slug.ValueString())
+	resp.Diagnostics.Append(slugDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	projectSettings, err := r.client.GetSettings(
 		ctx,
-		slug[0],
-		slug[1],
-		slug[2],
+		vcsType,
+		orgName,
+		projectName,
 	)
 
 	if err != nil {
@@ -353,7 +375,7 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	projectState.BuildForkPrs = types.BoolPointerValue(projectSettings.Advanced.BuildForkPrs)
 	projectState.DisableSSH = types.BoolPointerValue(projectSettings.Advanced.DisableSSH)
 	projectState.ForksReceiveSecretEnvVars = types.BoolPointerValue(projectSettings.Advanced.ForksReceiveSecretEnvVars)
-	//projectState.OSS = types.BoolPointerValue(projectSettings.Advanced.OSS)
+	projectState.OSS = types.BoolPointerValue(projectSettings.Advanced.OSS)
 	projectState.SetGithubStatus = types.BoolPointerValue(projectSettings.Advanced.SetGithubStatus)
 	projectState.SetupWorkflows = types.BoolPointerValue(projectSettings.Advanced.SetupWorkflows)
 	projectState.WriteSettingsRequiresAdmin = types.BoolPointerValue(projectSettings.Advanced.WriteSettingsRequiresAdmin)
@@ -386,26 +408,32 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	prOnlybranchOverrides := make([]string, len(plan.PROnlyBranchOverrides.Elements()))
-	for index, elem := range plan.PROnlyBranchOverrides.Elements() {
-		prOnlybranchOverrides[index] = elem.String()
+	prOnlybranchOverrides, diags := branchOverrides(ctx, plan.PROnlyBranchOverrides)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 	advanceSettings := project.AdvanceSettings{
-		AutocancelBuilds:          plan.AutoCancelBuilds.ValueBoolPointer(),
-		BuildForkPrs:              plan.BuildForkPrs.ValueBoolPointer(),
-		DisableSSH:                plan.DisableSSH.ValueBoolPointer(),
-		ForksReceiveSecretEnvVars: plan.ForksReceiveSecretEnvVars.ValueBoolPointer(),
-		//OSS:                        plan.OSS.ValueBoolPointer(),
+		AutocancelBuilds:           plan.AutoCancelBuilds.ValueBoolPointer(),
+		BuildForkPrs:               plan.BuildForkPrs.ValueBoolPointer(),
+		DisableSSH:                 plan.DisableSSH.ValueBoolPointer(),
+		ForksReceiveSecretEnvVars:  plan.ForksReceiveSecretEnvVars.ValueBoolPointer(),
+		OSS:                        plan.OSS.ValueBoolPointer(),
 		SetGithubStatus:            plan.SetGithubStatus.ValueBoolPointer(),
 		SetupWorkflows:             plan.SetupWorkflows.ValueBoolPointer(),
 		WriteSettingsRequiresAdmin: plan.WriteSettingsRequiresAdmin.ValueBoolPointer(),
 		PROnlyBranchOverrides:      prOnlybranchOverrides,
 	}
-	slug := strings.Split(state.Slug.ValueString(), "/")
+	vcsType, orgName, projectName, slugDiags := parseProjectSlug(state.Slug.ValueString())
+	resp.Diagnostics.Append(slugDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	projectSettings := project.ProjectSettings{
 		Advanced: advanceSettings,
 	}
-	updatedProject, err := r.client.UpdateSettings(ctx, projectSettings, slug[0], slug[1], slug[2])
+	updatedProject, err := r.client.UpdateSettings(ctx, projectSettings, vcsType, orgName, projectName)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Update CircleCI project settings for project: "+state.Slug.String(),
@@ -418,7 +446,7 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	state.BuildForkPrs = types.BoolPointerValue(updatedProject.Advanced.BuildForkPrs)
 	state.DisableSSH = types.BoolPointerValue(updatedProject.Advanced.DisableSSH)
 	state.ForksReceiveSecretEnvVars = types.BoolPointerValue(updatedProject.Advanced.ForksReceiveSecretEnvVars)
-	//state.OSS = types.BoolPointerValue(updatedProject.Advanced.OSS)
+	state.OSS = types.BoolPointerValue(updatedProject.Advanced.OSS)
 	state.SetGithubStatus = types.BoolPointerValue(updatedProject.Advanced.SetGithubStatus)
 	state.SetupWorkflows = types.BoolPointerValue(updatedProject.Advanced.SetupWorkflows)
 	state.WriteSettingsRequiresAdmin = types.BoolPointerValue(updatedProject.Advanced.WriteSettingsRequiresAdmin)
@@ -433,6 +461,10 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+
+	// Reported after the state is saved, for the same reason as in Create: the
+	// other settings were applied and must not be lost with the error.
+	checkOSSApplied(plan.OSS, updatedProject.Advanced.OSS, state.Slug.ValueString(), &resp.Diagnostics)
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
@@ -485,4 +517,45 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	if resp.Diagnostics.HasError() {
 		return
 	}
+}
+
+// branchOverrides converts a Terraform list of branch names into plain strings.
+//
+// It exists because attr.Value.String() renders a value the way Terraform
+// displays it, so a branch name comes back quoted (`"main"` rather than `main`).
+// Sending that to the API set literally-quoted branch names, which is why
+// pr_only_branch_overrides did not work.
+func branchOverrides(ctx context.Context, list types.List) ([]string, diag.Diagnostics) {
+	if list.IsNull() || list.IsUnknown() {
+		return nil, nil
+	}
+
+	branches := make([]string, 0, len(list.Elements()))
+	diags := list.ElementsAs(ctx, &branches, false)
+
+	return branches, diags
+}
+
+// parseProjectSlug splits a project slug into its VCS provider, organization and
+// project name.
+//
+// A slug is always three segments, e.g. "gh/acme/repo". Indexing the split
+// result directly panics on anything shorter, which crashes the provider process
+// and surfaces to the practitioner as an opaque plugin crash rather than an
+// error they can act on.
+func parseProjectSlug(slug string) (vcsType, orgName, projectName string, diags diag.Diagnostics) {
+	parts := strings.Split(slug, "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		diags.AddError(
+			"Invalid CircleCI project slug",
+			fmt.Sprintf(
+				"Expected a project slug of the form \"vcs-type/org-name/repo-name\", such as \"gh/acme/repo\", but got %q.",
+				slug,
+			),
+		)
+
+		return "", "", "", diags
+	}
+
+	return parts[0], parts[1], parts[2], diags
 }

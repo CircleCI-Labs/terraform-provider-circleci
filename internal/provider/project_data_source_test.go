@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -15,43 +16,49 @@ import (
 )
 
 func TestAccProjectDataSource(t *testing.T) {
+	organizationID := testOrgID(t)
+	organizationName := testOrgName(t)
+	organizationSlug := testOrgSlug(t)
+	projectID := testStaticProjectID(t)
+	projectName := testStaticProjectName(t)
+	projectSlug := testStaticProjectSlug(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testProjectDataSourceConfig,
+				Config: testProjectDataSourceConfig(projectSlug),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("id"),
-						knownvalue.StringExact("e2e8ae23-57dc-4e95-bc67-633fdeb4ac33"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("name"),
-						knownvalue.StringExact("test-project"),
+						knownvalue.StringExact(projectName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("organization_id"),
-						knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+						knownvalue.StringExact(organizationID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("organization_name"),
-						knownvalue.StringExact("cci-terraform-test"),
+						knownvalue.StringExact(organizationName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q"),
+						knownvalue.StringExact(organizationSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q/V29Cenkg8EaiSZARmWm8Lz"),
+						knownvalue.StringExact(projectSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
@@ -66,7 +73,7 @@ func TestAccProjectDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_project.test_project",
 						tfjsonpath.New("vcs_info").AtMapKey("vcs_url"),
-						knownvalue.StringExact("//circleci.com/3ddcf1d1-7f5f-4139-8cef-71ad0921a968/e2e8ae23-57dc-4e95-bc67-633fdeb4ac33"),
+						knownvalue.StringExact(fmt.Sprintf("//circleci.com/%s/%s", organizationID, projectID)),
 					),
 				},
 			},
@@ -74,15 +81,17 @@ func TestAccProjectDataSource(t *testing.T) {
 	})
 }
 
-const testProjectDataSourceConfig = `
+func testProjectDataSourceConfig(projectSlug string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
 
 data "circleci_project" "test_project" {
-  slug = "circleci/8e4z1Akd74woxagxnvLT5q/V29Cenkg8EaiSZARmWm8Lz"
+  slug = %[1]q
 }
-`
+`, projectSlug)
+}
 
 func TestProjectDataSourceSchema(t *testing.T) {
 	t.Parallel()

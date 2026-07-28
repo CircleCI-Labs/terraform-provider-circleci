@@ -9,6 +9,8 @@ description: |-
 
 Manages a CircleCI project and its advanced settings.
 
+Use this for a project Terraform creates. For a project that **already exists**, use [`circleci_project_settings`](project_settings) instead: it manages only the settings you name, whereas this resource owns the project's whole settings record and writes `false` for any setting the configuration leaves out. Never point both at the same project — they overwrite each other's changes on every apply.
+
 ## Example Usage
 
 ```terraform
@@ -16,14 +18,15 @@ resource "circleci_project" "example" {
   organization_id = "00000000-0000-0000-0000-000000000000"
   name            = "my-repo"
 
-  auto_cancel_builds          = true
-  build_fork_prs              = false
-  disable_ssh                 = true
+  auto_cancel_builds            = true
+  build_fork_prs                = false
+  disable_ssh                   = true
   forks_receive_secret_env_vars = false
-  set_github_status           = true
-  setup_workflows             = false
+  oss                           = false
+  set_github_status             = true
+  setup_workflows               = false
   write_settings_requires_admin = false
-  pr_only_branch_overrides    = ["main", "develop"]
+  pr_only_branch_overrides      = ["main", "develop"]
 }
 ```
 
@@ -41,6 +44,7 @@ resource "circleci_project" "example" {
 - `build_fork_prs` (Boolean) Whether to build pull requests from forked repositories.
 - `disable_ssh` (Boolean) Whether to disable SSH access to builds.
 - `forks_receive_secret_env_vars` (Boolean) Whether forked pull requests can access secret environment variables.
+- `oss` (Boolean) Whether the project is free and open source, which grants additional credits and makes builds visible to everyone. CircleCI only honours `true` for a repository that is genuinely open source; it reports success and leaves the setting unchanged otherwise, which this resource surfaces as an error.
 - `pr_only_branch_overrides` (List of String) List of branches that override the PR-only build setting.
 - `set_github_status` (Boolean) Whether to set GitHub commit status on builds.
 - `setup_workflows` (Boolean) Whether setup workflows are enabled.
@@ -63,3 +67,9 @@ Import is supported using the project slug (`vcs-type/org-name/repo-name`):
 ```shell
 terraform import circleci_project.example "github/my-org/my-repo"
 ```
+
+## Notes on `oss`
+
+CircleCI only honours `oss = true` for a project whose underlying repository is genuinely open source. For anything else it answers successfully and leaves the setting unchanged, so this resource compares what it asked for with what CircleCI reports and fails with an explanation rather than showing a diff that can never converge.
+
+Every other setting on this resource is written on create, including the ones the configuration leaves out — those are sent as their CircleCI default. Use [`circleci_project_settings`](project_settings) if you need a project's settings updated selectively.

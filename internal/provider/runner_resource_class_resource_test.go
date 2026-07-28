@@ -15,8 +15,8 @@ import (
 )
 
 func TestAccRunnerResourceClassResource(t *testing.T) {
-	organizationId := "3ddcf1d1-7f5f-4139-8cef-71ad0921a968"
-	resourceClass := "cci-terraform-test/acc-test-runner"
+	organizationId := testOrgID(t)
+	resourceClass := fmt.Sprintf("%s/acc-test-runner", testRunnerNamespace(t))
 	description := "Acceptance test runner resource class"
 	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -70,8 +70,8 @@ func TestAccRunnerResourceClassResource(t *testing.T) {
 }
 
 func TestAccRunnerResourceClassForceDelete(t *testing.T) {
-	organizationId := "3ddcf1d1-7f5f-4139-8cef-71ad0921a968"
-	resourceClass := "cci-terraform-test/acc-test-runner-force"
+	organizationId := testOrgID(t)
+	resourceClass := fmt.Sprintf("%s/acc-test-runner-force", testRunnerNamespace(t))
 	description := "Acceptance test runner resource class with force delete"
 
 	resource.Test(t, resource.TestCase{

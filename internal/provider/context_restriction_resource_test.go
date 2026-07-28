@@ -17,7 +17,9 @@ import (
 )
 
 func TestAccContextRestrictionResource(t *testing.T) {
-	//t.Skip("Might rise issues given concurrent executions")
+	//t.Skip("Might rise issues given concurrent executions").
+	contextID := testContextID(t)
+	projectID := testProjectID(t)
 	uuidRegex, err := regexp.Compile(`[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`)
 	if err != nil {
 		t.Fatalf("Regex to check UUID could not be created")
@@ -28,12 +30,12 @@ func TestAccContextRestrictionResource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccContextRestrictionResourceConfig("project", "7d4d46da-49d1-4b3a-9a1b-3356ddfa67d6"),
+				Config: testAccContextRestrictionResourceConfig(contextID, "project", projectID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_context_restriction.test_context_restriction",
 						tfjsonpath.New("context_id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_restriction.test_context_restriction",
@@ -43,7 +45,7 @@ func TestAccContextRestrictionResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_context_restriction.test_context_restriction",
 						tfjsonpath.New("value"),
-						knownvalue.StringExact("7d4d46da-49d1-4b3a-9a1b-3356ddfa67d6"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_restriction.test_context_restriction",
@@ -53,7 +55,7 @@ func TestAccContextRestrictionResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_context_restriction.test_context_restriction",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("7d4d46da-49d1-4b3a-9a1b-3356ddfa67d6"),
+						knownvalue.StringExact(projectID),
 					),
 					/*
 						statecheck.ExpectKnownValue(
@@ -92,10 +94,10 @@ func TestAccContextRestrictionResource(t *testing.T) {
 	})
 }
 
-func testAccContextRestrictionResourceConfig(sometype, value string) string {
+func testAccContextRestrictionResourceConfig(contextID, sometype, value string) string {
 	return fmt.Sprintf(`
 data "circleci_context" "test_context" {
-  id = "e51158a2-f59c-4740-9eb4-d20609baa07e"
+  id = %[3]q
 }
 
 resource "circleci_context_restriction" "test_context_restriction" {
@@ -103,5 +105,5 @@ resource "circleci_context_restriction" "test_context_restriction" {
 	type = %[1]q
 	value = %[2]q
 }
-`, sometype, value)
+`, sometype, value, contextID)
 }

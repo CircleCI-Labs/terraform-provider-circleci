@@ -1,0 +1,44 @@
+---
+page_title: "circleci_checkout_keys Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every checkout key of a CircleCI project.
+---
+
+# circleci_checkout_keys (Data Source)
+
+Fetches every checkout key of a CircleCI project, including keys created outside Terraform.
+
+Works against both **CircleCI Cloud and CircleCI Server** — checkout keys are served by the v2 API, which both provide.
+
+> **Not available for GitLab or GitHub App projects.** The CircleCI API only exposes checkout keys for projects integrated through GitHub OAuth or Bitbucket. A project whose slug starts with `circleci/` is a GitLab or GitHub App project, and requests for its checkout keys are rejected.
+
+> **Note:** A key created with `type = "user-key"` is reported by the API as `github-user-key`. This data source returns the API's own value; the `circleci_checkout_key` resource normalizes it back to `user-key` to match your configuration.
+
+## Example Usage
+
+```terraform
+data "circleci_checkout_keys" "all" {
+  project_slug = "github/my-org/my-repo"
+}
+
+# All fingerprints, for an add_ssh_keys step.
+output "fingerprints" {
+  value = [for key in data.circleci_checkout_keys.all.checkout_keys : key.fingerprint]
+}
+
+# Just the deploy keys, with SHA256 fingerprints.
+data "circleci_checkout_keys" "sha256" {
+  project_slug = "github/my-org/my-repo"
+  digest       = "sha256"
+}
+
+output "deploy_keys" {
+  value = [
+    for key in data.circleci_checkout_keys.sha256.checkout_keys : key.fingerprint
+    if key.type == "deploy-key"
+  ]
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}

@@ -23,7 +23,7 @@ func TestAccWebhookResource(t *testing.T) {
 		t.Fatal("Could not create Date Regex for testing.")
 	}
 	randName := rand.Text()
-	projectId := "61169e84-93ee-415d-8d65-ddf6dc0d2939"
+	projectId := testProjectID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -97,7 +97,7 @@ func TestAccWebhookResource(t *testing.T) {
 func TestAccWebhookResourceUpdate(t *testing.T) {
 	randName := rand.Text()
 	updatedName := rand.Text()
-	projectId := "61169e84-93ee-415d-8d65-ddf6dc0d2939"
+	projectId := testProjectID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,

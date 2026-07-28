@@ -9,6 +9,10 @@ description: |-
 
 Fetches information about a CircleCI pipeline definition.
 
+~> **Not available on CircleCI Server** This data source uses the
+`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
+Server installation does not expose.
+
 ## Example Usage
 
 ```terraform

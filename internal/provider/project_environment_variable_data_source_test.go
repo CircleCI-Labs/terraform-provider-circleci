@@ -15,6 +15,7 @@ import (
 )
 
 func TestAccProjectEnvironmentVariableDataSource(t *testing.T) {
+	projectSlug := testProjectSlug(t)
 	name := fmt.Sprintf("N%s", rand.Text())
 	value := rand.Text()
 	resource.Test(t, resource.TestCase{
@@ -23,7 +24,7 @@ func TestAccProjectEnvironmentVariableDataSource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Read testing - create a resource first, then read it via data source
 			{
-				Config: testAccProjectEnvironmentVariableDataSourceConfig(name, value, "circleci/8e4z1Akd74woxagxnvLT5q/CzMcAU8dvQo4FJhyj87QsA"),
+				Config: testAccProjectEnvironmentVariableDataSourceConfig(name, value, projectSlug),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_project_environment_variable.test",
@@ -33,7 +34,7 @@ func TestAccProjectEnvironmentVariableDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_project_environment_variable.test",
 						tfjsonpath.New("project_slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q/CzMcAU8dvQo4FJhyj87QsA"),
+						knownvalue.StringExact(projectSlug),
 					),
 				},
 			},

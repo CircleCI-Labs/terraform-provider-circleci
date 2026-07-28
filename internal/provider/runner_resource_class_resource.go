@@ -6,17 +6,46 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/CircleCI-Public/circleci-sdk-go/runner"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// Runner administration is served by a separate origin (https://runner.circleci.com
+// on Cloud, the Server host on CircleCI Server) and is plumbed through the
+// provider's runner_host attribute into runner.NewServiceWithBaseURL.
+//
+// Canonical surface: every runner resource and data source in this provider
+// deliberately targets the established `{runner_host}/api/v3/runner/...` surface
+// (`/runner/resource`, `/runner/token`, `/runner/tasks`). A newer surface exists at
+// `circleci.com/api/v3/runner/resource-classes` (plural, with an `/update` action),
+// but it is being actively reshaped (the API PRs #1115/#1137), so it is
+// intentionally NOT used here. Do not migrate until that surface is stable and the
+// SDK exposes it; the existing surface is the one CircleCI Server also serves.
+//
+// Limitation: the circleci-sdk-go runner service returns untyped errors, so
+// internal/circleci.IsNotFound cannot classify them. Runner code therefore cannot
+// distinguish a 404 from any other failure, and must not string-match error text.
+// A missing resource class is detected by its absence from a list response instead.
+
+// runnerOrgIDPattern recognises the UUID that the runner API expects for
+// organization identifiers. The runner API takes a UUID only — it does not accept
+// an organization slug — so catching the wrong shape in the plan gives a better
+// error than the API's 400.
+var runnerOrgIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// runnerResourceClassPattern recognises a "namespace/name" resource class.
+var runnerResourceClassPattern = regexp.MustCompile(`^[^/]+/[^/]+$`)
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -62,12 +91,18 @@ func (r *runnerResourceClassResource) Schema(_ context.Context, _ resource.Schem
 				},
 			},
 			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The organization id.",
+				MarkdownDescription: "The UUID of the organization that owns the resource class.",
 				Required:            true,
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
+				},
 			},
 			"resource_class": schema.StringAttribute{
 				MarkdownDescription: "The resource class name in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.",
 				Required:            true,
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(runnerResourceClassPattern, "must be in the format 'namespace/name'"),
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
@@ -101,9 +136,12 @@ func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.C
 		return
 	}
 
+	// organization_id is Required in the schema and the API rejects a create
+	// without org_id, so it has to be sent here.
 	createReq := runner.CreateResourceClassRequest{
-		ResourceClass: plan.ResourceClass.ValueString(),
-		Description:   plan.Description.ValueString(),
+		OrganizationID: plan.OrganizationId.ValueString(),
+		ResourceClass:  plan.ResourceClass.ValueString(),
+		Description:    plan.Description.ValueString(),
 	}
 
 	rc, err := r.client.CreateResourceClass(ctx, createReq)
@@ -143,7 +181,10 @@ func (r *runnerResourceClassResource) Read(ctx context.Context, req resource.Rea
 	}
 	namespace := rcName[:slashIdx]
 
-	classes, err := r.client.ListResourceClasses(ctx, namespace, "")
+	// Scope the list by organization as well as namespace. organization_id is null
+	// immediately after an import (it is not part of the import ID), in which case
+	// the namespace filter alone is used.
+	classes, err := r.client.ListResourceClasses(ctx, namespace, state.OrganizationId.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner resource classes",

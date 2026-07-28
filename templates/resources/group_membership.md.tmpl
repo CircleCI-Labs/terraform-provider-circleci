@@ -1,0 +1,75 @@
+---
+page_title: "circleci_group_membership Resource - circleci"
+subcategory: ""
+description: |-
+  Manages the full set of users in a CircleCI group.
+---
+
+# circleci_group_membership (Resource)
+
+Manages the full set of users in a CircleCI group. Every member of a group
+inherits the project and context permissions granted to that group.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+Group membership uses the
+`/api/v2/organizations/{organization_id}/groups/{group_id}/users` and
+`.../remove_users` endpoints. These sit under the
+`/api/v2/organizations/{organization_id}/groups` prefix, which is one of the few
+paths a CircleCI Server installation forwards to the public API service, so this
+resource works against both Cloud and Server.
+
+~> **This API is not part of the published CircleCI OpenAPI specification** and
+may change without notice. It is not documented publicly rather than on the public
+API reference, so treat it as less stable than the rest of the provider.
+
+## Exclusive ownership
+
+!> **This resource owns the group's entire membership.** It is modelled on
+`aws_iam_group_membership`: `user_ids` is the complete member list, not a set of
+additions. Any user added to the group outside Terraform is removed on the next
+apply.
+
+Consequences to plan around:
+
+* Declare at most **one** `circleci_group_membership` per `group_id`. Two of them
+  pointing at the same group will fight, each removing the other's users on every
+  apply.
+* Do not manage the same group's membership in the CircleCI web UI. Changes made
+  there show up as drift and are reverted.
+* Destroying this resource removes the users it manages from the group but leaves
+  the group itself in place. Use `circleci_group` to manage the group.
+
+Members are converged with a delta rather than a wholesale replacement, because
+the API offers only bulk add and bulk remove actions and no way to set a
+membership outright. Terraform reads the group's current members, then issues at
+most one remove call and one add call for the difference. Members that are both
+configured and already present are left untouched.
+
+## Identifying users
+
+Users are addressed by **UUID**. A login, username or email address is not
+accepted by the add and remove endpoints. Use the
+`circleci_group_membership` data source, or the organization's members page in the
+web UI, to find a user's UUID.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_group_membership/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using `organization_id/group_id`. A group id is only unique
+within its organization, so both are required:
+
+```shell
+terraform import circleci_group_membership.developers "<organization_id>/<group_id>"
+```
+
+After import, the group's current members are recorded as `user_ids`.

@@ -18,6 +18,8 @@ import (
 )
 
 func TestAccPipelineResource(t *testing.T) {
+	projectID := testProjectID(t)
+	repoExternalID := testGithubAppRepoExternalID(t)
 	uuidRegex, err := regexp.Compile(`[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`)
 	if err != nil {
 		t.Fatalf("Regex to check UUID could not be created")
@@ -33,12 +35,12 @@ func TestAccPipelineResource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccPipelineResourceConfig("61169e84-93ee-415d-8d65-ddf6dc0d2939", pipelineName, "original description"),
+				Config: testAccPipelineResourceConfig(projectID, repoExternalID, pipelineName, "original description"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("61169e84-93ee-415d-8d65-ddf6dc0d2939"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline",
@@ -58,12 +60,12 @@ func TestAccPipelineResource(t *testing.T) {
 				},
 			},
 			{
-				Config: testAccPipelineResourceConfig("61169e84-93ee-415d-8d65-ddf6dc0d2939", pipelineName, "updated description"),
+				Config: testAccPipelineResourceConfig(projectID, repoExternalID, pipelineName, "updated description"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("61169e84-93ee-415d-8d65-ddf6dc0d2939"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline",
@@ -110,6 +112,8 @@ func TestAccPipelineResource(t *testing.T) {
 }
 
 func TestAccPipelineResourceGithubServer(t *testing.T) {
+	projectID := testGithubServerProjectID(t)
+	repoExternalID := testGithubServerRepoExternalID(t)
 	uuidRegex, err := regexp.Compile(`[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`)
 	if err != nil {
 		t.Fatalf("Regex to check UUID could not be created")
@@ -125,12 +129,12 @@ func TestAccPipelineResourceGithubServer(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccPipelineResourceGithubServerConfig("20209578-aa1c-4b4c-9ca5-f6e38a47cf73", pipelineName, "original description"),
+				Config: testAccPipelineResourceGithubServerConfig(projectID, repoExternalID, pipelineName, "original description"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline_github_server",
 						tfjsonpath.New("project_id"),
-						knownvalue.StringExact("20209578-aa1c-4b4c-9ca5-f6e38a47cf73"),
+						knownvalue.StringExact(projectID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline_github_server",
@@ -150,7 +154,7 @@ func TestAccPipelineResourceGithubServer(t *testing.T) {
 				},
 			},
 			{
-				Config: testAccPipelineResourceGithubServerConfig("20209578-aa1c-4b4c-9ca5-f6e38a47cf73", pipelineName, "updated description"),
+				Config: testAccPipelineResourceGithubServerConfig(projectID, repoExternalID, pipelineName, "updated description"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline.test_pipeline_github_server",
@@ -181,7 +185,7 @@ func TestAccPipelineResourceGithubServer(t *testing.T) {
 	})
 }
 
-func testAccPipelineResourceGithubServerConfig(project_id, name, description string) string {
+func testAccPipelineResourceGithubServerConfig(project_id, repo_external_id, name, description string) string {
 	return fmt.Sprintf(`
 resource "circleci_pipeline" "test_pipeline_github_server" {
 	project_id = %[1]q
@@ -189,14 +193,14 @@ resource "circleci_pipeline" "test_pipeline_github_server" {
 	description = %[3]q
 	config_source_provider = "github_server"
 	config_source_file_path = "config_source_file_path"
-	config_source_repo_external_id = "2259"
+	config_source_repo_external_id = %[4]q
 	checkout_source_provider = "github_server"
-	checkout_source_repo_external_id = "2259"
+	checkout_source_repo_external_id = %[4]q
 }
-`, project_id, name, description)
+`, project_id, name, description, repo_external_id)
 }
 
-func testAccPipelineResourceConfig(project_id, name, description string) string {
+func testAccPipelineResourceConfig(project_id, repo_external_id, name, description string) string {
 	return fmt.Sprintf(`
 resource "circleci_pipeline" "test_pipeline" {
 	project_id = %[1]q
@@ -204,11 +208,9 @@ resource "circleci_pipeline" "test_pipeline" {
 	description = %[3]q
 	config_source_provider = "github_app"
 	config_source_file_path = "config_source_file_path"
-	//config_source_repo_full_name = "cci-terraform-test/test-repo"
-	config_source_repo_external_id = "952038793"
+	config_source_repo_external_id = %[4]q
 	checkout_source_provider = "github_app"
-	//checkout_source_repo_full_name = "cci-terraform-test/test-repo"
-	checkout_source_repo_external_id = "952038793"
+	checkout_source_repo_external_id = %[4]q
 }
-`, project_id, name, description)
+`, project_id, name, description, repo_external_id)
 }

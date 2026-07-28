@@ -6,9 +6,13 @@ version: '3'
 vars:
   SERVICE_NAME: terraform-provider-circleci
 
+  # Module path as declared in go.mod. Note it is NOT prefixed with a VCS host.
+  MODULE_PATH: terraform-provider-circleci
+
   RESULTS_DIR: test-reports
   TEST_REPORT: test-reports/tests.xml
   LINT_REPORT: test-reports/lint.xml
+  COVERAGE_PROFILE: test-reports/coverage.out
 
 tasks:
   build:
@@ -34,7 +38,9 @@ tasks:
     vars:
       ARGS: '{{default "." .CLI_ARGS}}'
     cmds:
-      - go tool gosimports -local "github.com/CircleCI-Public/{{.SERVICE_NAME}}" -w {{.ARGS}}
+      # -local must match the module path in go.mod (a bare "terraform-provider-circleci"),
+      # otherwise the provider's own imports are grouped with the standard library.
+      - go tool gosimports -local "{{.MODULE_PATH}}" -w {{.ARGS}}
 
   test:
     desc: Run the tests
@@ -79,15 +85,30 @@ tasks:
       TF_ACC: '1'
     cmds:
       - mkdir -p {{.RESULTS_DIR}}
-      - go tool gotestsum --junitfile="{{.TEST_REPORT}}" -- -race -cover -timeout 120m -count=1 {{.ARGS}}
+      # -coverprofile (not just -cover) so the coverage can be summarized and
+      # stored as an artifact rather than only printed per package.
+      - go tool gotestsum --junitfile="{{.TEST_REPORT}}" -- -race -coverprofile="{{.COVERAGE_PROFILE}}" -covermode=atomic -timeout 120m -count=1 {{.ARGS}}
 
   ci:diff:
-    desc: Check no diffs
+    desc: Check that generated files are up to date
     cmds:
       - task: generate
+      # generate-doc must run explicitly: the go:generate directives live in
+      # tools/, a separate module, so `task generate` in the root never reaches
+      # them and documentation drift would otherwise go unnoticed.
+      - task: generate-doc
       - task: fmt
       - task: mod-tidy
       - git diff --exit-code
+      # git diff ignores new files, so a brand-new resource whose docs were never
+      # committed would still pass. Fail on any untracked, non-ignored file.
+      - |
+        untracked="$(git ls-files --others --exclude-standard)"
+        if [ -n "$untracked" ]; then
+          echo "Generated files are not committed:" >&2
+          echo "$untracked" >&2
+          exit 1
+        fi
 
   generate-doc:
     desc: Run generation of terraform provider documentation

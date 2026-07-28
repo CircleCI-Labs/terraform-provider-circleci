@@ -1,0 +1,76 @@
+---
+page_title: "circleci_project_group Resource - circleci"
+subcategory: ""
+description: |-
+  Grants a CircleCI group a role on a project.
+---
+
+# circleci_project_group (Resource)
+
+Grants a CircleCI group a role on a project, so that every member of the group
+holds that role on the project. This is how project access is restricted to a
+group rather than to the whole organization.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | no |
+
+Project group grants use the
+`/api/v2/organizations/{organization_id}/projects/{project_id}/groups` endpoints.
+Unlike the plain `.../groups` routes used by `circleci_group` and
+`circleci_group_membership`, this path is **not** in the routes served a CircleCI
+Server installation forwards to the public API service: Server exposes only
+`/api/v2/organizations/[^/]+/groups`, and `.../projects/{project_id}/groups` is a
+different prefix. Against CircleCI Server these requests do not reach the API and
+fail. Use this resource on CircleCI Cloud only.
+
+~> **This API is not part of the published CircleCI OpenAPI specification** and
+may change without notice. It is not documented publicly rather than on the public
+API reference, so treat it as less stable than the rest of the provider.
+
+## Destroy does not revoke access
+
+!> **A group cannot be removed from a project by Terraform.** The API routes a
+list, an assign and a role update for project groups, but no revoke. Destroying
+this resource, or removing it from your configuration, drops it from Terraform
+state and emits a warning — the grant itself stays in place, and every member of
+the group keeps their access to the project.
+
+To actually revoke the access, remove the group from the project in the CircleCI
+web UI. Terraform will then see the grant as gone on the next refresh.
+
+Changing `role` is applied in place through the `/update-role` action, so a role
+change does not destroy and recreate the grant. Changing `organization_id`,
+`project_id` or `group_id` addresses a different grant and therefore forces
+replacement — which, given the above, leaves the old grant behind.
+
+## Roles
+
+`role` must be one of:
+
+| Role | Access |
+|---|---|
+| `project-admin` | Read and write access to the project and all its settings, and can manage other subjects' access. |
+| `project-contributor` | Read and write access to the project and some of its settings. |
+| `project-viewer` | Read-only access to the project and some of its settings. |
+
+The organization-level roles (`org-admin`, `org-contributor`, `org-viewer`) are
+not valid for a project grant and are rejected at plan time.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_project_group/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using `organization_id/project_id/group_id`. All three are
+required: the project and group ids are only meaningful within their
+organization, and the organization is part of the API route.
+
+```shell
+terraform import circleci_project_group.security "<organization_id>/<project_id>/<group_id>"
+```

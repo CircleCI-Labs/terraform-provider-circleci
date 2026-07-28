@@ -1,0 +1,71 @@
+---
+page_title: "circleci_organization_settings Resource - circleci"
+subcategory: ""
+description: |-
+  Manages organization-wide CircleCI settings.
+---
+
+# circleci_organization_settings (Resource)
+
+Manages organization-wide CircleCI settings.
+
+## Availability
+
+**CircleCI Cloud only.** These settings are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Configuring the provider with `deployment = "server"` and using this resource reports an explicit error rather than a confusing HTTP 404.
+
+## A settings resource, not a thing that gets created
+
+An organization's settings record exists for as long as the organization does, and every toggle always has a value. That shapes how this resource behaves:
+
+- **Create** reads the current settings and writes the toggles the configuration sets. It does not create anything.
+- **Destroy** removes the resource from Terraform state and makes no API call. CircleCI has no route that deletes or resets an organization's settings, so every toggle keeps the value it had.
+- **Only configured toggles are written.** A toggle omitted from the configuration is never sent, so CircleCI keeps whatever value it already has. Two `circleci_organization_settings` resources may therefore manage disjoint sets of toggles on the same organization.
+- **Removing a toggle from the configuration stops managing it, it does not revert it.** There is no route that restores a CircleCI default, so the value Terraform last applied stays in place. The provider emits a warning when this happens.
+
+## Settings that gate other resources
+
+Several toggles are prerequisites for other parts of this provider, and for CircleCI features generally:
+
+| Setting | What it gates |
+| --- | --- |
+| `is_runner_terms_of_service_accepted` | Self-hosted runner onboarding. `circleci_runner_resource_class` and `circleci_runner_token` cannot be used for the organization until this is `true`. |
+| `enable_private_orbs` | Private orbs. The organization can neither publish nor reference a private orb while this is `false`. |
+| `is_user_checkout_keys_disabled` | Checkout keys. When `true`, deploy keys are the only checkout credential, so projects that relied on a user key lose access to submodules and other private repositories. |
+| `is_context_group_restriction_required` | Context restrictions. When `true`, every context must carry at least one restriction, so contexts managed with `circleci_context_restriction` need their restrictions in place before this is enabled. |
+
+Note also that `is_running_disabled = true` stops the organization from running any pipeline at all.
+
+## Example Usage
+
+```terraform
+# Manage only the toggles you care about. Anything left out of the configuration
+# is not written, so CircleCI keeps whatever value it already has.
+resource "circleci_organization_settings" "example" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+
+  # Accepting the runner terms of service is what unlocks self-hosted runners for
+  # the organization; runner resource classes and tokens cannot be created until
+  # this is true.
+  is_runner_terms_of_service_accepted = true
+
+  # Private orbs must be enabled before the organization can publish or reference
+  # one.
+  enable_private_orbs = true
+
+  # Tighten up credentials and context usage.
+  is_user_checkout_keys_disabled        = true
+  is_context_group_restriction_required = true
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the organization ID:
+
+```shell
+terraform import circleci_organization_settings.example "00000000-0000-0000-0000-000000000000"
+```
+
+Import sets only `organization_id`; the toggles are left unset on purpose. The first plan after an import therefore shows exactly the toggles your configuration asks to manage, instead of adopting every setting the organization happens to have.

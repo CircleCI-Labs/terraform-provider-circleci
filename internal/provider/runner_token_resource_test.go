@@ -17,8 +17,8 @@ import (
 )
 
 func TestAccRunnerTokenResource(t *testing.T) {
-	organizationId := "3ddcf1d1-7f5f-4139-8cef-71ad0921a968"
-	resourceClass := "cci-terraform-test/acc-test-runner"
+	organizationId := testOrgID(t)
+	resourceClass := fmt.Sprintf("%s/acc-test-runner", testRunnerNamespace(t))
 	nickname := "acc-test-token"
 	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 

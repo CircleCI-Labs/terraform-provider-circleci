@@ -1,0 +1,30 @@
+---
+page_title: "circleci_url_orb_allow_list Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every entry in a CircleCI organization's URL orb allow list.
+---
+
+# circleci_url_orb_allow_list (Data Source)
+
+Fetches every entry in a CircleCI organization's URL orb allow list.
+
+## Availability
+
+**Available on CircleCI Cloud and CircleCI Server.** This data source uses the CircleCI v2 API, which both serve, so it works regardless of the provider's `deployment` setting.
+
+Related organization settings: `enable_private_orbs`, `enable_certified_public_orbs` and `enable_uncertified_public_orbs` on the `circleci_organization_settings` data source report which registry orbs an organization may use. They are separate from this allow list, which covers orbs fetched from a URL.
+
+## Example Usage
+
+```terraform
+data "circleci_url_orb_allow_list" "example" {
+  organization = "gh/acme"
+}
+
+output "allowed_orb_prefixes" {
+  value = [for entry in data.circleci_url_orb_allow_list.example.entries : entry.prefix]
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}

@@ -17,6 +17,8 @@ import (
 )
 
 func TestAccCircleCiProjectResource(t *testing.T) {
+	organizationID := testOrgID(t)
+	organizationSlug := testOrgSlug(t)
 	projectName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -26,7 +28,7 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 			{
 				Config: testAccProjectResourceConfig(
 					projectName,
-					"3ddcf1d1-7f5f-4139-8cef-71ad0921a968",
+					organizationID,
 					true,
 					true,
 				),
@@ -39,12 +41,12 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q"),
+						knownvalue.StringExact(organizationSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_id"),
-						knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+						knownvalue.StringExact(organizationID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
@@ -83,8 +85,8 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 
 func TestAccGithubProjectResource(t *testing.T) {
 	t.Skip()
-	//projectName := "terraform-provider-test"
-	//orgId := "ec6887ec-7d44-4b31-b468-7e552408ee32"
+	//projectName := "terraform-provider-test".
+	//orgId := testGithubOrgID(t).
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -106,7 +108,7 @@ func TestAccGithubProjectResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("gh/david-montano-circleci"),
+						knownvalue.StringExact(testGithubOrgSlug(t)),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
@@ -140,6 +142,10 @@ func TestAccGithubProjectResource(t *testing.T) {
 
 func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 	t.Skip()
+	organizationID := testOrgID(t)
+	organizationSlug := testOrgSlug(t)
+	altOrganizationID := testAltOrgID(t)
+	altOrganizationSlug := testAltOrgSlug(t)
 	projectName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -149,7 +155,7 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 			{
 				Config: testAccProjectResourceConfig(
 					projectName,
-					"3ddcf1d1-7f5f-4139-8cef-71ad0921a968",
+					organizationID,
 					true,
 					true,
 				),
@@ -162,12 +168,12 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q"),
+						knownvalue.StringExact(organizationSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_id"),
-						knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+						knownvalue.StringExact(organizationID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
@@ -189,7 +195,7 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 			{
 				Config: testAccProjectResourceConfig(
 					projectName,
-					"ec6887ec-7d44-4b31-b468-7e552408ee32",
+					altOrganizationID,
 					true,
 					false,
 				),
@@ -202,12 +208,12 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("circleci/WkZnacg2YgztDh3uKUsRPD"),
+						knownvalue.StringExact(altOrganizationSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_id"),
-						knownvalue.StringExact("ec6887ec-7d44-4b31-b468-7e552408ee32"),
+						knownvalue.StringExact(altOrganizationID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
@@ -249,7 +255,8 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
 	t.Skip()
 	projectName := rand.Text()
-	orgId := "ec6887ec-7d44-4b31-b468-7e552408ee32"
+	orgId := testGithubOrgID(t)
+	orgSlug := testGithubOrgSlug(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -271,7 +278,7 @@ func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("gh/david-montano-circleci"),
+						knownvalue.StringExact(orgSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
@@ -301,7 +308,7 @@ func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact("gh/david-montano-circleci"),
+						knownvalue.StringExact(orgSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",

@@ -1,0 +1,20 @@
+---
+page_title: "circleci_runner_resource_classes Data Source - circleci"
+subcategory: ""
+description: |-
+  Lists CircleCI self-hosted runner resource classes.
+---
+
+# circleci_runner_resource_classes (Data Source)
+
+Lists CircleCI self-hosted runner resource classes, including ones created outside Terraform, filtered by organization and/or runner namespace. At least one filter must be set — the runner API rejects an unfiltered list.
+
+Use `circleci_runner_resource_class` (singular) to look a single resource class up by name.
+
+Works against both **CircleCI Cloud and CircleCI Server**. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it, so **Server users must set the provider's `runner_host` attribute** to their Server hostname.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_runner_resource_classes/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

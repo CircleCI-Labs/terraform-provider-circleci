@@ -22,6 +22,7 @@ func TestAccContextResource(t *testing.T) {
 	if err != nil {
 		t.Fatal("Could not create Date Regex for testing.")
 	}
+	organizationID := testOrgID(t)
 	randName := rand.Text()
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -29,7 +30,7 @@ func TestAccContextResource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccContextResourceConfig(randName),
+				Config: testAccContextResourceConfig(organizationID, randName),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_context.test_context",
@@ -39,7 +40,7 @@ func TestAccContextResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_context.test_context",
 						tfjsonpath.New("organization_id"),
-						knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+						knownvalue.StringExact(organizationID),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_context.test_context",
@@ -75,11 +76,11 @@ func TestAccContextResource(t *testing.T) {
 	})
 }
 
-func testAccContextResourceConfig(name string) string {
+func testAccContextResourceConfig(organizationID, name string) string {
 	return fmt.Sprintf(`
   resource "circleci_context" "test_context" {
   name            = %[1]q
-  organization_id = "3ddcf1d1-7f5f-4139-8cef-71ad0921a968"
+  organization_id = %[2]q
 }
-`, name)
+`, name, organizationID)
 }

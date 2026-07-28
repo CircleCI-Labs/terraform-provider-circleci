@@ -9,11 +9,13 @@ import (
 	"strings"
 
 	ccicontext "github.com/CircleCI-Public/circleci-sdk-go/context"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -75,8 +77,26 @@ func (r *contextRestrictionResource) Schema(_ context.Context, _ resource.Schema
 				Computed:            true,
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "The type of restriction (e.g., `project`). Changing this value forces a new resource to be created.",
-				Required:            true,
+				MarkdownDescription: "The kind of restriction: `project` restricts the context to a " +
+					"project, `expression` restricts it with an expression, and `group` restricts " +
+					"it to a group.\n\n" +
+					"~> `group` is ambiguous and not fully documented by the API. CircleCI has two " +
+					"unrelated concepts called \"group\": VCS security groups, which the contexts " +
+					"documentation states are available for `github` type organizations only and " +
+					"require the GitHub OAuth integration; and CircleCI RBAC groups (see " +
+					"`circleci_group`), which require a `circleci` type organization. Those " +
+					"requirements are mutually exclusive, and the API does not say which one " +
+					"`restriction_type = \"group\"` expects. Verify against your organization " +
+					"before relying on it.\n\n" +
+					"Changing this value forces a new resource to be created.",
+				Required: true,
+				Validators: []validator.String{
+					// The API accepts all three; only `project` was previously
+					// documented, so `group` and `expression` worked but were
+					// undiscoverable. Constraining the set also turns a typo into a
+					// plan-time error rather than an API rejection at apply.
+					stringvalidator.OneOf("project", "group", "expression"),
+				},
 				PlanModifiers: []planmodifier.String{
 					// *** This tells Terraform to replace if 'type' changes ***
 					stringplanmodifier.RequiresReplace(),

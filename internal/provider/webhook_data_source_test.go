@@ -14,9 +14,10 @@ import (
 )
 
 func TestAccWebhookDataSource(t *testing.T) {
-	name := "webhook_test"
-	projectId := "61169e84-93ee-415d-8d65-ddf6dc0d2939"
-	webhookId := "06e947fc-b6f0-446c-b185-3699ea4e05e7"
+	name := testWebhookName(t)
+	url := testWebhookURL(t)
+	projectId := testProjectID(t)
+	webhookId := testWebhookID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -33,7 +34,7 @@ func TestAccWebhookDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_webhook.test_webhook_data",
 						tfjsonpath.New("url"),
-						knownvalue.StringExact("https://xyz.circleci.com"),
+						knownvalue.StringExact(url),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_webhook.test_webhook_data",

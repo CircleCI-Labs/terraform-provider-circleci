@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -15,18 +16,19 @@ import (
 )
 
 func TestAccProjectSettingsDataSource(t *testing.T) {
+	projectSlug := testStaticProjectSlug(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testProjectSettingsDataSourceConfig,
+				Config: testProjectSettingsDataSourceConfig(projectSlug),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_project_settings.test_project",
 						tfjsonpath.New("slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q/V29Cenkg8EaiSZARmWm8Lz"),
+						knownvalue.StringExact(projectSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_project_settings.test_project",
@@ -83,15 +85,17 @@ func TestAccProjectSettingsDataSource(t *testing.T) {
 	})
 }
 
-const testProjectSettingsDataSourceConfig = `
+func testProjectSettingsDataSourceConfig(projectSlug string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
 
 data "circleci_project_settings" "test_project" {
-  slug = "circleci/8e4z1Akd74woxagxnvLT5q/V29Cenkg8EaiSZARmWm8Lz"
+  slug = %[1]q
 }
-`
+`, projectSlug)
+}
 
 func TestProjectSettingsDataSourceSchema(t *testing.T) {
 	t.Parallel()

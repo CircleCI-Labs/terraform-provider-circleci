@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -13,28 +14,31 @@ import (
 )
 
 func TestAccOrganizationDataSource(t *testing.T) {
+	organizationID := testOrgID(t)
+	organizationName := testOrgName(t)
+	organizationSlug := testOrgSlug(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testOrganizationDataSourceConfig,
+				Config: testOrganizationDataSourceConfig(organizationID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_organization.test_organization",
 						tfjsonpath.New("id"),
-						knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+						knownvalue.StringExact(organizationID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_organization.test_organization",
 						tfjsonpath.New("name"),
-						knownvalue.StringExact("cci-terraform-test"),
+						knownvalue.StringExact(organizationName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_organization.test_organization",
 						tfjsonpath.New("slug"),
-						knownvalue.StringExact("circleci/8e4z1Akd74woxagxnvLT5q"),
+						knownvalue.StringExact(organizationSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_organization.test_organization",
@@ -47,12 +51,14 @@ func TestAccOrganizationDataSource(t *testing.T) {
 	})
 }
 
-const testOrganizationDataSourceConfig = `
+func testOrganizationDataSourceConfig(organizationID string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
-  
+
 data "circleci_organization" "test_organization" {
-  id = "3ddcf1d1-7f5f-4139-8cef-71ad0921a968"
+  id = %[1]q
 }
-`
+`, organizationID)
+}

@@ -9,6 +9,33 @@ description: |-
 
 Manages a CircleCI organization.
 
+## What `vcs_type` changes
+
+`vcs_type` does not just label the organization — it determines what this
+resource actually does, because the CircleCI API behaves differently per type.
+
+| `vcs_type` | Create | Destroy |
+|---|---|---|
+| `circleci` | Creates a new standalone organization (slug `circleci/<uuid>`) | Deletes it |
+| `github`, `bitbucket` | **Adopts an organization that already exists on the VCS.** The API verifies you are an admin and synchronizes CircleCI's record; it does not create anything on GitHub or Bitbucket | **Releases it from Terraform state and leaves it intact**, with a warning |
+
+~> **Destroying a VCS-backed organization is deliberately not supported** The
+CircleCI API's delete would tear down the organization's VCS connections and
+delete the organization along with *every project in it and all of their build
+history* — none of which Terraform created, and none of which it can restore.
+Since `create` only ever adopted such an organization, `destroy` releases it
+instead. To genuinely delete one, do it deliberately in the CircleCI web
+application.
+
+-> **Prefer the data source for organizations you did not create** If you only
+need an organization's ID to reference from other resources, use the
+[`circleci_organization` data source](../data-sources/organization). Adopting an
+organization as a *resource* puts it in your state file for no benefit.
+
+Creating a standalone organization is **not idempotent**: a duplicate name
+returns HTTP 409. If you lose your state file, re-applying will fail rather than
+re-adopt.
+
 ## Example Usage
 
 ```terraform

@@ -9,6 +9,22 @@ description: |-
 
 Manages a CircleCI pipeline trigger. Triggers define when and how a pipeline runs — via GitHub events, webhooks, or a cron schedule.
 
+A trigger with `event_source_provider = "schedule"` is the current way to run a
+pipeline on a cron schedule. See
+[Migrating scheduled pipelines](../guides/migrating-scheduled-pipelines) if you
+are moving off the legacy schedule API or a community provider's
+`circleci_schedule`.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server** This resource uses the
+`/api/v2/projects/{project_id}/triggers` endpoints, which a CircleCI Server
+installation does not expose.
+
 ## Example Usage
 
 ### GitHub App Trigger

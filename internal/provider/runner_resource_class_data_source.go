@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/CircleCI-Public/circleci-sdk-go/runner"
@@ -79,8 +78,7 @@ func (d *runnerResourceClassDataSource) Read(ctx context.Context, req datasource
 	}
 
 	organizationId := state.OrganizationId.ValueString()
-	uuidOrgRegex := regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	if !uuidOrgRegex.MatchString(organizationId) {
+	if !runnerOrgIDPattern.MatchString(organizationId) {
 		resp.Diagnostics.AddError(
 			"Invalid organization_id format",
 			fmt.Sprintf("Expected UUID format, got: %s", organizationId),

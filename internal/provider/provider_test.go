@@ -33,7 +33,12 @@ func testAccPreCheck(t *testing.T) {
 	// You can add code here to run prior to any test case execution, for example assertions
 	// about the appropriate environment variables being set are common to see in a pre-check
 	// function.
+	//
+	// Missing credentials skip rather than fail so that the suite stays usable
+	// for developers without a provisioned CircleCI test account. The
+	// fixture identifiers themselves are resolved by the helpers in
+	// acctest_test.go, which skip the same way.
 	if os.Getenv("CIRCLE_TOKEN") == "" {
-		t.Fatal("CIRCLE_TOKEN must be set for acceptance tests")
+		t.Skip("CIRCLE_TOKEN must be set for acceptance tests; see the Development section of README.md.")
 	}
 }

@@ -4,6 +4,8 @@
 package provider
 
 import (
+	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -13,28 +15,32 @@ import (
 )
 
 func TestAccContextDataSource(t *testing.T) {
+	contextID := testContextID(t)
+	contextName := testContextName(t)
+	organizationID := testOrgID(t)
+	dateRegex := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$`)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testContextDataSourceConfig,
+				Config: testContextDataSourceConfig(contextID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_context.test_context",
 						tfjsonpath.New("id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context.test_context",
 						tfjsonpath.New("name"),
-						knownvalue.StringExact("Static Context"),
+						knownvalue.StringExact(contextName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context.test_context",
 						tfjsonpath.New("created_at"),
-						knownvalue.StringExact("2025-03-25T15:46:59.349Z"),
+						knownvalue.StringRegexp(dateRegex),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context.test_context",
@@ -44,11 +50,11 @@ func TestAccContextDataSource(t *testing.T) {
 							[]knownvalue.Check{
 								knownvalue.MapPartial(
 									map[string]knownvalue.Check{
-										"id":         knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+										"id":         knownvalue.StringExact(organizationID),
 										"project_id": knownvalue.StringExact(""),
 										"name":       knownvalue.StringExact("All members"),
 										"type":       knownvalue.StringExact("group"),
-										"value":      knownvalue.StringExact("3ddcf1d1-7f5f-4139-8cef-71ad0921a968"),
+										"value":      knownvalue.StringExact(organizationID),
 									},
 								),
 							},
@@ -60,12 +66,14 @@ func TestAccContextDataSource(t *testing.T) {
 	})
 }
 
-const testContextDataSourceConfig = `
+func testContextDataSourceConfig(contextID string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
-  
+
 data "circleci_context" "test_context" {
-  id = "e51158a2-f59c-4740-9eb4-d20609baa07e"
+  id = %[1]q
 }
-`
+`, contextID)
+}

@@ -9,6 +9,17 @@ description: |-
 
 Manages a CircleCI pipeline definition. A pipeline definition specifies where to find the pipeline configuration and where to check out code from.
 
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server** This resource uses the
+`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
+Server installation does not expose. Server installations should define
+workflows in `.circleci/config.yml` instead.
+
 ## Example Usage
 
 ```terraform

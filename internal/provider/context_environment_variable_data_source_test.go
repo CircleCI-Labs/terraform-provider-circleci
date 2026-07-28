@@ -4,6 +4,8 @@
 package provider
 
 import (
+	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -13,43 +15,46 @@ import (
 )
 
 func TestAccContextEnvironmentVariableDataSource(t *testing.T) {
+	contextID := testContextID(t)
+	envVarName := testContextEnvVarName(t)
+	dateRegex := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$`)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Read testing
 			{
-				Config: testContextEnvironmentVariableDataSourceConfig,
+				Config: testContextEnvironmentVariableDataSourceConfig(envVarName, contextID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_context_environment_variable.test",
 						tfjsonpath.New("name"),
-						knownvalue.StringExact("TEST1"),
+						knownvalue.StringExact(envVarName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context_environment_variable.test",
 						tfjsonpath.New("context_id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context_environment_variable.test",
 						tfjsonpath.New("created_at"),
-						knownvalue.StringExact("2025-03-27T14:35:31.435Z"),
+						knownvalue.StringRegexp(dateRegex),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context_environment_variable.test",
 						tfjsonpath.New("updated_at"),
-						knownvalue.StringExact("2025-03-27T14:35:31.435Z"),
+						knownvalue.StringRegexp(dateRegex),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context_environment_variable.test",
 						tfjsonpath.New("name"),
-						knownvalue.StringExact("TEST1"),
+						knownvalue.StringExact(envVarName),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context_environment_variable.test",
 						tfjsonpath.New("context_id"),
-						knownvalue.StringExact("e51158a2-f59c-4740-9eb4-d20609baa07e"),
+						knownvalue.StringExact(contextID),
 					),
 				},
 			},
@@ -57,13 +62,15 @@ func TestAccContextEnvironmentVariableDataSource(t *testing.T) {
 	})
 }
 
-var testContextEnvironmentVariableDataSourceConfig = `
+func testContextEnvironmentVariableDataSourceConfig(name, contextID string) string {
+	return fmt.Sprintf(`
 provider "circleci" {
   host = "https://circleci.com/api/v2"
 }
 
 data "circleci_context_environment_variable" "test" {
-  name = "TEST1"
-  context_id = "e51158a2-f59c-4740-9eb4-d20609baa07e"
+  name = %[1]q
+  context_id = %[2]q
 }
-`
+`, name, contextID)
+}
