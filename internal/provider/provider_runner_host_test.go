@@ -30,7 +30,7 @@ data "circleci_runner_resource_class" "t" {
 }
 `, srv.URL)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: cfg}},
 	})

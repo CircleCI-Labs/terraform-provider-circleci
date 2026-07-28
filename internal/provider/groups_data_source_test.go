@@ -67,7 +67,7 @@ func TestAccGroupsDataSource(t *testing.T) {
 	// Another organization's groups must not leak into the result.
 	api.seed("99999999-9999-9999-9999-999999999999", "other-org-group", "Elsewhere")
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -111,7 +111,7 @@ func TestAccGroupsDataSource_serverDeployment(t *testing.T) {
 	// installation is always a `github` type organization, so deployment =
 	// "server" must be rejected with an explanatory error rather than attempting
 	// a request the API would refuse.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      testAccGroupsDataSourceConfig(host, "server"),
@@ -125,7 +125,7 @@ func TestAccGroupsDataSource_empty(t *testing.T) {
 
 	// An organization with no groups yields an empty list rather than null, so
 	// that for_each and length() keep working.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{

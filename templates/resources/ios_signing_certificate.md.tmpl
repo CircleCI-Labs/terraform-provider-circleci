@@ -1,0 +1,42 @@
+---
+page_title: "circleci_ios_signing_certificate Resource - circleci"
+subcategory: ""
+description: |-
+  Manages an Apple code-signing certificate for signing iOS builds.
+---
+
+# circleci_ios_signing_certificate (Resource)
+
+Uploads an Apple code-signing certificate (a `.p12` file and its password) to a CircleCI organization, for signing iOS builds. Pair it with one or more provisioning profiles using [`circleci_ios_signing_config`](./ios_signing_config).
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server.** Signing certificates are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. The certificate itself is only useful to a **macOS executor** building and signing an iOS app.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_ios_signing_certificate/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Immutability
+
+The CircleCI API has no update endpoint for a signing certificate: the routes served is `GET`/`POST /signing/certificates` and `GET`/`DELETE /signing/certificates/{id}`, nothing else. Every configurable attribute — `organization_id`, `file_name`, `certificate_blob` and `certificate_password` — is therefore `RequiresReplace`. Changing any of them uploads a brand new certificate and deletes the old one; it is not a design preference, there is simply no other operation the API supports.
+
+There is also no read route for a certificate's content or password, on this or any other endpoint. `cert_type`, `fingerprint`, `created_at` and `expires_at` are the only attributes CircleCI genuinely reports back; see "Security" below for what that means for the two write-only inputs.
+
+## Security
+
+`certificate_blob` and `certificate_password` are real credentials — the private key half of a code-signing identity, and the password protecting it — not display values. Both are marked `Sensitive`, which keeps them out of Terraform's plan and apply output, **but `Sensitive` does not encrypt state.** Because CircleCI never returns either value again once uploaded, the only place this provider can keep a copy for `terraform plan` to compare against is Terraform state itself, in cleartext.
+
+Given that:
+
+* Use a state backend that encrypts at rest (Terraform Cloud, or a backend like S3 with server-side encryption and a restrictive bucket policy) and restrict who can read it.
+* Source `certificate_blob` and `certificate_password` from a secret manager (Vault, AWS Secrets Manager, etc.) via a data source — never from a `.p12` file committed to the repository the configuration lives in. The example above uses input variables as the placeholder for whichever secret manager integration you use.
+* A leaked certificate is revoked by deleting this resource, which deletes it from CircleCI too, and replacing it with a newly issued one — not by an in-place update, since none exists.
+
+This resource deliberately has **no computed attribute that echoes back a masked form** of `certificate_blob` or `certificate_password` (contrast [`circleci_webhook`](./webhook)'s `has_signing_secret`, which exists because that API genuinely reports whether a secret is configured). Both certificate inputs are `Required` to create the resource at all, so there is no "configured or not" ambiguity for a boolean to resolve — and a `Sensitive` string that only ever held a fixed mask would look like a credential without being one.

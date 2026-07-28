@@ -1,0 +1,24 @@
+---
+page_title: "project_slug Function - circleci"
+subcategory: ""
+description: |-
+  Builds a CircleCI project slug from its parts, validating the result.
+---
+
+# function: project_slug
+
+Builds the `vcs-type/org/project` identifier that every `project_slug` argument in this provider takes (`circleci_project`, `circleci_checkout_key`, and so on).
+
+CircleCI's slug convention has a footgun this function exists to catch: classic GitHub OAuth and Bitbucket projects are addressed by name — `gh/my-org/my-repo` — but GitLab, GitHub App and GitHub Enterprise Server projects, and any project in a standalone (`circleci`-native) organization, are addressed by UUID instead — `circleci/<orgUUID>/<projectUUID>`. There is no `gitlab` or `github_app` slug segment; all of those collapse to `circleci`. Passing an organization or project *name* where `vcs_type` is `"circleci"` produces a slug that looks plausible but resolves nothing, which otherwise surfaces as a confusing 404 far from this call. This function validates `org`/`project` look like UUIDs in that case, so the mistake fails at plan time with a clear message instead.
+
+## Example Usage
+
+{{ tffile "examples/functions/project_slug/function.tf" }}
+
+## Signature
+
+{{ .FunctionSignatureMarkdown }}
+
+## Arguments
+
+{{ .FunctionArgumentsMarkdown }}

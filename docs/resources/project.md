@@ -42,6 +42,9 @@ resource "circleci_project" "example" {
 
 - `auto_cancel_builds` (Boolean) Whether to automatically cancel redundant builds.
 - `build_fork_prs` (Boolean) Whether to build pull requests from forked repositories.
+- `build_prs_only` (Boolean) Whether to build only branches that have an open pull request. Use `pr_only_branch_overrides` to list branches that should always build.
+
+~> On GitLab this is not a project setting but a per-trigger filter, so it has no effect there.
 - `disable_ssh` (Boolean) Whether to disable SSH access to builds.
 - `forks_receive_secret_env_vars` (Boolean) Whether forked pull requests can access secret environment variables.
 - `oss` (Boolean) Whether the project is free and open source, which grants additional credits and makes builds visible to everyone. CircleCI only honours `true` for a repository that is genuinely open source; it reports success and leaves the setting unchanged otherwise, which this resource surfaces as an error.

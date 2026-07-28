@@ -1,0 +1,101 @@
+---
+page_title: "circleci_config_policy_bundle Resource - circleci"
+subcategory: ""
+description: |-
+  Manages an organization's whole bundle of CircleCI config policies.
+---
+
+# circleci_config_policy_bundle (Resource)
+
+Manages an organization's whole bundle of CircleCI config policies: the Rego documents evaluated against a pipeline's configuration before it runs.
+
+Works against both **CircleCI Cloud and CircleCI Server** — config policies are served by the v2 API. Note the plan and version requirements below, though: this is not available on every account.
+
+> **Requires the Scale plan on CircleCI Cloud**, or **CircleCI Server 4.2 or later**. On other Cloud plans the API rejects these requests, and on older Server releases the routes do not exist.
+
+## Example Usage
+
+```terraform
+# One resource owns the whole bundle: every policy for the organization's config
+# policy context lives in this map. Reading the Rego from files keeps it
+# reviewable and testable with `circleci policy test`.
+resource "circleci_config_policy_bundle" "config" {
+  owner_id = "00000000-0000-0000-0000-000000000000"
+
+  policies = {
+    "allow-docker.rego"     = file("${path.module}/policies/allow-docker.rego")
+    "require-approval.rego" = file("${path.module}/policies/require-approval.rego")
+  }
+}
+
+# Inline Rego works too, for a single short policy.
+resource "circleci_config_policy_bundle" "custom" {
+  owner_id       = "00000000-0000-0000-0000-000000000000"
+  policy_context = "custom"
+
+  policies = {
+    "deny-all.rego" = <<-EOT
+      package custom
+
+      policy_name["deny_all"]
+
+      enable_rule["deny_all"]
+
+      deny_all = "nothing is permitted in this context"
+    EOT
+  }
+}
+
+# Uploading policies does not enforce them; this is the switch that does.
+resource "circleci_config_policy_settings" "config" {
+  owner_id = "00000000-0000-0000-0000-000000000000"
+  enabled  = true
+
+  # Enable enforcement only once the bundle is in place.
+  depends_on = [circleci_config_policy_bundle.config]
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Why a bundle and not a policy
+
+The obvious design would be a `circleci_config_policy` resource holding one Rego document. The API makes that impossible.
+
+There is exactly one write route for policies, and it **replaces the entire bundle** for a policy context: `POST .../policy-bundle` takes a map of every policy name to its content, deletes any policy absent from that map, and has no per-policy counterpart. There is no route that adds a single policy, and none that deletes one.
+
+Two per-policy resources pointed at the same organization would therefore each upload a bundle containing only their own document, deleting the other's. Terraform would report both as successfully applied, and on every plan each would find its policy missing and put it back — an apply loop with a different policy winning each time, and enforcement silently missing half the rules in between.
+
+So the bundle is the unit of management. One `circleci_config_policy_bundle` resource per `owner_id` and `policy_context`, holding every policy for that context.
+
+!> **Never declare two `circleci_config_policy_bundle` resources for the same `owner_id` and `policy_context`.** Terraform cannot detect the conflict, and they will clobber each other on every apply.
+
+Keeping the Rego itself in files under `policies/` and referencing them with `file()` gives you the best of both: reviewable, individually testable policy documents (`circleci policy test`), assembled into one bundle by Terraform.
+
+## Removing policies
+
+A policy is deleted by removing its key from `policies`. Setting `policies = {}` empties the context entirely, and destroying the resource does the same — since there is no delete route, an upload of an empty bundle is how a bundle is removed.
+
+Because the whole context is replaced on every apply, drift shows up naturally: a policy added out-of-band is removed on the next apply, and a bundle emptied out-of-band is recreated.
+
+## Enforcement is separate
+
+Uploading a bundle does not evaluate it. Use `circleci_config_policy_settings` to switch evaluation on, and order the two with `depends_on` so enforcement never turns on before the policies land.
+
+## Limits
+
+The whole bundle must stay under roughly **2.5 MiB**; the API answers `413` beyond that.
+
+## Import
+
+Import is supported using `owner_id`, which assumes the default `config` policy context:
+
+```shell
+terraform import circleci_config_policy_bundle.config "00000000-0000-0000-0000-000000000000"
+```
+
+or `owner_id/policy_context` for any other context:
+
+```shell
+terraform import circleci_config_policy_bundle.custom "00000000-0000-0000-0000-000000000000/custom"
+```

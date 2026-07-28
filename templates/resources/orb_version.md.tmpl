@@ -1,0 +1,48 @@
+---
+page_title: "circleci_orb_version Resource - circleci"
+subcategory: ""
+description: |-
+  Publishes a version of a CircleCI orb. Publishing is permanent and cannot be undone.
+---
+
+# circleci_orb_version (Resource)
+
+Publishes a version of a CircleCI orb.
+
+!> **Publishing is permanent and cannot be undone.** A published orb version is immutable: its source cannot be edited, it cannot be republished with different source, and the CircleCI API has **no route to delete or unpublish it**. That is deliberate — anyone who pinned `<namespace>/<orb>@<version>` must keep resolving it forever.
+
+Read the [Lifecycle](#lifecycle) section before using this resource. Its behaviour differs from an ordinary Terraform resource in ways that matter.
+
+~> **CircleCI Cloud only.** Orb versions are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_orb_version/resource.tf" }}
+
+## Lifecycle
+
+**`terraform destroy` does not delete anything.** There is no API route to delete an orb version, so destroying this resource removes it from Terraform state and emits a warning saying that the version remains published and remains resolvable by every project that references it. Nothing is deleted, and nothing can be.
+
+A direct consequence: **recreating the resource with the same `version` will fail**, because the version already exists. The provider annotates that failure with an explanation rather than passing the raw API error through.
+
+**Changing `version` publishes an additional version.** The previous version stays published — that is the point of an immutable registry. Terraform replaces the resource, the destroy is the no-op above, and the create publishes the new version.
+
+**Changing `yaml` for a stable version is rejected.** Terraform plans a replacement, the destroy does nothing, and the create is refused because that version is already published. To ship new source, bump `version`.
+
+**Dev versions are the exception.** A version named `dev:<label>` is mutable and expires on its own, so a `yaml` change works: Terraform replaces the resource and the API accepts the republish. Use a dev version while iterating, and publish a stable semantic version when the source is settled.
+
+**`yaml` is never refreshed from the API.** CircleCI normalizes the source it stores, so refreshing `yaml` from the server would look like permanent drift. The stored source is exposed separately as the computed `source` attribute. The one exception is immediately after an import, where `yaml` is seeded from `source` so that the resource has complete state.
+
+## Promotion
+
+The v3 API can promote a `dev:<label>` version to a stable semantic version. That is not modelled as a resource, because promotion creates a *new* version rather than changing an existing one, and Terraform has no way to express "promote whatever is there now" idempotently. To publish a stable version from Terraform, declare a `circleci_orb_version` with the semantic `version` you want.
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+The import ID is the orb version's UUID. Resolve one from an orb id and a version string with the `circleci_orb_version` data source.
+
+{{ codefile "shell" "examples/resources/circleci_orb_version/import.sh" }}
+
+After an import, `yaml` holds the source CircleCI stored. If the `yaml` in your configuration differs from it only by normalization, Terraform will plan a replacement that the API rejects; add `lifecycle { ignore_changes = [yaml] }` in that case.

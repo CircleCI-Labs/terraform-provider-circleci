@@ -1,0 +1,44 @@
+---
+page_title: "circleci_notification_integration_status Resource - circleci"
+subcategory: ""
+description: |-
+  Manages whether an existing CircleCI notification integration is active or disabled.
+---
+
+# circleci_notification_integration_status (Resource)
+
+Manages whether an existing CircleCI notification integration (a Slack workspace installation, today) is active or disabled.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+Integrations are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service.
+
+## This resource adopts an integration; it does not create one
+
+There is no API route to install a Slack workspace — that happens through an OAuth flow in the CircleCI web UI. Use the `circleci_notification_integrations` data source to find the `id` of an integration installed that way, then manage its status here.
+
+`status` only accepts `active` and `disabled`. An integration may also report `disconnected` after a read (the workspace removed the CircleCI app on Slack's side); reactivating it through this resource is not guaranteed to succeed, since Slack, not CircleCI, revoked access.
+
+## Destroying this resource does not revoke the integration
+
+There is no route that resets a status to a default, and the real `DELETE /notification/integrations/{id}` route revokes the whole Slack connection — a much bigger action than this resource's scope, and one that requires reinstalling through the OAuth flow to undo. `terraform destroy` only stops managing the status; the integration keeps whatever status it last had.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_notification_integration_status/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the integration's id:
+
+```shell
+terraform import circleci_notification_integration_status.example "33333333-3333-3333-3333-333333333333"
+```
+
+`status` is `Required` rather than `Computed`, but the read that follows an import fills it in from the API along with every other attribute.

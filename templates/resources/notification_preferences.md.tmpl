@@ -1,0 +1,33 @@
+---
+page_title: "circleci_notification_preferences Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a sparse set of CircleCI notification preference toggles.
+---
+
+# circleci_notification_preferences (Resource)
+
+Manages a sparse set of CircleCI notification preference toggles, for the calling user or for a project.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+Preferences are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service.
+
+## A settings resource, not a thing that gets created
+
+The preference matrix is a fixed, CircleCI-defined catalog that exists for as long as the user or project does, seeded with CircleCI's defaults. There is no route to add, remove or reset a row. That shapes how this resource behaves, in the same way as `circleci_organization_settings`:
+
+- **`updates` is a map, keyed by preference id, and is `Optional` only — never `Computed`.** A preference id left out of the map is not written, so CircleCI keeps whatever value it already has. Several `circleci_notification_preferences` resources may therefore manage disjoint rows of the same matrix.
+- **`preferences` reports the full catalog**, including rows this configuration does not manage, so the ids `updates` needs can be discovered from `terraform plan` or `terraform state show` after a first apply that sets no toggles.
+- **Removing a key from `updates` stops managing that row; it does not revert it.** There is no route that restores a CircleCI default, so the row keeps the value Terraform last applied. The provider emits a warning when this happens.
+- **Destroy removes the resource from Terraform state and makes no API call.** Every managed row keeps its current value.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_notification_preferences/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

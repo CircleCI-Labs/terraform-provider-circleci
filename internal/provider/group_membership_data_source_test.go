@@ -27,7 +27,7 @@ func TestAccGroupMembershipDataSource(t *testing.T) {
 	api, host := newMockMembershipAPI(t)
 	api.seedMembers(testUserA, testUserB)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -79,7 +79,7 @@ func TestAccGroupMembershipDataSource_emptyGroup(t *testing.T) {
 
 	// An empty, non-null list keeps for_each and length() working against a group
 	// with no members.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -108,7 +108,7 @@ func TestAccGroupMembershipDataSource_serverDeployment(t *testing.T) {
 	// installation is always a `github` type organization, so deployment =
 	// "server" must be rejected with an explanatory error rather than attempting
 	// a request the API would refuse.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      testAccGroupMembershipDataSourceConfig(host, "server"),

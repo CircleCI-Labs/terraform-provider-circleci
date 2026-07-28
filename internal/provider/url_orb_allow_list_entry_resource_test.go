@@ -130,7 +130,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 }
 `, srv.URL, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config: cfg,
@@ -177,7 +177,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 }
 `, srv.URL, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config: cfg,
@@ -209,7 +209,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 `, srv.URL, testOrbAllowListOrg, prefix)
 	}
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{Config: config("https://orbs.example.com/a/")},
@@ -238,7 +238,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 }
 `, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config:      cfg,
@@ -263,7 +263,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 }
 `, srv.URL, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{Config: cfg},
@@ -303,7 +303,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 }
 `, srv.URL, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{Config: cfg},
@@ -337,7 +337,7 @@ data "circleci_url_orb_allow_list" "t" {
 }
 `, srv.URL, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config: cfg,
@@ -375,7 +375,7 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 }
 `, srv.URL, testOrbAllowListOrg)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{Config: cfg},

@@ -9,8 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/common"
-	"github.com/CircleCI-Public/circleci-sdk-go/webhook"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -21,6 +19,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -51,7 +51,7 @@ func NewWebhookResource() resource.Resource {
 
 // webhookResource is the resource implementation.
 type webhookResource struct {
-	client *webhook.WebhookService
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -148,32 +148,37 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// Build the webhook request
-	verifyTls := plan.VerifyTls.ValueBool()
-	newWebhook := webhook.Webhook{
+	// Build the webhook request.
+	//
+	// This goes through the provider's own client rather than circleci-sdk-go
+	// because the SDK tags verify_tls and signing_secret as "verify-tls" and
+	// "signing-secret". The API ignores unrecognized keys, so every webhook
+	// created through the SDK silently had NO signing secret and took the
+	// server-side default for TLS verification, however they were configured.
+	newWebhook := circleci.WebhookInput{
 		Name:          plan.Name.ValueString(),
-		Url:           plan.Url.ValueString(),
-		VerifyTls:     &verifyTls,
+		URL:           plan.Url.ValueString(),
+		VerifyTLS:     plan.VerifyTls.ValueBool(),
 		SigningSecret: plan.SigningSecret.ValueString(),
-		Scope: common.Scope{
-			Id:   plan.ScopeId.ValueString(),
+		Scope: circleci.WebhookScope{
+			ID:   plan.ScopeId.ValueString(),
 			Type: plan.ScopeType.ValueString(),
 		},
 		Events: events,
 	}
 
-	// Create the webhook
-	createdWebhook, err := r.client.Create(ctx, newWebhook)
+	createdWebhook, err := r.client.CreateWebhook(ctx, newWebhook)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI webhook",
-			"Could not create CircleCI webhook, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
+
 		return
 	}
 
 	// Map response to state
-	plan.Id = types.StringValue(createdWebhook.Id)
+	plan.Id = types.StringValue(createdWebhook.ID)
 	// Note: signing_secret is preserved from plan (user-provided value)
 	plan.CreatedAt = types.StringValue(createdWebhook.CreatedAt)
 	plan.UpdatedAt = types.StringValue(createdWebhook.UpdatedAt)
@@ -203,22 +208,26 @@ func (r *webhookResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	webhookData, err := r.client.Get(ctx, state.Id.ValueString())
+	webhookData, err := r.client.GetWebhook(ctx, state.Id.ValueString())
+	// A webhook deleted outside Terraform must drop out of state so the next plan
+	// recreates it. Absence is tested with circleci.IsNotFound rather than by
+	// string-matching the error: matching "404" also matches a 5xx whose body
+	// happens to mention it, which silently removed live resources from state.
+	if circleci.IsNotFound(err) {
+		resp.Diagnostics.AddWarning(
+			"Webhook not found during Read",
+			fmt.Sprintf("Webhook ID %s no longer exists in CircleCI. Removing it from state.", state.Id.ValueString()),
+		)
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Read CircleCI webhook with id "+state.Id.ValueString(),
-			err.Error(),
+			circleci.Detail(err),
 		)
-		return
-	}
 
-	// Handle case where webhook was deleted outside of Terraform
-	if webhookData == nil {
-		resp.Diagnostics.AddWarning(
-			"Webhook not found during Read",
-			fmt.Sprintf("Webhook ID %s could not be retrieved from CircleCI. Removing from state.", state.Id.ValueString()),
-		)
-		resp.State.RemoveResource(ctx)
 		return
 	}
 
@@ -234,13 +243,11 @@ func (r *webhookResource) Read(ctx context.Context, req resource.ReadRequest, re
 	}
 
 	// Map response to state
-	state.Id = types.StringValue(webhookData.Id)
+	state.Id = types.StringValue(webhookData.ID)
 	state.Name = types.StringValue(webhookData.Name)
-	state.Url = types.StringValue(webhookData.Url)
-	if webhookData.VerifyTls != nil {
-		state.VerifyTls = types.BoolValue(*webhookData.VerifyTls)
-	}
-	state.ScopeId = types.StringValue(webhookData.Scope.Id)
+	state.Url = types.StringValue(webhookData.URL)
+	state.VerifyTls = types.BoolValue(webhookData.VerifyTLS)
+	state.ScopeId = types.StringValue(webhookData.Scope.ID)
 	state.ScopeType = types.StringValue(webhookData.Scope.Type)
 	state.Events = eventsList
 	// Note: created_at, updated_at, and signing_secret may not be returned by Get, preserve from state
@@ -285,22 +292,21 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	// Build the webhook update request
 	// Note: Scope cannot be updated
-	verifyTls := plan.VerifyTls.ValueBool()
-	updateWebhook := webhook.Webhook{
+	updateWebhook := circleci.WebhookInput{
 		Name:          plan.Name.ValueString(),
-		Url:           plan.Url.ValueString(),
-		VerifyTls:     &verifyTls,
+		URL:           plan.Url.ValueString(),
+		VerifyTLS:     plan.VerifyTls.ValueBool(),
 		SigningSecret: plan.SigningSecret.ValueString(),
 		Events:        events,
 	}
 
-	// Update the webhook
-	updatedWebhook, err := r.client.Update(ctx, updateWebhook, state.Id.ValueString())
+	updatedWebhook, err := r.client.UpdateWebhook(ctx, state.Id.ValueString(), updateWebhook)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error updating CircleCI webhook",
-			"Could not update CircleCI webhook, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
+
 		return
 	}
 
@@ -327,12 +333,14 @@ func (r *webhookResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	err := r.client.Delete(ctx, state.Id.ValueString())
-	if err != nil {
+	// A webhook already gone is the desired end state, so absence is not an error.
+	err := r.client.DeleteWebhook(ctx, state.Id.ValueString())
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
 			"Error Deleting CircleCI Webhook",
-			"Could not delete webhook, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
+
 		return
 	}
 }
@@ -352,7 +360,7 @@ func (r *webhookResource) Configure(_ context.Context, req resource.ConfigureReq
 		return
 	}
 
-	r.client = client.WebhookService
+	r.client = client.Client
 }
 
 // ImportState imports the resource state.

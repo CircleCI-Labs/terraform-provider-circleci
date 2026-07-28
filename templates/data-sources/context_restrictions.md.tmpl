@@ -1,0 +1,65 @@
+---
+page_title: "circleci_context_restrictions Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every restriction on a CircleCI context.
+---
+
+# circleci_context_restrictions (Data Source)
+
+Fetches every restriction on a CircleCI context, including restrictions created
+outside Terraform. Restrictions control which projects, groups or pipeline
+conditions may use a context. Manage one with
+[`circleci_context_restriction`](../resources/context_restriction).
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | yes |
+
+Context restrictions are served by the v2 API, which both deployments provide.
+
+-> **An empty list is a meaningful answer** An unrestricted context is usable by
+every project in the organization. `restrictions` is empty in that case rather
+than null, so `length(...) == 0` is the check for "unrestricted".
+
+## Example Usage
+
+```terraform
+data "circleci_context_restrictions" "deploy" {
+  context_id = "00000000-0000-0000-0000-000000000000"
+}
+
+# Which projects may use the context.
+output "circleci_permitted_project_ids" {
+  value = [
+    for restriction in data.circleci_context_restrictions.deploy.restrictions : restriction.project_id
+    if restriction.type == "project"
+  ]
+}
+
+# Fail the plan if a context that should be locked down is not.
+check "deploy_context_is_restricted" {
+  assert {
+    condition     = length(data.circleci_context_restrictions.deploy.restrictions) > 0
+    error_message = "The deploy context is unrestricted, so every project in the organization can use it."
+  }
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Notes
+
+* `project_id` is only set for `project` restrictions. The API omits it for
+  `group` and `expression` restrictions, so it reads back as an empty string
+  there; use `value` for those.
+* `name` is the human-readable name of whatever the restriction points at, such
+  as a project slug or a group name. It is empty for `expression` restrictions.
+* `group` is ambiguous and not fully documented by the API — CircleCI has two
+  unrelated concepts called "group". See
+  [`circleci_context_restriction`](../resources/context_restriction) for the
+  detail.
+* The endpoint returns every restriction in one response, so there is no
+  pagination to follow.

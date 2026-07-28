@@ -1,0 +1,55 @@
+---
+page_title: "circleci_otel_exporters Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every OTLP exporter configured for a CircleCI organization.
+---
+
+# circleci_otel_exporters (Data Source)
+
+Fetches every OTLP exporter configured for a CircleCI organization, including exporters created outside Terraform.
+
+Works against both **CircleCI Cloud and CircleCI Server** — OTLP exporters are served by the v2 API, which both provide.
+
+!> **Experimental.** CircleCI flags the OTLP exporter endpoints as experimental. Their request and response shapes may change, or they may be withdrawn, without the deprecation notice the rest of the v2 API carries.
+
+## Example Usage
+
+```terraform
+data "circleci_otel_exporters" "all" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+}
+
+# Every configured endpoint, including exporters created outside Terraform.
+output "endpoints" {
+  value = [for exporter in data.circleci_otel_exporters.all.exporters : exporter.endpoint]
+}
+
+# Exporters CircleCI has flagged a problem with.
+output "unhealthy_exporters" {
+  value = [
+    for exporter in data.circleci_otel_exporters.all.exporters : {
+      id     = exporter.id
+      issues = exporter.issues
+    }
+    if length(exporter.issues) > 0
+  ]
+}
+
+# How much of the per-organization limit is left.
+output "remaining_exporter_slots" {
+  value = 5 - length(data.circleci_otel_exporters.all.exporters)
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Header values are not returned
+
+CircleCI encrypts header values at rest and reports every one as `xxxx`. Only the header *names* are usable from this data source. Do not try to read a collector credential back out of it.
+
+## Notes
+
+* An organization may have at most **5** exporters, so `exporters` never needs paginating.
+* `issues` lists validation problems CircleCI has detected with an exporter, such as an endpoint that no longer resolves. It is an empty list when there are none, so `length(exporter.issues) > 0` is a reasonable health check.
+* `exporters` is always a list, empty when the organization has no exporters, so configurations can iterate over it unconditionally.

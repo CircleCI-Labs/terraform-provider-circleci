@@ -1,0 +1,24 @@
+---
+page_title: "circleci_orb_version Data Source - circleci"
+subcategory: ""
+description: |-
+  Looks up one published version of a CircleCI orb, including its source.
+---
+
+# circleci_orb_version (Data Source)
+
+Looks up one published version of a CircleCI orb, by version id, or by orb id plus a version reference.
+
+The version reference may be an exact version such as `1.2.3`, a `dev:<label>` version, or an alias such as `volatile` for whatever the newest version is. When an alias resolves to a different version string, the `version` attribute reports the resolved one.
+
+`orb_id` is required unless `id` is set: the CircleCI API's orb version collection is always scoped to a single orb, so there is no way to search versions globally.
+
+Use this to read the published YAML source, or to resolve the UUID needed to import a `circleci_orb_version`.
+
+~> **CircleCI Cloud only.** Orb versions are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_orb_version/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

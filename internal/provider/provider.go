@@ -14,7 +14,6 @@ import (
 	"github.com/CircleCI-Public/circleci-sdk-go/envproject"
 	"github.com/CircleCI-Public/circleci-sdk-go/organization"
 	"github.com/CircleCI-Public/circleci-sdk-go/pipeline"
-	"github.com/CircleCI-Public/circleci-sdk-go/project"
 	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/CircleCI-Public/circleci-sdk-go/trigger"
 	"github.com/CircleCI-Public/circleci-sdk-go/webhook"
@@ -48,7 +47,6 @@ type CircleCiClientWrapper struct {
 
 	ContextService                    *ccicontext.ContextService
 	EnvironmentVariableService        *envcontext.EnvService
-	ProjectService                    *project.ProjectService
 	PipelineService                   *pipeline.PipelineService
 	OrganizationService               *organization.OrganizationService
 	TriggerService                    *trigger.TriggerService
@@ -226,7 +224,6 @@ func (p *CircleCiProvider) Configure(ctx context.Context, req provider.Configure
 	circleciClient := client.NewClient(origin+"/api/v2", key)
 	contextService := ccicontext.NewContextService(circleciClient)
 	organizationService := organization.NewOrganizationService(circleciClient)
-	projectService := project.NewProjectService(circleciClient)
 	pipelineService := pipeline.NewPipelineService(circleciClient)
 	environmentVariableService := envcontext.NewEnvService(circleciClient)
 	triggerService := trigger.NewTriggerService(circleciClient)
@@ -246,7 +243,6 @@ func (p *CircleCiProvider) Configure(ctx context.Context, req provider.Configure
 		ContextService:                    contextService,
 		EnvironmentVariableService:        environmentVariableService,
 		OrganizationService:               organizationService,
-		ProjectService:                    projectService,
 		PipelineService:                   pipelineService,
 		TriggerService:                    triggerService,
 		WebhookService:                    webhookService,
@@ -255,6 +251,10 @@ func (p *CircleCiProvider) Configure(ctx context.Context, req provider.Configure
 	}
 	resp.DataSourceData = &cccw
 	resp.ResourceData = &cccw
+	// Ephemeral resources get their provider data through a separate field. Leaving
+	// it unset does not merely disable them: their Configure receives nil, and Open
+	// then dereferences a nil client and panics.
+	resp.EphemeralResourceData = &cccw
 }
 
 func (p *CircleCiProvider) Resources(ctx context.Context) []func() resource.Resource {
@@ -280,14 +280,35 @@ func (p *CircleCiProvider) Resources(ctx context.Context) []func() resource.Reso
 		NewGroupMembershipResource,
 		NewProjectGroupResource,
 		NewURLOrbAllowListEntryResource,
+		NewOIDCCustomClaimsResource,
+		NewConfigPolicyBundleResource,
+		NewConfigPolicySettingsResource,
+		NewOTelExporterResource,
+		NewNotificationChannelConfigResource,
+		NewNotificationPreferencesResource,
+		NewNotificationIntegrationStatusResource,
+		NewIOSSigningCertificateResource,
+		NewIOSSigningConfigResource,
 
 		// CircleCI Cloud only: backed by the v3 API, which Server does not route.
 		NewOrganizationSettingsResource,
+		NewOrbNamespaceResource,
+		NewOrbResource,
+		NewOrbVersionResource,
+
+		// CircleCI Cloud only: v2, but gated behind a Scale-plan billing tier
+		// CircleCI Server does not have. See DESIGN.md.
+		NewAuditLogConfigResource,
 	}
 }
 
 func (p *CircleCiProvider) EphemeralResources(ctx context.Context) []func() ephemeral.EphemeralResource {
-	return []func() ephemeral.EphemeralResource{}
+	return []func() ephemeral.EphemeralResource{
+		// Ephemeral values are never written to state, which is what makes them the
+		// right shape for a signed URL or a short-lived credential.
+		NewUsageExportEphemeralResource,
+		NewEphemeralRunnerTokenResource,
+	}
 }
 
 func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
@@ -313,14 +334,71 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		NewGroupMembershipDataSource,
 		NewProjectGroupsDataSource,
 		NewURLOrbAllowListDataSource,
+		NewOTelExportersDataSource,
+		NewPipelineRunDataSource,
+		NewPipelineConfigDataSource,
+		NewPipelineValuesDataSource,
+		NewPipelineWorkflowsDataSource,
+		NewWorkflowDataSource,
+		NewWorkflowJobsDataSource,
+		NewJobDataSource,
+
+		// Plural list data sources. Every service has a List; until now none was
+		// exposed.
+		NewContextsDataSource,
+		NewContextRestrictionsDataSource,
+		NewWebhooksDataSource,
+		NewProjectEnvironmentVariablesDataSource,
+
+		// Discovery and read-only reporting.
+		NewGitHubAppInstallationDataSource,
+		NewGitHubAppRepositoryDataSource,
+		NewGitHubAppRepositoriesDataSource,
+		NewUserDataSource,
+		NewUserCollaborationsDataSource,
+		NewInsightsWorkflowsDataSource,
+		NewInsightsFlakyTestsDataSource,
+		NewInsightsSummaryDataSource,
 
 		// CircleCI Cloud only: backed by the v3 API, which Server does not route.
 		NewOrganizationSettingsDataSource,
+		NewOrbNamespaceDataSource,
+		NewOrbDataSource,
+		NewOrbsDataSource,
+		NewOrbVersionDataSource,
+		NewOrbCategoriesDataSource,
+		NewPipelinesDataSource,
+		NewTriggersDataSource,
+		NewCatalogOfferingsDataSource,
+		NewNotificationChannelConfigDataSource,
+		NewNotificationChannelConfigsDataSource,
+		NewNotificationIntegrationsDataSource,
+		NewNotificationLinksDataSource,
+		NewIOSSigningCertificateDataSource,
+		NewIOSSigningCertificatesDataSource,
+		NewIOSSigningConfigsDataSource,
+		NewDeployEnvironmentDataSource,
+		NewDeployEnvironmentsDataSource,
+		NewDeployComponentDataSource,
+		NewDeployComponentsDataSource,
+		NewDeploySettingsDataSource,
+
+		// CircleCI Cloud only: v2, but gated behind a Scale-plan billing tier
+		// CircleCI Server does not have. See DESIGN.md.
+		NewAuditLogConfigsDataSource,
+		NewAuditLogAccessDataSource,
 	}
 }
 
 func (p *CircleCiProvider) Functions(ctx context.Context) []func() function.Function {
-	return []func() function.Function{}
+	return []func() function.Function{
+		// Pure helpers for the identifiers this API is fussy about: a project slug
+		// has three segments whose shape differs by VCS integration, and an orb
+		// version reference must be fully qualified.
+		NewProjectSlugFunction,
+		NewParseProjectSlugFunction,
+		NewOrbRefFunction,
+	}
 }
 
 func New(version string) func() provider.Provider {

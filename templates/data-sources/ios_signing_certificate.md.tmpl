@@ -1,0 +1,30 @@
+---
+page_title: "circleci_ios_signing_certificate Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches an iOS signing certificate by id.
+---
+
+# circleci_ios_signing_certificate (Data Source)
+
+Fetches an iOS signing certificate by id.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server.** Signing certificates are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service.
+
+-> **No lookup by name.** The API's only single-entity route is `GET /signing/certificates/{id}`; there is no lookup by `file_name`. Use [`circleci_ios_signing_certificates`](./ios_signing_certificates) to resolve a certificate by name within an organization first.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_ios_signing_certificate/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Security
+
+The certificate's `.p12` content and password are never returned by the API, so there is no attribute for either here — see [`circleci_ios_signing_certificate`](../resources/ios_signing_certificate)'s "Security" section for why, and what that resource does instead.

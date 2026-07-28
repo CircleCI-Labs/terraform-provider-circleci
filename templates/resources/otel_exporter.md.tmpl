@@ -1,0 +1,92 @@
+---
+page_title: "circleci_otel_exporter Resource - circleci"
+subcategory: ""
+description: |-
+  Manages an OTLP exporter, where CircleCI sends OpenTelemetry traces for an organization's pipelines.
+---
+
+# circleci_otel_exporter (Resource)
+
+Manages an OTLP exporter: where CircleCI sends OpenTelemetry traces for an organization's pipelines.
+
+Works against both **CircleCI Cloud and CircleCI Server** — OTLP exporters are served by the v2 API, which both provide.
+
+!> **Experimental.** CircleCI flags the OTLP exporter endpoints as experimental. Their request and response shapes may change, or they may be withdrawn, without the deprecation notice the rest of the v2 API carries. Pin the provider version if that matters to you.
+
+## Example Usage
+
+```terraform
+# Export traces to a collector over OTLP/gRPC. Note that the endpoint is a bare
+# host and port: no scheme.
+resource "circleci_otel_exporter" "grpc" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  endpoint        = "otel.example.com:4317"
+  protocol        = "grpc"
+
+  headers = {
+    "x-api-key" = var.collector_api_key
+  }
+}
+
+# OTLP/HTTP, usually on port 4318.
+resource "circleci_otel_exporter" "http" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  endpoint        = "otel-http.example.com:4318"
+  protocol        = "http"
+}
+
+# A collector reachable only over a private network, where transport security is
+# handled elsewhere. Anything sent in `headers` travels in the clear.
+resource "circleci_otel_exporter" "internal" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  endpoint        = "collector.internal:4317"
+  protocol        = "grpc"
+  insecure        = true
+}
+
+variable "collector_api_key" {
+  type      = string
+  sensitive = true
+}
+
+# CircleCI reports configuration problems it detects, such as an endpoint that
+# stopped resolving.
+output "exporter_issues" {
+  value = circleci_otel_exporter.grpc.issues
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Replacement, not update
+
+The CircleCI API has no route for updating an exporter, so `organization_id`, `endpoint`, `protocol`, `insecure` and `headers` all force replacement. Changing any of them destroys the exporter and creates a new one with a **new `id`**; traces are not exported during the gap.
+
+## Headers cannot be read back
+
+CircleCI encrypts header values at rest and every read answers with the placeholder `xxxx`, never the value you sent. Two things follow:
+
+* **A header value changed outside Terraform cannot be detected.** The provider keeps the value from state rather than overwriting your secret with the placeholder, so a plan stays clean either way.
+* **A header added or removed outside Terraform *is* detected**, because the header *names* are returned in full. The provider then adopts the API's map, which surfaces the change as a diff and, since `headers` forces replacement, recreates the exporter.
+
+For the same reason, importing an exporter that has headers records the placeholder values. Set the real values in your configuration and apply; the exporter is recreated with them.
+
+~> **`insecure = true` sends headers in the clear.** Anything in `headers` — including collector credentials — travels unencrypted. Use it only where the network itself is trusted.
+
+## Limits
+
+An organization may have at most **5** exporters. Creating a sixth is rejected.
+
+## Endpoint format
+
+`endpoint` is a bare host and port, for example `otel.example.com:4317`. Do not include a scheme: `https://otel.example.com:4317` is rejected. gRPC collectors conventionally listen on `4317` and HTTP collectors on `4318`.
+
+## Import
+
+Import is supported using `organization_id/exporter_id`:
+
+```shell
+terraform import circleci_otel_exporter.grpc "00000000-0000-0000-0000-000000000000/11111111-1111-1111-1111-111111111111"
+```
+
+Both parts are required. The API has no route for a single exporter, so reading one means listing its organization's exporters and selecting from them — the provider needs the organization ID to do that.

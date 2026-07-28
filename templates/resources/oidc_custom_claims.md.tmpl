@@ -1,0 +1,77 @@
+---
+page_title: "circleci_oidc_custom_claims Resource - circleci"
+subcategory: ""
+description: |-
+  Customizes the claims of the OIDC identity tokens CircleCI issues to jobs.
+---
+
+# circleci_oidc_custom_claims (Resource)
+
+Customizes the claims of the OIDC identity tokens CircleCI issues to jobs, so that a cloud provider or secrets manager will accept them.
+
+Works against both **CircleCI Cloud and CircleCI Server** — OIDC custom claims are served by the v2 API, which both provide.
+
+## Example Usage
+
+```terraform
+# Organization-wide claims: every job in the organization gets these unless a
+# project overrides them.
+resource "circleci_oidc_custom_claims" "org" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  audience        = ["sts.amazonaws.com"]
+  ttl             = "1h"
+}
+
+# Project-level claims take precedence over the organization's, so a project that
+# needs a different audience or a shorter-lived token declares its own.
+resource "circleci_oidc_custom_claims" "project" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  project_id      = "11111111-1111-1111-1111-111111111111"
+  audience        = ["https://vault.example.com"]
+  ttl             = "15m"
+}
+
+# Only the audience is managed here; the token lifetime stays at CircleCI's
+# default.
+resource "circleci_oidc_custom_claims" "audience_only" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  project_id      = "22222222-2222-2222-2222-222222222222"
+  audience        = ["my-identity-provider"]
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## One resource, two scopes
+
+CircleCI exposes organization-level and project-level claims on two routes that differ only by an extra `/project/{id}` segment. They take the same request body and answer with the same shape, so this provider models them as a single resource with an optional `project_id` rather than as two resources whose schemas would be identical. Set `project_id` for project claims; omit it for organization claims.
+
+Project-level claims take precedence over organization-level ones, which means an organization-scoped instance and a project-scoped instance can safely coexist.
+
+## A settings object, not an entity
+
+CircleCI always has a claim customization record for every organization and project, so there is nothing to create and nothing that can be "missing". That has three consequences worth knowing:
+
+* **Create is a `PATCH`.** Applying the resource writes the claims you set; it does not create anything.
+* **Destroy resets.** Unlike most settings objects, resetting is a real operation here: destroying the resource calls the delete route, and jobs go back to receiving CircleCI's default audience and token lifetime. Only the claims this resource manages are reset, so a claim you never declared is left alone.
+* **A reset made elsewhere reads as "gone".** Because an uncustomized scope answers `200` with no claims rather than `404`, the provider treats an empty customization as a removed resource and plans to recreate it.
+
+## The resource is authoritative
+
+The write route is a partial update: a field it does not carry is left alone. Removing `ttl` from your configuration therefore *cannot* mean "stop managing the token lifetime" — there would be no way to ever change it back. It means "reset it", and the next apply deletes that claim.
+
+Declare both claims in one resource, or split them across scopes. Do not point two instances at the same `organization_id` and `project_id`.
+
+## Import
+
+Import is supported using `organization_id` for organization-level claims:
+
+```shell
+terraform import circleci_oidc_custom_claims.org "00000000-0000-0000-0000-000000000000"
+```
+
+or `organization_id/project_id` for project-level claims:
+
+```shell
+terraform import circleci_oidc_custom_claims.project "00000000-0000-0000-0000-000000000000/11111111-1111-1111-1111-111111111111"
+```

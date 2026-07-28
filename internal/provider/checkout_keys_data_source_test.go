@@ -51,7 +51,7 @@ func TestAccCheckoutKeysDataSource(t *testing.T) {
 	}
 	srv := newCheckoutKeyServer(t, api)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config: checkoutKeysDataSourceConfig(srv.URL, "md5"),
@@ -119,7 +119,7 @@ func TestAccCheckoutKeysDataSource_NoKeys(t *testing.T) {
 	api := &checkoutKeyAPI{}
 	srv := newCheckoutKeyServer(t, api)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config: checkoutKeysDataSourceConfig(srv.URL, ""),

@@ -183,6 +183,18 @@ func (c *Client) DeleteV2(ctx context.Context, route string, opts ...RequestOpti
 	return c.call(ctx, http.MethodDelete, "/api/v2"+route, nil, nil, opts)
 }
 
+// --- v1.1 verbs ---
+//
+// v1.1 is in maintenance and has a live deprecation initiative, so these exist
+// only for the handful of operations with no v2 or v3 equivalent. Do not reach for
+// them otherwise.
+
+// PostV1 issues a POST against /api/v1.1. A nil dst skips decoding, which several
+// v1.1 routes require because they answer with an empty body.
+func (c *Client) PostV1(ctx context.Context, route string, body, dst any, opts ...RequestOption) error {
+	return c.call(ctx, http.MethodPost, "/api/v1.1"+route, body, dst, opts)
+}
+
 // --- v3 verbs ---
 
 // GetV3 issues a GET against /api/v3 and decodes the response into dst.

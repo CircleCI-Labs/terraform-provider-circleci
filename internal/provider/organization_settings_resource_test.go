@@ -138,7 +138,7 @@ resource "circleci_organization_settings" "t" {
 }
 `, srv.URL, testOrgSettingsOrgID)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config: cfg,
@@ -207,7 +207,7 @@ resource "circleci_organization_settings" "t" {
 `, srv.URL, testOrgSettingsOrgID, privateOrbs)
 	}
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{
@@ -252,7 +252,7 @@ resource "circleci_organization_settings" "t" {
 
 	other := "55555555-6666-7777-8888-999999999999"
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{Config: config(testOrgSettingsOrgID)},
@@ -279,7 +279,7 @@ resource "circleci_organization_settings" "t" {
 }
 `, srv.URL, testOrgSettingsOrgID)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{
 			{Config: cfg},
@@ -324,7 +324,7 @@ resource "circleci_organization_settings" "t" {
 }
 `, srv.URL, testOrgSettingsOrgID)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config:      cfg,
@@ -351,7 +351,7 @@ data "circleci_organization_settings" "t" {
 }
 `, srv.URL, testOrgSettingsOrgID)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config:      cfg,
@@ -378,7 +378,7 @@ data "circleci_organization_settings" "t" {
 }
 `, srv.URL, testOrgSettingsOrgID)
 
-	sdkresource.Test(t, sdkresource.TestCase{
+	sdkresource.UnitTest(t, sdkresource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []sdkresource.TestStep{{
 			Config: cfg,

@@ -1,0 +1,42 @@
+---
+page_title: "circleci_notification_channel_config Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a CircleCI notification channel config.
+---
+
+# circleci_notification_channel_config (Resource)
+
+Manages a CircleCI notification channel config: where notifications for a user or a project are delivered, by email or by Slack.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+Channel configs are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+
+## A user-scoped config always belongs to the caller
+
+There is no way to address another user's channel configs through this API. `scope = "user"` manages the configuration of whoever the provider's API token authenticates as; `user_id` is reported back, but it can never be set.
+
+A `scope = "project"` config additionally requires `project_id`. `org_id` is required for both scopes: even a user-scoped config is tied to one organization.
+
+## Slack configs need an active integration
+
+A Slack channel config requires an active `circleci_notification_integrations` Slack installation for the organization, and `target` must be a channel ID the installed app can already post to — invite `@circleci` to the channel first. CircleCI resolves `channel_name` from `target` for a project-scoped Slack config; it stays null otherwise.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_notification_channel_config/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the channel config's id:
+
+```shell
+terraform import circleci_notification_channel_config.example "22222222-2222-2222-2222-222222222222"
+```

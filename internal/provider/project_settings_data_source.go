@@ -9,12 +9,13 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/project"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 var (
@@ -25,6 +26,7 @@ var (
 type projectSettingsDataSourceModel struct {
 	AutoCancelBuilds           types.Bool   `tfsdk:"auto_cancel_builds"`
 	BuildForkPrs               types.Bool   `tfsdk:"build_fork_prs"`
+	BuildPrsOnly               types.Bool   `tfsdk:"build_prs_only"`
 	DisableSSH                 types.Bool   `tfsdk:"disable_ssh"`
 	ForksReceiveSecretEnvVars  types.Bool   `tfsdk:"forks_receive_secret_env_vars"`
 	OSS                        types.Bool   `tfsdk:"oss"`
@@ -41,7 +43,7 @@ func NewProjectSettingsDataSource() datasource.DataSource {
 }
 
 type ProjectSettingsDataSource struct {
-	client *project.ProjectService
+	client *circleci.Client
 }
 
 func (d *ProjectSettingsDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -59,6 +61,11 @@ func (d *ProjectSettingsDataSource) Schema(_ context.Context, _ datasource.Schem
 			"build_fork_prs": schema.BoolAttribute{
 				MarkdownDescription: "Run builds for pull requests from forks. CircleCI will automatically update the commit status shown on GitHub's pull request page.",
 				Computed:            true,
+			},
+			"build_prs_only": schema.BoolAttribute{
+				MarkdownDescription: "Whether only branches with an open pull request are built. " +
+					"`pr_only_branch_overrides` lists the exceptions.",
+				Computed: true,
 			},
 			"disable_ssh": schema.BoolAttribute{
 				MarkdownDescription: "This will disable SSH reruns for this project.",
@@ -122,7 +129,7 @@ func (d *ProjectSettingsDataSource) Read(ctx context.Context, req datasource.Rea
 
 	splitSlug := strings.SplitN(data.Slug.ValueString(), "/", 3)
 
-	apiResp, err := d.client.GetSettings(ctx, splitSlug[0], splitSlug[1], splitSlug[2])
+	apiResp, err := d.client.GetProjectSettings(ctx, splitSlug[0], splitSlug[1], splitSlug[2])
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Client Error",
@@ -135,16 +142,17 @@ func (d *ProjectSettingsDataSource) Read(ctx context.Context, req datasource.Rea
 		return
 	}
 
-	data.AutoCancelBuilds = types.BoolPointerValue(apiResp.Advanced.AutocancelBuilds)
-	data.BuildForkPrs = types.BoolPointerValue(apiResp.Advanced.BuildForkPrs)
-	data.DisableSSH = types.BoolPointerValue(apiResp.Advanced.DisableSSH)
-	data.ForksReceiveSecretEnvVars = types.BoolPointerValue(apiResp.Advanced.ForksReceiveSecretEnvVars)
-	data.OSS = types.BoolPointerValue(apiResp.Advanced.OSS)
-	data.SetGithubStatus = types.BoolPointerValue(apiResp.Advanced.SetGithubStatus)
-	data.SetupWorkflows = types.BoolPointerValue(apiResp.Advanced.SetupWorkflows)
-	data.WriteSettingsRequiresAdmin = types.BoolPointerValue(apiResp.Advanced.WriteSettingsRequiresAdmin)
+	data.AutoCancelBuilds = types.BoolPointerValue(apiResp.AutocancelBuilds)
+	data.BuildForkPrs = types.BoolPointerValue(apiResp.BuildForkPrs)
+	data.BuildPrsOnly = types.BoolPointerValue(apiResp.BuildPrsOnly)
+	data.DisableSSH = types.BoolPointerValue(apiResp.DisableSSH)
+	data.ForksReceiveSecretEnvVars = types.BoolPointerValue(apiResp.ForksReceiveSecretEnvVars)
+	data.OSS = types.BoolPointerValue(apiResp.OSS)
+	data.SetGithubStatus = types.BoolPointerValue(apiResp.SetGithubStatus)
+	data.SetupWorkflows = types.BoolPointerValue(apiResp.SetupWorkflows)
+	data.WriteSettingsRequiresAdmin = types.BoolPointerValue(apiResp.WriteSettingsRequiresAdmin)
 
-	overrides, diags := types.SetValueFrom(ctx, types.StringType, apiResp.Advanced.PROnlyBranchOverrides)
+	overrides, diags := types.SetValueFrom(ctx, types.StringType, apiResp.PROnlyBranchOverrides)
 	resp.Diagnostics.Append(diags...)
 	if diags.HasError() {
 		return
@@ -159,15 +167,10 @@ func (d *ProjectSettingsDataSource) Configure(_ context.Context, req datasource.
 		return
 	}
 
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *circleciClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.ProjectService
+	d.client = client
 }

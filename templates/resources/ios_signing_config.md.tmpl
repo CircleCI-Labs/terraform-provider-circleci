@@ -1,0 +1,38 @@
+---
+page_title: "circleci_ios_signing_config Resource - circleci"
+subcategory: ""
+description: |-
+  Pairs an iOS signing certificate with provisioning profiles.
+---
+
+# circleci_ios_signing_config (Resource)
+
+Pairs a [`circleci_ios_signing_certificate`](./ios_signing_certificate) with one or more Apple provisioning profiles, for signing iOS builds.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server.** Signing configurations are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. The configuration itself is only useful to a **macOS executor** building and signing an iOS app.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_ios_signing_config/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Immutability
+
+The CircleCI API has no update endpoint for a signing configuration: the routes served is `GET`/`POST /signing/configs` and `DELETE /signing/configs/{id}` — there is not even a `GET /signing/configs/{id}` to read one back by itself (see "No singular data source" below). Every attribute is therefore `RequiresReplace`: adding, removing or renewing a provisioning profile, renaming the configuration, or repointing it at a different certificate are all a new resource, not an update.
+
+## Security
+
+`provisioning_profiles[*].blob` is write-only, for the same reason and with the same consequences as `circleci_ios_signing_certificate`'s `certificate_blob`: CircleCI never returns a profile's content, so the only copy this provider can compare against on the next `terraform plan` lives in Terraform state, in cleartext. See that resource's "Security" section for how to source it and protect state accordingly.
+
+A provisioning profile is less sensitive than a certificate's private key — it authorizes devices and app identifiers rather than signing anything itself — but it is still not intended to be public, and the same practices apply: source it from a secret manager, and use an encrypted state backend.
+
+## No singular data source
+
+There is no `GET /signing/configs/{id}` route, so there is also no singular `circleci_ios_signing_config` data source. Use [`circleci_ios_signing_configs`](../data-sources/ios_signing_configs) and match on `name` or `id` in your configuration — which is exactly what this resource's own `Read` does internally, since it has no more direct route available either.

@@ -1,0 +1,87 @@
+---
+page_title: "circleci_audit_log_config Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a CircleCI audit log streaming config, where an organization's audit log events are delivered to a customer-owned S3 bucket.
+---
+
+# circleci_audit_log_config (Resource)
+
+Manages a CircleCI audit log streaming config: where an organization's audit log events are delivered, as JSON objects written to a customer-owned S3 (or S3-compatible) bucket.
+
+!> **CircleCI Cloud only, and only on a Scale plan.** This is a v2 API, but the API gates it on a Cloud billing plan tier that CircleCI Server installations do not have — see [Audit log streaming](https://circleci.com/changelog/audit-log-streaming). The provider could not confirm from CircleCI Server's routes served whether the underlying route even exists there, so this is gated the same way the v3-only resources in this provider are, out of caution.
+
+!> **Creating a config verifies connectivity to the bucket, even when `is_disabled = true`.** CircleCI assumes `arn` via OIDC and writes a probe object; a role that cannot be assumed, or a bucket that cannot be written to, fails the create. Updating an existing config to `is_disabled = true` does **not** re-verify connectivity, so a config can be disabled even once its destination has become unreachable.
+
+An organization may have at most one config per `target_type`: a second `S3` (or `S3_COMPATIBLE`) config for the same organization is rejected.
+
+## Example Usage
+
+```terraform
+# Stream audit log events to an AWS S3 bucket. CircleCI assumes this role via
+# OIDC to write to the bucket, so it must trust CircleCI's OIDC provider and
+# have write access to the bucket.
+resource "circleci_audit_log_config" "s3" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  target_type     = "S3"
+  arn             = "arn:aws:iam::123456789012:role/circleci-audit-logs"
+  bucket_name     = "acme-audit-logs"
+  bucket_prefix   = "circleci"
+  region          = "us-east-1"
+}
+
+# An S3-compatible destination, such as a self-hosted MinIO. endpoint is
+# required here; region is optional and defaults to "us-east-1" server-side.
+resource "circleci_audit_log_config" "minio" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  target_type     = "S3_COMPATIBLE"
+  arn             = "arn:minio:iam::role/circleci-audit-logs"
+  bucket_name     = "acme-audit-logs"
+  endpoint        = "https://minio.example.com"
+}
+
+# Keep a config in place without deleting it: is_disabled stops delivery, but
+# unlike a delete, it can be turned back on without losing the destination
+# configuration. Note that re-enabling it does not re-verify connectivity, so
+# it only matters at the moment streaming is turned back on.
+resource "circleci_audit_log_config" "paused" {
+  organization_id = "00000000-0000-0000-0000-000000000000"
+  target_type     = "S3"
+  is_disabled     = true
+  arn             = "arn:aws:iam::123456789012:role/circleci-audit-logs"
+  bucket_name     = "acme-audit-logs-cold"
+  region          = "us-east-1"
+}
+
+output "s3_connection_status" {
+  value = circleci_audit_log_config.s3.connection_status
+}
+```
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Route shape
+
+Unlike most CircleCI v2 resources, the routes behind this resource are not consistently nested under the organization:
+
+* Create and list are `POST`/`GET /api/v2/organizations/{organization_id}/audit-log/configs`.
+* Get, update and delete address a config by its bare `id`: `GET`/`DELETE /api/v2/audit-log/configs/{id}`, and update is a `PUT /api/v2/audit-log/configs` with the id carried in the request body rather than the URL.
+
+None of this is visible from the resource's configuration — it only affects `terraform import`, which needs just the config `id`, not `organization_id/id`.
+
+## `region` and `endpoint` depend on `target_type`
+
+* `target_type = "S3"` requires `region` and rejects `endpoint`.
+* `target_type = "S3_COMPATIBLE"` requires `endpoint`; `region` is optional and CircleCI defaults it to `us-east-1` server-side when omitted.
+
+`target_type` can be changed in place; CircleCI does not re-run the one-config-per-target-type conflict check on update.
+
+## Import
+
+Import is supported using the config's `id` alone:
+
+```shell
+terraform import circleci_audit_log_config.s3 "11111111-1111-1111-1111-111111111111"
+```
+
+`organization_id` is not part of the import ID: the single-config route the provider reads from is not scoped by organization, and the response includes it.

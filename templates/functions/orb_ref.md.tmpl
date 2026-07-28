@@ -1,0 +1,24 @@
+---
+page_title: "orb_ref Function - circleci"
+subcategory: ""
+description: |-
+  Builds a fully qualified orb version reference, namespace/orb@version.
+---
+
+# function: orb_ref
+
+Builds the `namespace/orb@version` reference that the CircleCI orb version API's `filter[ref]` parameter requires.
+
+Getting this wrong was a real bug in this provider: `filter[ref]` silently resolves nothing unless it is given the fully qualified form — passing a bare version string such as `"1.2.3"` does not fall back to filtering by orb, it just matches no version at all. This function validates each part so a malformed reference (a namespace or orb name containing `/`, `@` or whitespace, or a version that is not a semantic version, a `dev:` label or `volatile`) fails at plan time instead of resolving to nothing at apply time.
+
+## Example Usage
+
+{{ tffile "examples/functions/orb_ref/function.tf" }}
+
+## Signature
+
+{{ .FunctionSignatureMarkdown }}
+
+## Arguments
+
+{{ .FunctionArgumentsMarkdown }}

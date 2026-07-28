@@ -122,7 +122,7 @@ func TestAccOrganizationDestroyDoesNotDeleteAdoptedOrg(t *testing.T) {
 		t.Run(vcsType, func(t *testing.T) {
 			api, host := newOrgAPI(t, vcsType)
 
-			resource.Test(t, resource.TestCase{
+			resource.UnitTest(t, resource.TestCase{
 				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 				Steps: []resource.TestStep{
 					{Config: orgConfig(host, vcsType)},
@@ -150,7 +150,7 @@ func TestAccOrganizationDestroyDoesNotDeleteAdoptedOrg(t *testing.T) {
 func TestAccOrganizationDestroyDeletesStandaloneOrg(t *testing.T) {
 	api, host := newOrgAPI(t, "circleci")
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{Config: orgConfig(host, "circleci")},

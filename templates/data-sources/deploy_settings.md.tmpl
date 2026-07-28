@@ -1,0 +1,33 @@
+---
+page_title: "circleci_deploy_settings Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches a CircleCI project's deploy/release settings.
+---
+
+# circleci_deploy_settings (Data Source)
+
+Fetches a CircleCI project's deploy/release settings: the pipeline definitions used for automatic
+deploys and rollbacks.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
+| **API** | `GET /api/v2/deploy/projects/{id}/settings` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. |
+
+-> **This route also accepts writes.** the API also exposes `PATCH .../settings`, but this
+provider exposes the route read-only here: both settings are pipeline-definition ids, and pipeline
+definitions are a separate, not-yet-built area of this provider's scope (distinct from the pipeline
+*run* data sources — [`circleci_pipeline_run`](pipeline_run) and friends — which this workstream does
+cover). A future resource can add the write side without changing this data source's shape.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_deploy_settings/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

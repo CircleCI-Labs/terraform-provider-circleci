@@ -1,0 +1,253 @@
+// Copyright (c) CircleCI
+// SPDX-License-Identifier: MPL-2.0
+
+package circleci_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"terraform-provider-circleci/internal/circleci"
+)
+
+const testUserID = "a1b2c3d4-1111-2222-3333-444455556666"
+
+// testUserBody is the shape production sends: a flat object with exactly these
+// four keys, built by user->api-response in the v2 API's
+// the CircleCI API There is no envelope.
+const testUserBody = `{
+  "id": "` + testUserID + `",
+  "login": "octocat",
+  "name": "Mona Lisa Octocat",
+  "avatar_url": "https://avatars.example.com/u/1"
+}`
+
+// newUserServer serves the user routes from handler and records every request.
+func newUserServer(t *testing.T, handler http.HandlerFunc) (*circleci.Client, *[]string) {
+	t.Helper()
+
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.RequestURI)
+		handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	return circleci.New(circleci.Config{Host: srv.URL, Token: "tok"}), &seen
+}
+
+func TestUserServiceCurrent(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(testUserBody))
+	})
+
+	user, err := client.Users().Current(context.Background())
+	if err != nil {
+		t.Fatalf("Current returned error: %v", err)
+	}
+
+	if len(*seen) != 1 {
+		t.Fatalf("request count = %d, want 1", len(*seen))
+	}
+	if got := (*seen)[0]; got != "GET /api/v2/me" {
+		t.Errorf("request = %q, want %q", got, "GET /api/v2/me")
+	}
+
+	if user.ID != testUserID {
+		t.Errorf("id = %q, want %q", user.ID, testUserID)
+	}
+	if user.Login != "octocat" {
+		t.Errorf("login = %q, want %q", user.Login, "octocat")
+	}
+	if user.Name != "Mona Lisa Octocat" {
+		t.Errorf("name = %q, want %q", user.Name, "Mona Lisa Octocat")
+	}
+	if user.AvatarURL != "https://avatars.example.com/u/1" {
+		t.Errorf("avatar url = %q, want the avatar_url value", user.AvatarURL)
+	}
+}
+
+func TestUserServiceCurrentForbidden(t *testing.T) {
+	t.Parallel()
+
+	// The route answers 403, not 401, for a token that is not a user token. That
+	// must not be mistaken for a missing user, or the data source would silently
+	// report nothing instead of explaining the token is wrong.
+	client, _ := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Forbidden."}`))
+	})
+
+	_, err := client.Users().Current(context.Background())
+	if err == nil {
+		t.Fatal("Current returned no error for a 403, want one")
+	}
+	if !circleci.IsUnauthorized(err) {
+		t.Errorf("IsUnauthorized(%v) = false, want true", err)
+	}
+	if circleci.IsNotFound(err) {
+		t.Error("IsNotFound() = true for a 403, want false")
+	}
+	if detail := circleci.Detail(err); !strings.Contains(detail, "Forbidden.") {
+		t.Errorf("Detail() = %q, want it to carry the server message", detail)
+	}
+}
+
+func TestUserServiceCurrentEmptyBodyIsNotFound(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	if _, err := client.Users().Current(context.Background()); !circleci.IsNotFound(err) {
+		t.Errorf("Current error = %v, want a not found error", err)
+	}
+}
+
+func TestUserServiceGet(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(testUserBody))
+	})
+
+	user, err := client.Users().Get(context.Background(), testUserID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if user.ID != testUserID {
+		t.Errorf("id = %q, want %q", user.ID, testUserID)
+	}
+
+	// Note /user/{id}, singular, not /users/{id}.
+	want := "GET /api/v2/user/" + testUserID
+	if got := (*seen)[0]; got != want {
+		t.Errorf("request = %q, want %q", got, want)
+	}
+}
+
+func TestUserServiceGetNotFound(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not found."}`))
+	})
+
+	if _, err := client.Users().Get(context.Background(), testUserID); !circleci.IsNotFound(err) {
+		t.Errorf("Get error = %v, want a not found error", err)
+	}
+}
+
+func TestUserServiceGetEscapesID(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(testUserBody))
+	})
+
+	if _, err := client.Users().Get(context.Background(), "id/../me"); err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+
+	want := "GET /api/v2/user/id%2F..%2Fme"
+	if got := (*seen)[0]; got != want {
+		t.Errorf("request = %q, want %q", got, want)
+	}
+}
+
+func TestUserServiceListCollaborations(t *testing.T) {
+	t.Parallel()
+
+	// A bare JSON array, not the items/next_page_token envelope: the v2 API
+	// builds the whole set per request, so the route does not paginate. The second
+	// entry has a null id, which is the documented case for an organization that
+	// exists on the VCS but has never been used on CircleCI.
+	const body = `[
+      {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "vcs_type": "circleci",
+        "name": "acme",
+        "slug": "circleci/11111111-1111-1111-1111-111111111111",
+        "avatar_url": "https://avatars.example.com/u/2"
+      },
+      {
+        "id": null,
+        "vcs_type": "github",
+        "name": "unknown-to-circleci",
+        "slug": "gh/unknown-to-circleci",
+        "avatar_url": "https://avatars.example.com/u/3"
+      }
+    ]`
+
+	client, seen := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+
+	collaborations, err := client.Users().ListCollaborations(context.Background())
+	if err != nil {
+		t.Fatalf("ListCollaborations returned error: %v", err)
+	}
+
+	if len(*seen) != 1 {
+		t.Fatalf("request count = %d, want 1 (the route does not paginate)", len(*seen))
+	}
+	if got := (*seen)[0]; got != "GET /api/v2/me/collaborations" {
+		t.Errorf("request = %q, want %q", got, "GET /api/v2/me/collaborations")
+	}
+
+	if len(collaborations) != 2 {
+		t.Fatalf("collaboration count = %d, want 2", len(collaborations))
+	}
+
+	first := collaborations[0]
+	if first.ID == nil || *first.ID != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("first id = %v, want the UUID", first.ID)
+	}
+	// The key is vcs_type: the v2 API declares it in kebab-case internally and
+	// converts to snake_case on the way out.
+	if first.VCSType != "circleci" {
+		t.Errorf("first vcs type = %q, want %q (decoded from vcs_type)", first.VCSType, "circleci")
+	}
+	if first.Slug != "circleci/11111111-1111-1111-1111-111111111111" {
+		t.Errorf("first slug = %q, want the standalone slug", first.Slug)
+	}
+	if first.AvatarURL != "https://avatars.example.com/u/2" {
+		t.Errorf("first avatar url = %q, want the avatar_url value", first.AvatarURL)
+	}
+
+	// A null id must stay distinguishable from an id the server sent as "".
+	if collaborations[1].ID != nil {
+		t.Errorf("second id = %v, want nil for a null id", collaborations[1].ID)
+	}
+}
+
+func TestUserServiceListCollaborationsEmpty(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newUserServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	})
+
+	collaborations, err := client.Users().ListCollaborations(context.Background())
+	if err != nil {
+		t.Fatalf("ListCollaborations returned error: %v", err)
+	}
+	if len(collaborations) != 0 {
+		t.Errorf("collaboration count = %d, want 0", len(collaborations))
+	}
+}

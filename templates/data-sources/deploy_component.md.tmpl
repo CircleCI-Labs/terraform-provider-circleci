@@ -1,0 +1,32 @@
+---
+page_title: "circleci_deploy_component Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches one CircleCI deploy/release component by id, including every version published for it.
+---
+
+# circleci_deploy_component (Data Source)
+
+Fetches one CircleCI deploy/release component by id, including every version published for it. Use
+[`circleci_deploy_components`](deploy_components) to list components in an organization, e.g. to look one
+up by name.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
+| **API** | `GET /api/v2/deploy/components/{id}` and `GET /api/v2/deploy/components/{id}/versions` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. |
+
+~> **`pipeline_id`, `workflow_id` and `job_id` on a version can be null.** The API represents "no
+association recorded" as the all-zero UUID (`00000000-0000-0000-0000-000000000000`) rather than omitting
+the field; this provider converts that sentinel to `null` so it cannot be mistaken for a real identifier.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_deploy_component/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

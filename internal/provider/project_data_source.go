@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/project"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -45,7 +46,7 @@ func NewProjectDataSource() datasource.DataSource {
 
 // ProjectDataSource is the data source implementation.
 type ProjectDataSource struct {
-	client *project.ProjectService
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -128,7 +129,7 @@ func (d *ProjectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	apiResp, err := d.client.Get(ctx, data.Slug.ValueString())
+	apiResp, err := d.client.GetProject(ctx, data.Slug.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Client Error",
@@ -142,15 +143,15 @@ func (d *ProjectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	data.Id = types.StringValue(apiResp.Id)
+	data.Id = types.StringValue(apiResp.ID)
 	data.Name = types.StringValue(apiResp.Name)
-	data.OrganizationId = types.StringValue(apiResp.OrganizationId)
+	data.OrganizationId = types.StringValue(apiResp.OrganizationID)
 	data.OrganizationName = types.StringValue(apiResp.OrganizationName)
 	data.OrganizationSlug = types.StringValue(apiResp.OrganizationSlug)
 	data.VcsInfo = &projectVcsInfoDataSourceModel{
-		DefaultBranch: types.StringValue(apiResp.VcsInfo.DefaultBranch),
-		Provider:      types.StringValue(apiResp.VcsInfo.Provider),
-		VcsUrl:        types.StringValue(apiResp.VcsInfo.VcsUrl),
+		DefaultBranch: types.StringValue(apiResp.VCSInfo.DefaultBranch),
+		Provider:      types.StringValue(apiResp.VCSInfo.Provider),
+		VcsUrl:        types.StringValue(apiResp.VCSInfo.VCSURL),
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -162,15 +163,10 @@ func (d *ProjectDataSource) Configure(_ context.Context, req datasource.Configur
 		return
 	}
 
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.ProjectService
+	d.client = client
 }

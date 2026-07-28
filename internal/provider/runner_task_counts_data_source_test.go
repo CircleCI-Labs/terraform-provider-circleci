@@ -23,7 +23,7 @@ data "circleci_runner_task_counts" "test" {
 }
 `
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: runnerProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config: config,
@@ -65,7 +65,7 @@ data "circleci_runner_task_counts" "test" {
 }
 `
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: runnerProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config: config,

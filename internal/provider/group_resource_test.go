@@ -324,7 +324,7 @@ func TestAccGroupResource(t *testing.T) {
 
 	idRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create and Read.
@@ -404,7 +404,7 @@ func TestAccGroupResource_serverDeployment(t *testing.T) {
 	// installation is always a `github` type organization, so deployment =
 	// "server" must be rejected with an explanatory error rather than attempting
 	// a request the API would refuse.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      testAccGroupResourceConfig(host, "server", "server-group", "On Server"),
@@ -418,7 +418,7 @@ func TestAccGroupResource_withoutDescription(t *testing.T) {
 
 	// description is optional and computed: with none configured, the value the
 	// server returns is recorded instead of leaving the attribute unknown.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -438,7 +438,7 @@ func TestAccGroupResource_withoutDescription(t *testing.T) {
 func TestAccGroupResource_importRejectsMalformedID(t *testing.T) {
 	_, host := newMockGroupAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{

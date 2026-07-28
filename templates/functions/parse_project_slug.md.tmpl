@@ -1,0 +1,24 @@
+---
+page_title: "parse_project_slug Function - circleci"
+subcategory: ""
+description: |-
+  Splits a CircleCI project slug into its vcs_type, org and project segments.
+---
+
+# function: parse_project_slug
+
+The inverse of `project_slug`: given a slug such as `"gh/my-org/my-repo"` or `"circleci/<orgUUID>/<projectUUID>"`, returns an object with `vcs_type`, `org` and `project` attributes. Errors if the slug does not have exactly three non-empty, `/`-separated segments — a shape mismatch that would otherwise reach the API as a confusing 404.
+
+Useful for pulling a slug apart that arrived as a single string (for example from an existing resource's `project_slug` attribute, or a data source list keyed by slug) when only one segment — usually `org` — is actually needed.
+
+## Example Usage
+
+{{ tffile "examples/functions/parse_project_slug/function.tf" }}
+
+## Signature
+
+{{ .FunctionSignatureMarkdown }}
+
+## Arguments
+
+{{ .FunctionArgumentsMarkdown }}

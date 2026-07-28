@@ -1,0 +1,33 @@
+---
+page_title: "circleci_pipeline_config Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches the source and compiled configuration for a CircleCI pipeline run.
+---
+
+# circleci_pipeline_config (Data Source)
+
+Fetches the source and compiled configuration for a CircleCI pipeline run — genuinely useful for
+asserting what a run actually compiled to, orb expansion included, rather than trusting that the
+checked-in YAML alone reflects what ran.
+
+~> **This is a point-in-time read.** A run's configuration does not change once compiled, but the run
+itself might not exist yet, or might still be compiling, when this is read — `source` and `compiled` are
+then empty strings. Use this data source for inspection and in `check` blocks; using it to derive a
+resource attribute will cause a diff for any run whose configuration was not yet available at read time.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments; see [`circleci_pipeline_run`](pipeline_run). |
+| **API** | `GET /api/v2/pipeline/{id}/config` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with permission to view the project's builds. |
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_pipeline_config/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

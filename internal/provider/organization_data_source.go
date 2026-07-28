@@ -8,15 +8,18 @@ import (
 	"fmt"
 
 	"github.com/CircleCI-Public/circleci-sdk-go/organization"
+	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &OrganizationDataSource{}
-	_ datasource.DataSourceWithConfigure = &OrganizationDataSource{}
+	_ datasource.DataSource                     = &OrganizationDataSource{}
+	_ datasource.DataSourceWithConfigure        = &OrganizationDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &OrganizationDataSource{}
 )
 
 // organizationDataSourceModel maps the output schema.
@@ -37,6 +40,17 @@ type OrganizationDataSource struct {
 	client *organization.OrganizationService
 }
 
+// ConfigValidators requires exactly one identifier. The API route segment is
+// documented as "org-slug-or-id", so one request serves both lookups.
+func (d *OrganizationDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		datasourcevalidator.ExactlyOneOf(
+			path.MatchRoot("id"),
+			path.MatchRoot("slug"),
+		),
+	}
+}
+
 // Metadata returns the data source type name.
 func (d *OrganizationDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_organization"
@@ -48,16 +62,23 @@ func (d *OrganizationDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 		MarkdownDescription: "Fetches information about a CircleCI organization.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
-				MarkdownDescription: "The unique ID of the CircleCI organization.",
-				Required:            true,
+				MarkdownDescription: "The unique ID (UUID) of the CircleCI organization. " +
+					"Set either this or `slug`.",
+				Optional: true,
+				Computed: true,
 			},
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the CircleCI organization.",
 				Computed:            true,
 			},
 			"slug": schema.StringAttribute{
-				MarkdownDescription: "The slug of the CircleCI organization.",
-				Computed:            true,
+				MarkdownDescription: "The slug of the CircleCI organization, such as `gh/acme` or " +
+					"`circleci/<uuid>`. Set either this or `id`.\n\n" +
+					"Looking an organization up by slug is usually the only way to start: every other " +
+					"resource in this provider is keyed by organization ID, which is otherwise visible " +
+					"only in the CircleCI web application.",
+				Optional: true,
+				Computed: true,
 			},
 			"vcs_type": schema.StringAttribute{
 				MarkdownDescription: "The VCS type of the CircleCI organization (e.g., github, bitbucket, circleci).",
@@ -76,18 +97,17 @@ func (d *OrganizationDataSource) Read(ctx context.Context, req datasource.ReadRe
 		return
 	}
 
-	if state.Id.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing organization id",
-			"The organization id is required to fetch organization data.",
-		)
-		return
+	// The route segment is documented as "org-slug-or-id", so one request serves
+	// both lookups.
+	identifier := state.Id.ValueString()
+	if identifier == "" {
+		identifier = state.Slug.ValueString()
 	}
 
-	org, err := d.client.Get(ctx, state.Id.ValueString())
+	org, err := d.client.Get(ctx, identifier)
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to Read CircleCI organization with id "+state.Id.ValueString(),
+			"Unable to Read CircleCI organization "+identifier,
 			err.Error(),
 		)
 		return

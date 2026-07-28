@@ -1,0 +1,34 @@
+---
+page_title: "circleci_deploy_components Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every CircleCI deploy/release component in an organization, optionally scoped to one project.
+---
+
+# circleci_deploy_components (Data Source)
+
+Fetches every CircleCI deploy/release component in an organization, optionally scoped to one project or
+filtered by name. Components are declared in a project's `.circleci/config.yml` (the `component` key on a
+deploy job) rather than created through the API, so this is read-only.
+
+Pagination is followed internally, so the result covers every matching component rather than one page.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
+| **API** | `GET /api/v2/deploy/components` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. |
+
+-> **Versions are a separate, per-component read.** Use
+[`circleci_deploy_component`](deploy_component) to fetch one component by id, including every version
+published for it.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_deploy_components/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

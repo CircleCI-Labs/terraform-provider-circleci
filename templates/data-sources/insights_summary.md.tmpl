@@ -1,0 +1,54 @@
+---
+page_title: "circleci_insights_summary Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches organization-wide Insights metrics, with the change against the preceding window, and optionally the same for named projects.
+---
+
+# circleci_insights_summary (Data Source)
+
+Fetches organization-wide Insights metrics, with the change against the preceding window, and optionally the same for named projects.
+
+This is the only organization-level view the CircleCI API offers: total runs, total compute duration, credits consumed and success rate, each with a trend. Use it for a rollup output, or to assert an organization's success rate has not regressed.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Depends on the installation. The route is v2, but Insights is a separate service that a given CircleCI Server installation may not run. The provider does not block `deployment = "server"`; if the installation has no Insights, the request fails with a not-found error. |
+| **API** | `GET /api/v2/insights/{org-slug}/summary` |
+| **Organization type** | Any. |
+| **Token** | An API token with permission to view the organization's builds. |
+
+## `projects` is empty unless you ask for names
+
+~> **The API does not return every project by default.** It only computes per-project metrics for the names passed in `project_names`. With no names, `projects` is an empty list — the organization totals are still populated.
+
+`all_projects` exists to close that loop: it lists every project name in the organization the token can see, which is how you discover the names to ask for. In practice that means **two applies** to get per-project data for a project set you do not already know: one to read `all_projects`, and one to feed those names back in.
+
+Note that these are project *names*, not slugs.
+
+## Organization slugs are two segments, not three
+
+The `organization_slug` argument takes `vcs-slug/org-name` — `gh/acme` — or `circleci/<org-uuid>` for a standalone organization. That is **two** segments, unlike the three of a project slug. Passing a project slug here is rejected before a request is made, with an error saying so.
+
+`circleci_user_collaborations` reports the slug of every organization the configured token can see, which is the reliable way to get one.
+
+## Accuracy
+
+~> **Insights metrics are approximate and lag reality.** They are recomputed **daily**, so the last 24 hours of activity may be missing. No window longer than 90 days is retained.
+
+~> **Do not use credit figures for cost reporting.** `total_credits_used` does not share a source of truth with billing. CircleCI documents Insights as unsuitable for credit reporting, and the Plan Overview page in the web application as the only accurate source. An organization-wide credit total is exactly the figure someone will be tempted to put in a finance report; it is not suitable for that.
+
+## Reading the numbers
+
+- `success_rate` is a ratio between 0 and 1, not a percentage.
+- Every value under `trends` is a ratio of change against the preceding window of the same length: `0.1` is a ten percent increase, `-0.1` a ten percent decrease. A negative `total_duration_secs` trend is an improvement.
+- `throughput` is reported for the organization but is `null` for individual projects, which the API does not compute it for.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_insights_summary/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

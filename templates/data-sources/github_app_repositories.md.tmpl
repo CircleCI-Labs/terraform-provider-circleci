@@ -1,0 +1,42 @@
+---
+page_title: "circleci_github_app_repositories Data Source - circleci"
+subcategory: ""
+description: |-
+  Lists every repository the CircleCI GitHub App can access for an organization, with the numeric GitHub ID of each.
+---
+
+# circleci_github_app_repositories (Data Source)
+
+Lists every repository the CircleCI GitHub App can access for an organization, with the numeric GitHub ID of each.
+
+Use it to drive `for_each` over the repositories CircleCI can see, to build a name-to-external-ID lookup table, or to find out what an installation is scoped to when `circleci_github_app_repository` cannot find a name.
+
+Pagination is followed internally, so the result covers every repository rather than one page.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — the GitHub App integration only exists for `circleci` type (standalone) organizations, and a CircleCI Server installation is always a `github` type organization. Using this data source with `deployment = "server"` reports an explicit error rather than the HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v2/github-app/organization/{org_id}/repositories` |
+| **Organization type** | `circleci` (standalone). A GitHub App installation is what makes a standalone organization able to see repositories, so `github` and `bitbucket` organizations have nothing to report here. |
+| **Token** | A personal or organization API token with read access to the organization. |
+
+## The API this reads is not published
+
+~> **This data source reads an unpublished CircleCI API, deliberately.** The route is declared in CircleCI's own API definitions only so that request validation accepts it, under a comment marking it *"Internal / CLI-only. Defined here so the validation middleware accepts them, but intentionally NOT customer-facing: they are excluded from the public docs bundles."* It does not appear in the published OpenAPI spec or in the CircleCI API reference, and it therefore carries **no compatibility guarantee** — CircleCI may change its response shape, its path, or withdraw it entirely, without notice and without a deprecation window.
+
+It is used here because there is no published way to resolve a repository name to the numeric external ID that `circleci_pipeline` and `circleci_trigger` require. See `circleci_github_app_repository` for the single-repository lookup and the full rationale.
+
+## An empty list is ambiguous
+
+The route answers HTTP 200 with an empty `items` array both when the organization has **no GitHub App installation at all** and when it has one that has been granted **no repositories**. The two cannot be told apart from here, so an empty `repositories` list means "CircleCI can see nothing", not specifically "the app is not installed".
+
+An installation configured for selected repositories reports only what it was granted. A repository the organization owns but has not granted the app is absent from this list, and the only fix is to widen the installation on GitHub.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_github_app_repositories/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

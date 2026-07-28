@@ -43,7 +43,7 @@ resource "circleci_runner_resource_class" "test" {
 }
 `, organizationID, resourceClass, description)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: config}},
 	})
@@ -94,7 +94,7 @@ resource "circleci_runner_resource_class" "test" {
 }
 `
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      config,

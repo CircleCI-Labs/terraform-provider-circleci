@@ -1,0 +1,30 @@
+---
+page_title: "circleci_ios_signing_configs Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every iOS signing configuration in a CircleCI organization.
+---
+
+# circleci_ios_signing_configs (Data Source)
+
+Fetches every iOS signing configuration in a CircleCI organization, including configurations created outside Terraform. Pagination is followed internally, so the result covers every configuration rather than one page.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server.** Signing configurations are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service.
+
+-> **There is no singular data source.** The API has no route to fetch one signing configuration by id (only `GET /signing/configs`, `POST /signing/configs` and `DELETE /signing/configs/{id}`), so there is nothing for a singular `circleci_ios_signing_config` data source to call. Match on `name` or `id` against this data source's result instead.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_ios_signing_configs/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Security
+
+Each provisioning profile's `.mobileprovision` content is write-only: only `file_name` is reported back, exactly like a certificate's content — see [`circleci_ios_signing_certificate`](../resources/ios_signing_certificate)'s "Security" section.

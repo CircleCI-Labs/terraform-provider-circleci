@@ -1,0 +1,45 @@
+---
+page_title: "circleci_orb_namespace Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a CircleCI orb registry namespace.
+---
+
+# circleci_orb_namespace (Resource)
+
+Manages a CircleCI orb registry namespace.
+
+A namespace is the globally unique prefix that owns a set of orbs, as in `<namespace>/<orb>`. An organization may own one namespace, and the name is claimed across all of CircleCI rather than only within your organization, so a name another organization already took cannot be created.
+
+A namespace is also what a self-hosted runner resource class is named after: a resource class is always `<namespace>/<class>`. That makes this resource the way to create the namespace a `circleci_runner_resource_class` needs.
+
+~> **CircleCI Cloud only.** Namespaces are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+
+!> **Deleting a namespace deletes its orbs.** There is no way to recover them, and published orb versions cannot be republished under the same namespace and version.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_orb_namespace/resource.tf" }}
+
+## Renaming
+
+`name` is **not** a replace-forcing attribute. The v3 API has a dedicated rename route, so changing `name` renames the namespace in place: it keeps its id and its orbs, and Terraform reports a plain update rather than a destroy and create.
+
+A rename is still disruptive outside Terraform's view of the world:
+
+* orbs in the namespace are reachable only under the new name, so any `.circleci/config.yml` that references `<old-namespace>/<orb>@<version>` stops resolving;
+* runner resource classes named `<old-namespace>/<class>` stop matching.
+
+The provider emits a warning after a successful rename to say so.
+
+`organization_id` cannot change: a namespace cannot be moved between organizations, so changing it forces a new namespace, which deletes the old one and everything in it.
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+The import ID is `<organization_id>/<namespace_name>`, or `<organization_id>/<namespace_id>`.
+
+{{ codefile "shell" "examples/resources/circleci_orb_namespace/import.sh" }}
+
+The organization id has to be part of the import ID because the CircleCI API's namespace representation does not include the owning organization, so the read that follows the import cannot discover it. Importing with the name alone would leave `organization_id` null, and the next plan would then want to replace the namespace — destroying every orb in it. The provider therefore rejects a bare name with an explicit error.

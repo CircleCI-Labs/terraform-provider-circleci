@@ -60,7 +60,7 @@ data "circleci_organization" "t" {
 }
 `, srv.URL+"/api/v2")
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: cfg}},
 	})
@@ -90,7 +90,7 @@ data "circleci_organization" "t" {
 }
 `, srv.URL)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: cfg}},
 	})
@@ -118,7 +118,7 @@ data "circleci_organization" "t" {
 }
 `
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      cfg,
@@ -141,7 +141,7 @@ data "circleci_organization" "t" {
 }
 `, srv.URL)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: cfg}},
 	})
@@ -161,7 +161,7 @@ data "circleci_organization" "t" {
 }
 `, srv.URL)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: cfg}},
 	})

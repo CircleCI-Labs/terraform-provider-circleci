@@ -89,32 +89,51 @@ deliberate: it is safer than a wrong `yes`.
 | `circleci_url_orb_allow_list_entry` | yes | yes | yes [^glorbauth] | yes [^glorbauth] | yes | yes | ? |
 | `circleci_otel_exporter` | yes | yes | yes | yes | yes | yes | ? |
 
-### Supported by CircleCI, not yet implemented here
+### Supported by CircleCI, not implemented here
 
-Roadmap. Each has a tracking issue.
+[`API-COVERAGE.md`](./API-COVERAGE.md) is the full route-by-route inventory, built
+from the routes CircleCI serves rather than the published
+OpenAPI spec — the spec both omits routes that exist and describes routes that are
+never wired up. Use it to check a specific endpoint; the summary below is the
+reasoning.
 
-| Capability | API | Notes |
+| Capability | API | Why not |
 |---|---|---|
-| Legacy scheduled pipelines | v2 `/project/{slug}/schedule` | GitHub OAuth and Bitbucket only. Deliberately **not** planned — use `circleci_trigger` with `event_source_provider = "schedule"`. See the migration guide |
-| Additional project SSH keys | v1.1 only | GitLab projects ship a pre-existing key that must not be deleted |
-| Insights | v2, 10 endpoints | Read-only data sources |
-| Usage export | v2 + v3, async job | Better as an ephemeral resource than a resource |
-| Deploy environments / components | v2, read-only | Declared in config, not creatable via API |
-| `circleci_github_app_repository` (data source) | v2 `github-app/…/repositories` | The only way to resolve `owner/repo` to the numeric `external_id` that pipelines and triggers require. API is internal/unstable |
+| Legacy scheduled pipelines | v2 `/project/{slug}/schedule` | Superseded. Use `circleci_trigger` with `event_source_provider = "schedule"`; see the migration guide. Also GitHub OAuth and Bitbucket only |
+| Additional project SSH keys | v1.1 only | Absent from the Server routes served. Checkout keys are the supported mechanism, and GitLab projects ship a pre-existing key that must not be deleted |
+| 7 of 10 insights endpoints | v2 | Unbounded row counts that would churn state on every refresh. Two are deprecated in the v2 API routes served. Three *are* implemented |
+| Reporting and search | v3 `analysis/*`, `metric/*`, `runs/search`, `jobs/{id}/tests` | Same reasoning. Under discussion — see the tracking issue |
+| Orb promotion | v3 `orb/versions/{id}/promote` | Creates a *new* version rather than mutating one, so it has no idempotent Terraform shape. The client method exists and is tested |
+| Docker layer cache purge | v3 `DELETE /projects/{id}/dlc` | A one-shot side effect with nothing to read back. Terraform has no primitive for "run this once" |
+| Run/workflow cancel, rerun, approve | v2, v3 | Runtime actions, not desired state |
+| Orb and namespace import | v3 `*/import` | One-shot migration between installations |
 
 ### Cannot be managed by any tool
 
 No API exists. Listed so nobody hunts for them.
 
 VCS connection setup (GitHub App install, OAuth authorize, GitLab/Bitbucket tokens)
-· CircleCI account creation · API token creation · SSO/SAML configuration · user
-invitations · audit log retrieval · Docker layer caching (a job-level config flag,
-not an API object) · cloud resource classes (config-level, not API-managed).
+· CircleCI account creation · API token creation (`POST /user/token` is session-only
+auth, a deliberate privilege boundary) · SSO/SAML configuration · audit log
+*retrieval* · cloud resource classes (config-level, not API-managed).
+
+> Earlier versions of this list included **user invitations**. That was wrong.
+> `GET`/`POST /api/v2/organizations/{org_id}/users` and
+> `GET`/`PATCH`/`DELETE .../users/{user_id}` are fully specified and support listing
+> members, inviting them with a role, changing a role, and removing a member. They
+> are served by the API on `a host reserved for internal use` rather than by
+> the API, which is why a search of the the API router found
+> nothing and the capability was recorded as absent. **It is not implemented yet** — it is
+> the largest remaining gap, and shipping it needs a decision about relying on an
+> `a host reserved for internal use` route. See `NEEDS-FROM-MAINTAINER.md`.
+
+The account and VCS steps are browser consent flows by design, which is the structural
+reason a CircleCI organization cannot be stood up end to end from Terraform alone.
 
 [^ctxowner]: On CircleCI Server a context owner must be given as `owner.type: "account"` with an id; owner slugs are not supported, and context names must be unique across all organizations in the account.
 [^grouptype]: CircleCI has two unrelated concepts called "group". *VCS security groups* are documented as available for `github` type organizations only and require the GitHub OAuth integration. *CircleCI RBAC groups* require a `circleci` type organization. Those requirements are mutually exclusive, and the API does not document which one `restriction_type = "group"` expects. Verify against your organization.
 [^bbrestrict]: "Bitbucket repositories do not provide an API that allows CircleCI contexts to be restricted."
-[^v11follow]: Project creation issues a `POST https://circleci.com/api/v1.1/project/.../follow` with the host hardcoded in `circleci-sdk-go`, so it does not currently work against CircleCI Server. Tracked as an issue.
+[^v11follow]: Project creation issues a `POST /api/v1.1/project/.../follow`, because no v2 route follows a project and an unfollowed project never runs. `circleci-sdk-go` sent this to a hardcoded `https://circleci.com` regardless of the configured host, so it could not work against CircleCI Server; the provider now uses its own client and honours `host`. Only classic (`github`/`bitbucket`) organizations need it — a standalone `circleci/<uuid>` organization follows the project as part of creating it. This is the provider's one remaining v1.1 dependency, and v1.1 is the only API version with an active deprecation initiative.
 [^glslug]: GitLab, GitHub App and GHES projects use the `circleci/<orgUUID>/<projectUUID>` slug form. The settings endpoint's `provider` path segment has no `gitlab` value.
 [^forkprs]: CircleCI's own documentation contradicts itself here — the VCS overview says GitLab.com supports it, while the pipelines and OSS pages say it is unsupported for GitLab and GitHub App pipelines. Unresolved.
 [^vcsstatus]: Misleadingly named. This is really "VCS status updates" and controls Bitbucket and GitLab commit statuses too. It is *not* GitHub Checks, which is GitHub-only.
@@ -147,13 +166,30 @@ task lint
 task fmt
 task generate
 
-# Run all the tests
+# Inner loop: the API client packages only. ~390 tests in about 2 seconds.
+task test:fast
+
+# Everything. Takes minutes — see below.
 task test
-# Run the tests for one package
-task test -- ./client/...
-# Run all the quick tests
-task test -- -short ./...
+
+# One package
+task test -- ./internal/circleci/...
 ```
+
+### Why `task test` takes minutes
+
+Most tests in `internal/provider` are not unit tests in the usual sense.
+`terraform-plugin-testing` launches a **real `terraform` binary** for each test case
+and drives `plan`/`apply`/`destroy` through it against an `httptest` fake of the
+CircleCI API. Several hundred of those run with no credentials, which is the point —
+they exercise the provider the way Terraform actually calls it, including import and
+drift behaviour that in-process tests cannot reach.
+
+They are written with `resource.UnitTest`, **not `resource.Test`**. `resource.Test`
+skips unless `TF_ACC=1`, so a fake-backed test written that way silently does not run;
+`TestCredentialFreeTestsUseUnitTest` fails the build if anyone reintroduces that.
+
+So: `task test:fast` while iterating, `task test` before pushing.
 
 ## Acceptance tests
 

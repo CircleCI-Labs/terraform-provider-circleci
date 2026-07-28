@@ -86,10 +86,15 @@ Each resource's documentation states its availability. In summary:
 | Context restrictions (`project`, `expression`) | yes | yes |
 | Groups, group membership, project role grants | yes[^standalone] | **no** |
 | Webhooks | yes | yes |
+| Plural list data sources (contexts, webhooks, env vars) | yes | yes |
 | Self-hosted runner resource classes and tokens | yes | yes (set `runner_host`) |
 | URL orb allow list | yes | yes |
+| Config policies | yes[^policyplan] | yes[^policyplan] |
+| OIDC custom claims | yes | yes[^oidcserver2] |
+| OpenTelemetry exporters | yes | ? |
 | Pipeline definitions and triggers | yes | **no** |
 | Organization settings | yes | **no** |
+| Orb namespaces, orbs, orb versions | yes | **no** |
 
 ~> **Note** `circleci_pipeline` and `circleci_trigger` are unavailable on
 CircleCI Server. The `pipeline-definitions` and `triggers` endpoints they depend
@@ -110,3 +115,6 @@ suffix is stripped automatically — but the provider emits a warning. Remove th
 [^standalone]: Requires a `circleci` type (standalone) organization. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud.
 
 [^ckeyvcs]: Not available to projects that use GitLab or the GitHub App; those check out over HTTPS and need no keys. See the compatibility table in the README.
+
+[^policyplan]: Requires the Scale plan on CircleCI Cloud, or CircleCI Server 4.2 and later.
+[^oidcserver2]: CircleCI Server 4.4 and later. Not available in air-gapped installations.

@@ -54,7 +54,7 @@ func TestAccGroupDataSource(t *testing.T) {
 	api, host := newMockGroupAPI(t)
 	groupID := api.seed(testGroupOrgID, "platform", "Platform team")
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -94,7 +94,7 @@ func TestAccGroupDataSource_serverDeployment(t *testing.T) {
 	// installation is always a `github` type organization, so deployment =
 	// "server" must be rejected with an explanatory error rather than attempting
 	// a request the API would refuse.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      testAccGroupDataSourceConfig(host, "server", groupID),
@@ -110,7 +110,7 @@ func TestAccGroupDataSource_notFound(t *testing.T) {
 	// has to be reported as an error. The API answers 403 "Permission denied."
 	// rather than 404, and gives the same answer for a group in another
 	// organization or a token without access.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{

@@ -1,0 +1,42 @@
+---
+page_title: "circleci_job Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches one CircleCI job by project slug and job number.
+---
+
+# circleci_job (Data Source)
+
+Fetches one CircleCI job by project slug and job number.
+
+~> **This is a point-in-time read of mutable runtime state.** `status`, timestamps and `parallel_runs`
+change while the job runs. Use this data source for inspection and in `check` blocks; using it to derive
+a resource attribute will cause a perpetual diff.
+
+-> **Addressed by number, not by the id the API reference documents.** The CircleCI v2 API reference
+documents `GET /api/v2/jobs/{id}`, but that route is a bare reverse-proxy pass-through to the API
+(via the API) with no CircleCI Server equivalent: the API does not exist there, and the
+route is entirely absent from CircleCI Server's gateway routes served. `GET
+/api/v2/project/{slug}/job/{job-number}` is used instead — it is implemented by the API, which
+*is* deployed on CircleCI Server and routed there. That is why `project_slug` and `job_number`, not a job
+id, identify a job here.
+
+Per-step detail (each parallel run's individual steps) and artifacts/test results are not exposed: they
+are unbounded, per-build detail that would make this data source read as a partial build log rather than
+a job summary. Use the CircleCI web UI or the REST API directly for those.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — the API is deployed and routed on both. |
+| **API** | `GET /api/v2/project/{project-slug}/job/{job-number}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with permission to view the project's builds. |
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_job/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

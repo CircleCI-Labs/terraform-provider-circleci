@@ -363,7 +363,7 @@ func TestGroupMembershipResourceImportStateRejectsMalformedID(t *testing.T) {
 func TestAccGroupMembershipResource(t *testing.T) {
 	api, host := newMockMembershipAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create: an empty group gets exactly one add call.
@@ -451,7 +451,7 @@ func TestAccGroupMembershipResource_emptySetEmptiesTheGroup(t *testing.T) {
 	api.seedMembers(testUserA, testUserB)
 
 	// An empty set is a valid desired state: it means "this group has no members".
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -480,7 +480,7 @@ func TestAccGroupMembershipResource_takesOverExistingMembers(t *testing.T) {
 	// rather than merged with.
 	api.seedMembers(testUserA, testUserB)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -505,7 +505,7 @@ func TestAccGroupMembershipResource_takesOverExistingMembers(t *testing.T) {
 func TestAccGroupMembershipResource_correctsDrift(t *testing.T) {
 	api, host := newMockMembershipAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -539,7 +539,7 @@ func TestAccGroupMembershipResource_correctsDrift(t *testing.T) {
 func TestAccGroupMembershipResource_deletedGroupLeavesState(t *testing.T) {
 	api, host := newMockMembershipAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -563,7 +563,7 @@ func TestAccGroupMembershipResource_serverDeployment(t *testing.T) {
 	// installation is always a `github` type organization, so deployment =
 	// "server" must be rejected with an explanatory error rather than attempting
 	// a request the API would refuse.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      testAccGroupMembershipConfig(host, "server", testUserA),
@@ -575,7 +575,7 @@ func TestAccGroupMembershipResource_serverDeployment(t *testing.T) {
 func TestAccGroupMembershipResource_importRejectsMalformedID(t *testing.T) {
 	_, host := newMockMembershipAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{

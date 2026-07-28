@@ -1,0 +1,32 @@
+---
+page_title: "circleci_workflow Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches one CircleCI workflow by id.
+---
+
+# circleci_workflow (Data Source)
+
+Fetches one CircleCI workflow by id.
+
+~> **This is a point-in-time read of mutable runtime state.** `status` and `stopped_at` change as the
+workflow runs. Use this data source for inspection and in `check` blocks; using it to derive a resource
+attribute will cause a perpetual diff.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments (`the CircleCI API`); see [`circleci_pipeline_run`](pipeline_run). |
+| **API** | `GET /api/v2/workflow/{id}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with permission to view the project's builds. |
+
+-> See also [`circleci_workflow_jobs`](workflow_jobs) to list the jobs within a workflow.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_workflow/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

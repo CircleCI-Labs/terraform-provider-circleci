@@ -1,0 +1,24 @@
+---
+page_title: "circleci_orb_categories Data Source - circleci"
+subcategory: ""
+description: |-
+  Lists the CircleCI orb registry categories.
+---
+
+# circleci_orb_categories (Data Source)
+
+Lists the CircleCI orb registry categories, such as `Build` or `Notifications`. The set is fixed by CircleCI, not per-organization.
+
+`circleci_orb.category_ids` takes category ids rather than names, so this data source is how you turn a readable category name into the value to set:
+
+```terraform
+category_ids = [data.circleci_orb_categories.all.ids_by_name["Build"]]
+```
+
+~> **CircleCI Cloud only.** Orb categories are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_orb_categories/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

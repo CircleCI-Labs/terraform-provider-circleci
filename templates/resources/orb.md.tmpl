@@ -1,0 +1,46 @@
+---
+page_title: "circleci_orb Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a CircleCI orb.
+---
+
+# circleci_orb (Resource)
+
+Manages a CircleCI orb: the named container in a namespace that owns a series of published orb versions.
+
+Creating an orb publishes no source. Use `circleci_orb_version` to publish versions against it, and reference them from a `.circleci/config.yml` as `<namespace>/<orb>@<version>`.
+
+~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+
+!> **An orb cannot be deleted.** The CircleCI API has no delete route for an orb, on purpose: pipelines that reference its versions must keep resolving. `terraform destroy` therefore removes the resource from Terraform state, warns, and leaves the orb in the registry. To hide a public orb, set `is_listed = false` instead of destroying it. To remove an orb entirely, delete the `circleci_orb_namespace` that owns it, which deletes its orbs too.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_orb/resource.tf" }}
+
+## Naming
+
+`name` is the orb name **without** the namespace prefix — `node`, not `acme/node`. The namespace comes from `namespace_id`, and `full_name` is the computed `<namespace>/<orb>` reference.
+
+Keeping the bare name separate is what makes the resource survive a namespace rename: renaming a `circleci_orb_namespace` changes `full_name`, but `name` is unchanged, so the orb is not replaced.
+
+## What can and cannot be changed
+
+| Attribute | Behaviour |
+|---|---|
+| `is_listed` | In-place update, via the set-listed route. |
+| `category_ids` | In-place update, via the add-category and remove-category routes. |
+| `name`, `namespace_id`, `is_private` | Force a replacement — and since an orb cannot be deleted and its name is taken, the replacement's create will be rejected for `is_private`. Treat visibility as permanent. |
+
+`category_ids` is deliberately optional and not computed. Omit it and the provider leaves categories alone, so categories set in the CircleCI UI are not removed behind your back. Set it — including to `[]` — and the provider reconciles the list exactly.
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import by the orb's fully qualified `<namespace>/<orb>` name, or by its UUID.
+
+{{ codefile "shell" "examples/resources/circleci_orb/import.sh" }}
+
+After an import, `category_ids` is null, meaning unmanaged: add it to the configuration to start managing category membership. The orb's current categories are always readable from the computed `categories` attribute.

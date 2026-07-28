@@ -1,0 +1,22 @@
+---
+page_title: "circleci_orbs Data Source - circleci"
+subcategory: ""
+description: |-
+  Lists CircleCI orbs, optionally scoped by namespace, name, visibility or certification.
+---
+
+# circleci_orbs (Data Source)
+
+Lists CircleCI orbs, optionally scoped by namespace, name, visibility or certification. Every page of results is fetched.
+
+Each entry carries only what the orb collection returns. The collection is genuinely thinner than the by-id route: there is no creation time, home page or usage count, and the namespace reference has an id but no name — so `namespace` here is derived from the qualified name rather than reported by the API. Use the `circleci_orb` data source when you need the full record for one orb.
+
+Note that omitting `certified` is not the same as setting it to `false`: omitting it leaves the filter off entirely and lets the API choose, while `false` explicitly asks for uncertified orbs. Private orbs are not returned unless `visibility = "private"` is set.
+
+~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_orbs/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

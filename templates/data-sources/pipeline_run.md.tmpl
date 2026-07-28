@@ -1,0 +1,38 @@
+---
+page_title: "circleci_pipeline_run Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches one CircleCI pipeline run, by id or by project slug and pipeline number.
+---
+
+# circleci_pipeline_run (Data Source)
+
+Fetches one CircleCI pipeline run, by id or by project slug and pipeline number.
+
+-> **Naming: this is not `circleci_pipeline`.** [`circleci_pipeline`](pipeline) is an unrelated data
+source that reads a pipeline *definition* — the declared pairing of a config source and a checkout
+source that triggers runs, configured through `circleci_pipeline` the resource. This data source reads a
+triggered **run**, matching the v3 API's own renaming of "pipeline" to "run" for exactly this reason. The
+two are never interchangeable.
+
+~> **This is a point-in-time read of mutable runtime state.** `state`, `errors` and `warnings` change as
+the run is processed, so every `terraform plan` can see a different value until the run reaches a
+terminal state. Use this data source for inspection and in `check` blocks. Using it to derive a resource
+attribute — for example, gating a resource's creation on `state == "created"` — will cause a perpetual
+diff once the run's state changes on a later refresh.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — this route is implemented directly in the same v2 API application on both deployments (`the CircleCI API`, the process CircleCI Server's gateway catch-all for `/api` routes to), so no `deployment`-specific gating applies. |
+| **API** | `GET /api/v2/pipeline/{id}`, or `GET /api/v2/project/{project-slug}/pipeline/{number}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with permission to view the project's builds. |
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_pipeline_run/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

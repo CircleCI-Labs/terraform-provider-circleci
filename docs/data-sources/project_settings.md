@@ -23,6 +23,7 @@ Fetches information about a CircleCI project's settings.
 
 - `auto_cancel_builds` (Boolean) Except for on your default branch, we will automatically cancel any outstanding workflows on a branch when a newer pipeline is triggered on that branch. Scheduled workflows and re-runs are not auto-canceled.
 - `build_fork_prs` (Boolean) Run builds for pull requests from forks. CircleCI will automatically update the commit status shown on GitHub's pull request page.
+- `build_prs_only` (Boolean) Whether only branches with an open pull request are built. `pr_only_branch_overrides` lists the exceptions.
 - `disable_ssh` (Boolean) This will disable SSH reruns for this project.
 - `forks_receive_secret_env_vars` (Boolean) Run builds for forked pull requests with this project's configuration, environment variables, and secrets. The build cache is also shared between the original repository and all forks.
 - `oss` (Boolean) Organizations on our free plan get an amount of free credits per month to use for Linux open source builds. Enabling this will allow this project’s builds to use them and let others see your builds, both through the web UI and the API.

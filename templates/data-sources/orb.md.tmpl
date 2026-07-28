@@ -1,0 +1,22 @@
+---
+page_title: "circleci_orb Data Source - circleci"
+subcategory: ""
+description: |-
+  Looks up a single CircleCI orb by id or by its fully qualified name.
+---
+
+# circleci_orb (Data Source)
+
+Looks up a single CircleCI orb by id or by its fully qualified `<namespace>/<orb>` name.
+
+Set exactly one of `id` and `full_name`. A by-name lookup resolves the orb through the orb collection and then refetches it by id, because the collection returns a thinner record than the by-id route does — the namespace name, creation time and usage counts are only available from the latter.
+
+A private orb is not returned by an unfiltered listing, so a by-name lookup retries asking for private orbs before reporting the orb as missing.
+
+~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_orb/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

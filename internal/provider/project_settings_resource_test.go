@@ -780,7 +780,7 @@ resource "circleci_project_settings" "test" {
 func TestAccProjectSettingsResource(t *testing.T) {
 	api, host := startFakeProjectSettingsAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: projectSettingsProviderFactories,
 		Steps: []resource.TestStep{
 			{

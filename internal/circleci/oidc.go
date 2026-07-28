@@ -1,0 +1,150 @@
+// Copyright (c) CircleCI
+// SPDX-License-Identifier: MPL-2.0
+
+package circleci
+
+import (
+	"context"
+	"net/http"
+	"regexp"
+	"strings"
+)
+
+// Routes for OIDC custom claims.
+//
+// The org-level and project-level routes differ only by the extra /project/{id}
+// segment and are otherwise identical: same verbs, same request body, same
+// response schema. oidcCustomClaimsRoute picks between them.
+const (
+	oidcOrgCustomClaimsRoute     = "/org/%s/oidc-custom-claims"
+	oidcProjectCustomClaimsRoute = "/org/%s/project/%s/oidc-custom-claims"
+)
+
+// The names the API uses for individual claims. They are the only values the
+// DELETE route's required "claims" query parameter accepts.
+const (
+	// OIDCClaimAudience is the "aud" claim of the identity token.
+	OIDCClaimAudience = "audience"
+	// OIDCClaimTTL is the lifetime of the identity token.
+	OIDCClaimTTL = "ttl"
+)
+
+// OIDCTTLPattern is the API's own pattern for a JSONDuration: one to seven
+// unit-suffixed integers with no separator, for example "1h", "90m" or "1h30m".
+// Only ms, s, m, h, d and w are accepted, so Go's own "1us" or "1.5h" are not
+// valid here even though time.ParseDuration would take them.
+var OIDCTTLPattern = regexp.MustCompile(`^([0-9]+(ms|s|m|h|d|w)){1,7}$`)
+
+// OIDCCustomClaims is the claim customization served by
+// GET /api/v2/org/{orgID}[/project/{projectID}]/oidc-custom-claims.
+//
+// Every field is optional in the response except OrgID: a scope with no
+// customization answers 200 with only org_id (and project_id) set, rather than
+// 404. Callers therefore cannot use IsNotFound to decide whether claims are
+// configured; check IsZero instead.
+type OIDCCustomClaims struct {
+	// OrgID is the organization the claims apply to.
+	OrgID string `json:"org_id"`
+	// ProjectID is set only on the project-level response.
+	ProjectID string `json:"project_id"`
+	// Audience is the list of values placed in the token's "aud" claim.
+	Audience []string `json:"audience"`
+	// AudienceUpdatedAt is when the audience claim was last written.
+	AudienceUpdatedAt string `json:"audience_updated_at"`
+	// TTL is the token lifetime as a duration string, e.g. "1h30m".
+	TTL string `json:"ttl"`
+	// TTLUpdatedAt is when the ttl claim was last written.
+	TTLUpdatedAt string `json:"ttl_updated_at"`
+}
+
+// IsZero reports whether no claim is customized in this scope, which is how the
+// API represents "reset to defaults". It is the drift signal for a resource that
+// manages these claims, because a reset answers 200 rather than 404.
+func (c OIDCCustomClaims) IsZero() bool {
+	return len(c.Audience) == 0 && c.TTL == ""
+}
+
+// OIDCCustomClaimsUpdate is the PATCH body. The route is a partial update, so a
+// field that is nil is omitted and the corresponding claim is left untouched.
+//
+// Audience is a *[]string rather than a []string so that an explicitly empty
+// audience can be sent: with a plain slice, omitempty would drop `[]` and the
+// request would silently mean "leave the audience alone" instead of "make it
+// empty".
+type OIDCCustomClaimsUpdate struct {
+	Audience *[]string `json:"audience,omitempty"`
+	TTL      *string   `json:"ttl,omitempty"`
+}
+
+// IsEmpty reports whether the update carries no claim, meaning the request would
+// change nothing. Callers skip the PATCH in that case.
+func (u OIDCCustomClaimsUpdate) IsEmpty() bool {
+	return u.Audience == nil && u.TTL == nil
+}
+
+// oidcCustomClaimsRoute returns the route and its parameters for a scope. An
+// empty projectID selects the organization-level route.
+func oidcCustomClaimsRoute(orgID, projectID string) (string, RequestOption) {
+	if projectID == "" {
+		return oidcOrgCustomClaimsRoute, RouteParams(orgID)
+	}
+
+	return oidcProjectCustomClaimsRoute, RouteParams(orgID, projectID)
+}
+
+// GetOIDCCustomClaims reads the custom claims for an organization, or for a
+// project within it when projectID is non-empty.
+func (c *Client) GetOIDCCustomClaims(ctx context.Context, orgID, projectID string) (*OIDCCustomClaims, error) {
+	route, params := oidcCustomClaimsRoute(orgID, projectID)
+
+	var claims OIDCCustomClaims
+	if err := c.GetV2(ctx, route, &claims, params); err != nil {
+		return nil, err
+	}
+
+	return &claims, nil
+}
+
+// UpdateOIDCCustomClaims applies a partial update to the custom claims of a
+// scope and returns the claims as the API reports them afterwards.
+//
+// The API spells create and update the same way: PATCH creates the
+// customization when none exists, so there is no separate POST.
+func (c *Client) UpdateOIDCCustomClaims(
+	ctx context.Context, orgID, projectID string, update OIDCCustomClaimsUpdate,
+) (*OIDCCustomClaims, error) {
+	route, params := oidcCustomClaimsRoute(orgID, projectID)
+
+	var claims OIDCCustomClaims
+	if err := c.PatchV2(ctx, route, update, &claims, params); err != nil {
+		return nil, err
+	}
+
+	return &claims, nil
+}
+
+// DeleteOIDCCustomClaims resets the named claims of a scope to their defaults
+// and returns whatever customization remains.
+//
+// claims must name at least one of OIDCClaimAudience and OIDCClaimTTL: the
+// "claims" query parameter is required and the API rejects a request without it.
+// Deleting is per-claim rather than all-or-nothing so that a caller managing
+// only the audience does not also wipe a ttl it never set.
+func (c *Client) DeleteOIDCCustomClaims(
+	ctx context.Context, orgID, projectID string, claims []string,
+) (*OIDCCustomClaims, error) {
+	route, params := oidcCustomClaimsRoute(orgID, projectID)
+
+	// DELETE carries a response body here, so it cannot go through DeleteV2,
+	// which discards it.
+	var remaining OIDCCustomClaims
+	err := c.call(ctx, http.MethodDelete, "/api/v2"+route, nil, &remaining, []RequestOption{
+		params,
+		Query("claims", strings.Join(claims, ",")),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &remaining, nil
+}

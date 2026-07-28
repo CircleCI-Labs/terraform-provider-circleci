@@ -365,7 +365,7 @@ func TestProjectGroupResourceImportStateRejectsMalformedID(t *testing.T) {
 func TestAccProjectGroupResource(t *testing.T) {
 	api, host := newMockProjectGroupAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create: one assign call carrying the role and the single group id.
@@ -461,7 +461,7 @@ func TestAccProjectGroupResource_rejectsOrgRole(t *testing.T) {
 
 	// The organization-level roles are not valid on a project grant. The
 	// validator must reject one at plan time rather than letting the API 400.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -475,7 +475,7 @@ func TestAccProjectGroupResource_rejectsOrgRole(t *testing.T) {
 func TestAccProjectGroupResource_correctsRoleDrift(t *testing.T) {
 	api, host := newMockProjectGroupAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -507,7 +507,7 @@ func TestAccProjectGroupResource_correctsRoleDrift(t *testing.T) {
 func TestAccProjectGroupResource_revokedGrantLeavesState(t *testing.T) {
 	api, host := newMockProjectGroupAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -530,7 +530,7 @@ func TestAccProjectGroupResource_destroyWarnsAndDoesNotRevoke(t *testing.T) {
 	// The API has no revoke route. Destroy must therefore succeed without
 	// attempting one (a DELETE would 405 against the mock) and leave the grant in
 	// place, which is what the resource documentation promises.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -557,7 +557,7 @@ func TestAccProjectGroupResource_destroyWarnsAndDoesNotRevoke(t *testing.T) {
 func TestAccProjectGroupResource_importRejectsMalformedID(t *testing.T) {
 	_, host := newMockProjectGroupAPI(t)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{

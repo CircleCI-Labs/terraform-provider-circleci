@@ -1,0 +1,22 @@
+---
+page_title: "circleci_orb_namespace Data Source - circleci"
+subcategory: ""
+description: |-
+  Looks up a CircleCI orb registry namespace by name or by id.
+---
+
+# circleci_orb_namespace (Data Source)
+
+Looks up a CircleCI orb registry namespace by name or by id.
+
+This is the usual way to get the `namespace_id` that `circleci_orb` needs for a namespace this configuration does not manage. It is also how to find the namespace name behind a self-hosted runner resource class, which is always `<namespace>/<class>`.
+
+Set exactly one of `id` and `name`.
+
+~> **CircleCI Cloud only.** Namespaces are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_orb_namespace/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

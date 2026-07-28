@@ -1,0 +1,24 @@
+---
+page_title: "circleci_usage_export Ephemeral Resource - circleci"
+subcategory: ""
+description: |-
+  Starts a CircleCI usage export job and waits for it to finish, returning signed download URLs.
+---
+
+# circleci_usage_export (Ephemeral Resource)
+
+Starts a CircleCI usage export job and waits for it to finish, returning signed URLs the job's data can be downloaded from.
+
+This is an ephemeral resource rather than a managed resource or a data source: creating the job is a side-effecting POST (ruling out a data source), there is nothing to converge a plan onto or meaningfully destroy (ruling out a managed resource), and its result is a signed URL that grants data access on its own — exactly the kind of value that should never be written to a state file. Ephemeral values are never persisted to state or plan files, which is the whole reason this shape is a better fit here than either alternative.
+
+`Open` creates the job and polls it to completion; there is no `Close`, because there is nothing to clean up — a usage export job cannot be canceled or deleted through the API, and CircleCI retains the exported data on its own schedule regardless of what this ephemeral resource does.
+
+Works against both **CircleCI Cloud and CircleCI Server** — usage export is a v2 API, which both provide.
+
+> **Polling.** `Open` polls the job's status every 10 seconds (CircleCI rate-limits this endpoint to 10 requests per minute) and gives up after `poll_timeout` (10 minutes by default) if the job has not reached `"completed"` or `"failed"` by then, returning a clear error rather than hanging the run indefinitely. Raise `poll_timeout` for an unusually large export.
+
+## Example Usage
+
+{{ tffile "examples/ephemeral-resources/circleci_usage_export/ephemeral-resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

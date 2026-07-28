@@ -55,7 +55,10 @@ func TestEveryConstructorIsRegistered(t *testing.T) {
 			}
 
 			// Registration methods: collect every identifier in their bodies.
-			if fn.Recv != nil && (fn.Name.Name == "Resources" || fn.Name.Name == "DataSources") {
+			if fn.Recv != nil && (fn.Name.Name == "Resources" ||
+				fn.Name.Name == "DataSources" ||
+				fn.Name.Name == "EphemeralResources" ||
+				fn.Name.Name == "Functions") {
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					if ident, isIdent := n.(*ast.Ident); isIdent {
 						registered[ident.Name] = true
@@ -67,16 +70,40 @@ func TestEveryConstructorIsRegistered(t *testing.T) {
 				continue
 			}
 
-			// Constructors: package-level funcs named New*Resource/New*DataSource.
+			// Constructors: package-level funcs whose return type is one of the
+			// framework's four registrable interfaces.
+			//
+			// Classification is by RETURN TYPE, not name suffix. An ephemeral
+			// resource's constructor is conventionally named New*Resource too, so a
+			// suffix check reported it as a resource and would have sent it to the
+			// wrong registration list; functions end in Function and were missed
+			// entirely, so nothing checked them at all.
 			if fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "New") {
 				continue
 			}
+			if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+				continue
+			}
 
-			switch {
-			case strings.HasSuffix(fn.Name.Name, "DataSource"):
-				declared[fn.Name.Name] = "data source"
-			case strings.HasSuffix(fn.Name.Name, "Resource"):
+			returned, isSelector := fn.Type.Results.List[0].Type.(*ast.SelectorExpr)
+			if !isSelector {
+				continue
+			}
+
+			pkgIdent, isIdent := returned.X.(*ast.Ident)
+			if !isIdent {
+				continue
+			}
+
+			switch pkgIdent.Name + "." + returned.Sel.Name {
+			case "resource.Resource":
 				declared[fn.Name.Name] = "resource"
+			case "datasource.DataSource":
+				declared[fn.Name.Name] = "data source"
+			case "ephemeral.EphemeralResource":
+				declared[fn.Name.Name] = "ephemeral resource"
+			case "function.Function":
+				declared[fn.Name.Name] = "function"
 			default:
 				continue
 			}

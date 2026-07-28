@@ -1,0 +1,15 @@
+version: 2.1
+
+description: An example orb.
+
+commands:
+  greet:
+    description: Print a greeting.
+    parameters:
+      name:
+        type: string
+        default: world
+    steps:
+      - run:
+          name: Greet
+          command: echo "hello << parameters.name >>"

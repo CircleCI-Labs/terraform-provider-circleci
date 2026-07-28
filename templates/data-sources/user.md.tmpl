@@ -1,0 +1,38 @@
+---
+page_title: "circleci_user Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches a CircleCI user, either the one the configured token authenticates as or one looked up by ID.
+---
+
+# circleci_user (Data Source)
+
+Fetches a CircleCI user.
+
+With no `id`, this reports the user the configured API token authenticates as — the usual case: confirming which account a pipeline's token belongs to, guarding against running an apply with the wrong credentials, or recording the identity that created a set of resources. With an `id`, it looks that user up instead.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — both routes are v2, which CircleCI Server serves. |
+| **API** | `GET /api/v2/me` with no `id`, `GET /api/v2/user/{id}` with one |
+| **Organization type** | Not applicable; a user is not scoped to an organization. |
+| **Token** | A **personal** API token. See below. |
+
+## A personal token is required
+
+~> **A project or organization token cannot read either route.** Both authorize the *caller* rather than the subject, so the request fails with a permissions error regardless of which user is being requested. `GET /api/v2/me` answers HTTP 403 rather than 401 in that case, which is why the provider reports it as a permissions failure and not as a missing user.
+
+## Why there is no matching resource
+
+CircleCI has no API for creating, updating or deleting a user account, and organization membership is managed in the web UI. There is nothing writable to converge on.
+
+To manage *group* membership for an existing user, see `circleci_group_membership`.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_user/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

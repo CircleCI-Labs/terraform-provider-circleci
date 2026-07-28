@@ -213,7 +213,7 @@ func TestAccCheckoutKeyResource(t *testing.T) {
 	api := &checkoutKeyAPI{}
 	srv := newCheckoutKeyServer(t, api)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -305,7 +305,7 @@ func TestAccCheckoutKeyResource_UserKeyType(t *testing.T) {
 	api := &checkoutKeyAPI{}
 	srv := newCheckoutKeyServer(t, api)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -334,7 +334,7 @@ func TestAccCheckoutKeyResource_RemovedOutsideTerraform(t *testing.T) {
 	api := &checkoutKeyAPI{}
 	srv := newCheckoutKeyServer(t, api)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -356,7 +356,7 @@ func TestAccCheckoutKeyResource_RemovedOutsideTerraform(t *testing.T) {
 }
 
 func TestAccCheckoutKeyResource_RejectsInvalidType(t *testing.T) {
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      checkoutKeyResourceConfig("http://127.0.0.1:1", "ssh-key"),
@@ -373,7 +373,7 @@ resource "circleci_checkout_key" "test" {
 }
 `
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      cfg,

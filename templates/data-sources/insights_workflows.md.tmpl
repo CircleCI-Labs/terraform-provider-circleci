@@ -1,0 +1,54 @@
+---
+page_title: "circleci_insights_workflows Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches per-workflow summary metrics for a project: run counts, success rate, duration percentiles and credits consumed.
+---
+
+# circleci_insights_workflows (Data Source)
+
+Fetches per-workflow summary metrics for a project: run counts, success rate, duration percentiles and credits consumed.
+
+The practical use is a health check a plan can act on — asserting a workflow's success rate has not dropped below a threshold, or surfacing the slowest workflows as outputs for a dashboard.
+
+Pagination is followed internally, so the result covers every workflow rather than one page.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Depends on the installation. The route is v2, but Insights is a separate service that a given CircleCI Server installation may not run. The provider does not block `deployment = "server"`; if the installation has no Insights, the request fails with a not-found error. |
+| **API** | `GET /api/v2/insights/{project-slug}/workflows` |
+| **Organization type** | Any. |
+| **Token** | An API token with permission to view the project's builds. |
+
+## Accuracy
+
+~> **Insights metrics are approximate and lag reality.** They are recomputed **daily**, so the last 24 hours of activity may be missing — a plan run immediately after a pipeline will not see it. No window longer than 90 days is retained.
+
+~> **Do not use credit figures for cost reporting.** `total_credits_used` does not share a source of truth with billing. CircleCI documents Insights as unsuitable for credit reporting, and the Plan Overview page in the web application as the only accurate source. Treat these values as indicators, not as inputs to anything that must be exact.
+
+## Project slugs are not always `vcs/org/repo`
+
+The `project_slug` argument takes the familiar `vcs-slug/org-name/repo-name` form — `gh/acme/api` — for GitHub OAuth and Bitbucket projects.
+
+**GitLab, GitHub App and GitHub Server projects do not have that form.** They have no VCS-side organization and repository name to build a slug from, so their slug is `circleci/<org-uuid>/<project-uuid>` instead. Both forms are accepted here. The `slug` attribute of the `circleci_project` data source reports whichever one applies, which is the reliable way to get it right.
+
+A slug with the wrong number of segments is rejected before a request is made, so a malformed slug produces an explanation rather than an HTTP 404 that looks like a missing project.
+
+## `branch` and `all_branches`
+
+Omitting `branch` does **not** report all branches — the API falls back to the project's default branch. Set `all_branches = true` to combine every branch instead. The two arguments conflict: the API reads `all-branches` first and silently ignores `branch`, so the provider rejects the combination rather than quietly reporting something other than what was asked for.
+
+## Nulls are meaningful
+
+`mttr`, `total_credits_used`, `total_recoveries` and every `duration_*` attribute are `null` rather than `0` when the API has nothing to report. A workflow that never failed has no mean time to recovery, which is not the same as a recovery time of zero seconds, so compare against `null` before doing arithmetic.
+
+`success_rate` is a ratio between 0 and 1, not a percentage. Compare against `0.95`, not `95`.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_insights_workflows/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

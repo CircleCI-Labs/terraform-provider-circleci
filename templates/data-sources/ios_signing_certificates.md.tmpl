@@ -1,0 +1,28 @@
+---
+page_title: "circleci_ios_signing_certificates Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every iOS signing certificate in a CircleCI organization.
+---
+
+# circleci_ios_signing_certificates (Data Source)
+
+Fetches every iOS signing certificate uploaded to a CircleCI organization, including certificates uploaded outside Terraform. Pagination is followed internally, so the result covers every certificate rather than one page.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server.** Signing certificates are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_ios_signing_certificates/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Security
+
+Certificate content and password are never returned by the API, so there is no attribute for either here — see [`circleci_ios_signing_certificate`](../resources/ios_signing_certificate)'s "Security" section for why, and what that resource does instead.

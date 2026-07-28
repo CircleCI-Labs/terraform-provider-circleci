@@ -1,0 +1,48 @@
+---
+page_title: "circleci_user_collaborations Data Source - circleci"
+subcategory: ""
+description: |-
+  Lists the organizations the configured API token can collaborate on, with the CircleCI ID and slug of each.
+---
+
+# circleci_user_collaborations (Data Source)
+
+Lists the organizations the configured API token can collaborate on, with the CircleCI ID and slug of each.
+
+This is the discovery counterpart to the rest of the provider. Almost every CircleCI resource is keyed by `organization_id` — a UUID that is otherwise only visible in the web UI — and the Insights data sources need an organization *slug*. This is the one way to obtain either from Terraform, rather than pasting a UUID into a variable and hoping it is the right one.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — the route is v2, which CircleCI Server serves. |
+| **API** | `GET /api/v2/me/collaborations` |
+| **Organization type** | Any; the listing spans every VCS type the user is connected to. |
+| **Token** | A **personal** API token. The route reports the authenticated user's collaborations, so a project or organization token is rejected. |
+
+## The set is broader than "my organizations"
+
+CircleCI assembles this list from three places, so it contains more than the organizations the user is a member of:
+
+- organizations the user belongs to, across every connected VCS
+- the **owner of any repository the user collaborates on**, even without belonging to that organization
+- the user's own personal account
+
+Filter on `vcs_type` when only standalone (`circleci`) organizations are wanted.
+
+## `id` can be null
+
+~> **An organization that CircleCI does not know yet has no ID.** Because the list is assembled partly from the VCS, an organization that exists on GitHub or Bitbucket but has never been used on CircleCI appears here with `id = null`. Such an organization cannot be referenced by any other resource until it has been onboarded, so a configuration that maps names to IDs should skip the null entries — `if c.id != null` — rather than assume every row is usable.
+
+The ID is genuinely `null` rather than an empty string, so `c.id != null` is a reliable test.
+
+## No pagination
+
+The route is not paginated: CircleCI builds the whole set per request by fanning out to each connected VCS. There is no page token to follow and no arguments to narrow the listing by, which is why this data source takes none.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_user_collaborations/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

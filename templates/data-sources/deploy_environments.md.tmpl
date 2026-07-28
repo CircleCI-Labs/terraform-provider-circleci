@@ -1,0 +1,33 @@
+---
+page_title: "circleci_deploy_environments Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every CircleCI deploy/release environment in an organization.
+---
+
+# circleci_deploy_environments (Data Source)
+
+Fetches every CircleCI deploy/release environment in an organization. Environments are declared in a
+project's `.circleci/config.yml` (the `environment` key on a deploy job) rather than created through the
+API, so this is read-only.
+
+Pagination is followed internally, so the result covers every environment rather than one page.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server; its routes are absent from the Server gateway routes served entirely. Using this data source with `deployment = "server"` reports an explicit error. |
+| **API** | `GET /api/v2/deploy/environments` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. |
+
+-> **Members are a separate concern.** Use [`circleci_deploy_environment`](deploy_environment) to fetch one
+environment by id, e.g. after looking its id up here by name.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_deploy_environments/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

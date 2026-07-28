@@ -47,7 +47,23 @@ tasks:
     vars:
       ARGS: '{{default "./..." .CLI_ARGS}}'
     cmds:
-      - go tool gotestsum -- -timeout=120s -parallel=10 -race {{.ARGS}}
+      # -timeout is generous because internal/provider's tests are not unit tests in
+      # the usual sense: terraform-plugin-testing launches a real terraform binary per
+      # test case and drives plan/apply/destroy through it. Several hundred of those
+      # run here without credentials, against httptest fakes, so the suite takes
+      # minutes rather than seconds. It used to be -timeout=120s, which was only ever
+      # sufficient because those tests were all skipping — see the note on
+      # resource.UnitTest in DESIGN.md. Use `task test:fast` for the inner loop.
+      - go tool gotestsum -- -timeout=30m -parallel=10 -race {{.ARGS}}
+
+  test:fast:
+    desc: Run only the fast tests (the API client packages, no terraform binary)
+    cmds:
+      # internal/circleci and internal/httpcl are ordinary Go tests over httptest
+      # servers and finish in about a second. internal/provider is excluded because
+      # every test there spawns terraform. This is the inner-loop target; it is not a
+      # substitute for `task test` before pushing.
+      - go tool gotestsum -- -timeout=2m -parallel=10 -race ./internal/circleci/... ./internal/httpcl/...
 
   generate:
     desc: Run generation of any generated code

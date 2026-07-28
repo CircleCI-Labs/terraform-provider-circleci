@@ -29,7 +29,7 @@ func TestAccProjectGroupsDataSource(t *testing.T) {
 	api.setRole(testPGProjectID, testPGGroupA, circleci.ProjectRoleAdmin)
 	api.setRole(testPGProjectID, testPGGroupB, circleci.ProjectRoleViewer)
 
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
@@ -77,7 +77,7 @@ func TestAccProjectGroupsDataSource_noGroups(t *testing.T) {
 
 	// An empty, non-null list keeps for_each and length() working against a
 	// project with no groups assigned.
-	resource.Test(t, resource.TestCase{
+	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
