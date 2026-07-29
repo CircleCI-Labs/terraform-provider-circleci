@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -55,9 +56,6 @@ type fakeProjectSettingsAPI struct {
 	patches []map[string]any
 	// requests records "METHOD path" for every request received.
 	requests []string
-	// refuseOSS models CircleCI's behaviour for a repository that is not open
-	// source: the request succeeds and the setting is silently left alone.
-	refuseOSS bool
 	// notFound makes every request answer 404, to test drift handling.
 	notFound bool
 }
@@ -79,7 +77,11 @@ func startFakeProjectSettingsAPI(t *testing.T) (*fakeProjectSettingsAPI, string)
 
 	api := &fakeProjectSettingsAPI{
 		t: t,
-		// The defaults a freshly followed project has.
+		// The defaults a freshly followed private project has, as
+		// defaultFakeProjectSettings in project_fake_test.go documents: a live GET
+		// reports set_github_status and setup_workflows true,
+		// forks_receive_secret_env_vars true on a private project, and
+		// pr_only_branch_overrides holding the default branch.
 		current: map[string]any{
 			"autocancel_builds":             false,
 			"build_fork_prs":                false,
@@ -87,10 +89,10 @@ func startFakeProjectSettingsAPI(t *testing.T) (*fakeProjectSettingsAPI, string)
 			"disable_ssh":                   false,
 			"forks_receive_secret_env_vars": true,
 			"oss":                           false,
-			"set_github_status":             false,
-			"setup_workflows":               false,
+			"set_github_status":             true,
+			"setup_workflows":               true,
 			"write_settings_requires_admin": false,
-			"pr_only_branch_overrides":      []any{},
+			"pr_only_branch_overrides":      []any{"main"},
 		},
 	}
 
@@ -150,10 +152,21 @@ func (f *fakeProjectSettingsAPI) patch(w http.ResponseWriter, r *http.Request) {
 
 	f.patches = append(f.patches, body.Advanced)
 
+	// oss is read-only on v2 and the API rejects the entire request when it is
+	// present, rather than ignoring the one field — verified live:
+	//
+	//	PATCH /api/v2/project/{slug}/settings  {"advanced":{"oss":false}}
+	//	→ 400  {"message":"Unexpected field 'advanced.oss'."}
+	//
+	// This fake previously accepted oss and modelled CircleCI as silently ignoring
+	// it, which let the provider send a field that failed every real request.
+	if _, ok := body.Advanced["oss"]; ok {
+		f.write(w, http.StatusBadRequest, map[string]string{"message": "Unexpected field 'advanced.oss'."})
+
+		return
+	}
+
 	for key, value := range body.Advanced {
-		if key == "oss" && f.refuseOSS {
-			continue
-		}
 		f.current[key] = value
 	}
 
@@ -314,12 +327,16 @@ func TestProjectSettingsResourceCreateOmitsUnsetSettings(t *testing.T) {
 		t.Errorf("autocancel_builds sent as %v, want true", got)
 	}
 
+	// oss is the one exception to the rule below: it is Computed-only because the
+	// API rejects it on write, so it always reports what CircleCI holds and
+	// adopting it can never turn into a write.
+	if state.OSS.IsNull() || state.OSS.ValueBool() != false {
+		t.Errorf("oss in state = %v, want false as the fake API reports it", state.OSS)
+	}
+
 	// The unmanaged settings must stay null in state too. Adopting the values the
 	// API reports would make them indistinguishable from settings the
 	// configuration asked for, and the next apply would start writing them.
-	if !state.OSS.IsNull() {
-		t.Errorf("oss in state = %v, want null: it was never configured", state.OSS)
-	}
 	if !state.ForksReceiveSecretEnvVars.IsNull() {
 		t.Errorf("forks_receive_secret_env_vars in state = %v, want null", state.ForksReceiveSecretEnvVars)
 	}
@@ -351,7 +368,6 @@ func TestProjectSettingsResourceCreateSendsEveryConfiguredSetting(t *testing.T) 
 		BuildPrsOnly:               types.BoolValue(true),
 		DisableSSH:                 types.BoolValue(true),
 		ForksReceiveSecretEnvVars:  types.BoolValue(false),
-		OSS:                        types.BoolValue(false),
 		SetGithubStatus:            types.BoolValue(true),
 		SetupWorkflows:             types.BoolValue(true),
 		WriteSettingsRequiresAdmin: types.BoolValue(true),
@@ -370,7 +386,6 @@ func TestProjectSettingsResourceCreateSendsEveryConfiguredSetting(t *testing.T) 
 		"build_prs_only",
 		"disable_ssh",
 		"forks_receive_secret_env_vars",
-		"oss",
 		"set_github_status",
 		"setup_workflows",
 		"write_settings_requires_admin",
@@ -385,8 +400,8 @@ func TestProjectSettingsResourceCreateSendsEveryConfiguredSetting(t *testing.T) 
 
 	// A false value must survive the encoding: omitempty on a *bool omits only a
 	// nil pointer, not a pointer to false.
-	if got := body["oss"]; got != false {
-		t.Errorf("oss sent as %v, want false", got)
+	if got := body["forks_receive_secret_env_vars"]; got != false {
+		t.Errorf("forks_receive_secret_env_vars sent as %v, want false", got)
 	}
 
 	branches, ok := body["pr_only_branch_overrides"].([]any)
@@ -479,26 +494,62 @@ func TestProjectSettingsResourceCreateRejectsBadSlug(t *testing.T) {
 	}
 }
 
-// TestProjectSettingsResourceCreateFailsWhenOSSIsRefused covers CircleCI's
-// silent refusal of oss for a repository that is not open source. The update
-// succeeds, so the only signal is the response, and without this check the
-// practitioner would see a diff that never converges.
-func TestProjectSettingsResourceCreateFailsWhenOSSIsRefused(t *testing.T) {
+// TestProjectSettingsResourceCreateNeverSendsOSS is the regression test for the
+// bug that broke every settings update against the real API.
+//
+// oss is read-only on v2: the PATCH answers 400 "Unexpected field 'advanced.oss'."
+// and rejects the whole request, so a single unwritable field failed every write.
+// The fake now behaves the same way, so a payload carrying oss fails this test
+// twice over: on the key assertion and on the resulting error.
+//
+// oss is set here through the model directly, which a configuration can no longer
+// do at all now that the attribute is Computed-only. That is the point: even a
+// state or model value must not reach the wire.
+func TestProjectSettingsResourceCreateNeverSendsOSS(t *testing.T) {
 	t.Parallel()
 
 	api, client := newFakeProjectSettingsAPI(t)
-	api.refuseOSS = true
+
+	plan := projectSettingsModel(testProjectSettingsSlug)
+	plan.OSS = types.BoolValue(true)
+	plan.AutoCancelBuilds = types.BoolValue(true)
+
+	state, resp := createProjectSettings(t, client, plan)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create diagnostics: %+v", resp.Diagnostics)
+	}
+
+	body := api.onlyPatch(t)
+	if _, ok := body["oss"]; ok {
+		t.Errorf("PATCH body carried oss (%v); it is read-only and the API rejects the whole request for it", body["oss"])
+	}
+	assertPatchKeys(t, body, "autocancel_builds")
+
+	// State reports what CircleCI holds, not what the model asked for.
+	if state.OSS.ValueBool() != false {
+		t.Errorf("oss in state = %v, want false as the API reports it", state.OSS)
+	}
+}
+
+// TestProjectSettingsResourceCreateOSSOnlyWritesNothing covers the settings object
+// that holds nothing but oss. Because oss is never marshalled, such an update
+// would send an empty body and earn a 400 "No JSON fields found.", so
+// ProjectSettings.IsEmpty must count it as empty and no request must be made.
+func TestProjectSettingsResourceCreateOSSOnlyWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeProjectSettingsAPI(t)
 
 	plan := projectSettingsModel(testProjectSettingsSlug)
 	plan.OSS = types.BoolValue(true)
 
 	_, resp := createProjectSettings(t, client, plan)
-	if !resp.Diagnostics.HasError() {
-		t.Fatal("Create reported success though CircleCI did not apply oss")
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create diagnostics: %+v", resp.Diagnostics)
 	}
 
-	if detail := resp.Diagnostics.Errors()[0].Detail(); !strings.Contains(detail, "open source") {
-		t.Errorf("error detail = %q, want it to explain the open source requirement", detail)
+	if patches := api.recordedPatches(); len(patches) != 0 {
+		t.Errorf("the provider sent %d PATCH requests for a resource whose only value is oss, want 0: %v", len(patches), patches)
 	}
 }
 
@@ -582,7 +633,7 @@ func TestProjectSettingsResourceUpdateOmitsUnsetSettings(t *testing.T) {
 	// Previously managed: two settings.
 	prior := projectSettingsModel(testProjectSettingsSlug)
 	prior.AutoCancelBuilds = types.BoolValue(true)
-	prior.OSS = types.BoolValue(false)
+	prior.DisableSSH = types.BoolValue(false)
 
 	// Now managed: only one of them, with a new value.
 	plan := projectSettingsModel(testProjectSettingsSlug)
@@ -613,8 +664,8 @@ func TestProjectSettingsResourceUpdateOmitsUnsetSettings(t *testing.T) {
 	if len(warnings) == 0 {
 		t.Fatal("Update produced no warning for the setting dropped from the configuration")
 	}
-	if detail := warnings[0].Detail(); !strings.Contains(detail, "oss") {
-		t.Errorf("warning detail = %q, want it to name oss", detail)
+	if detail := warnings[0].Detail(); !strings.Contains(detail, "disable_ssh") {
+		t.Errorf("warning detail = %q, want it to name disable_ssh", detail)
 	}
 }
 
@@ -715,8 +766,24 @@ func TestProjectSettingsResourceSchema(t *testing.T) {
 
 	// Optional+Computed is the mistake this resource exists to avoid, so it is
 	// worth asserting on rather than only describing in a comment.
+	//
+	// oss is the deliberate exception, and it is the opposite mistake that matters
+	// there: it must never be Optional, because the API rejects the field on write
+	// and rejects the whole request with it.
+	oss, ok := schema.Attributes["oss"]
+	if !ok {
+		t.Fatal("the schema has no oss attribute")
+	}
+	if oss.IsOptional() {
+		t.Error("oss is Optional; it is read-only on the API, which answers " +
+			"400 \"Unexpected field 'advanced.oss'.\" and rejects the whole request when it is sent")
+	}
+	if !oss.IsComputed() {
+		t.Error("oss is not Computed; it is read from the API and must be reported in state")
+	}
+
 	for name, attribute := range schema.Attributes {
-		if name == "slug" {
+		if name == "slug" || name == "oss" {
 			continue
 		}
 		if attribute.IsComputed() {
@@ -771,6 +838,76 @@ resource "circleci_project_settings" "test" {
 `, host, testProjectSettingsSlug, settings)
 }
 
+// TestProjectSettingsResourceRejectsConfiguredOSS proves oss cannot be set from a
+// configuration at all now that it is Computed-only. Terraform itself refuses,
+// before the provider is asked to do anything.
+func TestProjectSettingsResourceRejectsConfiguredOSS(t *testing.T) {
+	_, host := startFakeProjectSettingsAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:      testProjectSettingsResourceConfig(host, `  oss = true`),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Configuration for Read-Only Attribute.*oss`),
+			},
+		},
+	})
+}
+
+// TestProjectSettingsResourceRequiresExplicitForkSecrets covers the one dangerous
+// default that omitting unset settings exposes.
+//
+// forks_receive_secret_env_vars is true on a private project when it was never
+// set, so a configuration that turns fork builds on without mentioning it would
+// hand the project's secrets to anyone who can open a pull request. CircleCI gates
+// that exposure on both settings, so the validator fires for exactly that pair —
+// and at validate time, before an apply can write anything.
+func TestProjectSettingsResourceRequiresExplicitForkSecrets(t *testing.T) {
+	_, host := startFakeProjectSettingsAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:      testProjectSettingsResourceConfig(host, `  build_fork_prs = true`),
+				ExpectError: regexp.MustCompile(`(?s)forks_receive_secret_env_vars.*would receive the project's secrets`),
+			},
+		},
+	})
+}
+
+// TestProjectSettingsResourceExplicitForkSecretsIsAccepted is the other half: the
+// same configuration with the setting named is fine, whichever value it names, and
+// nothing warns about the pair once it is explicit.
+func TestProjectSettingsResourceExplicitForkSecretsIsAccepted(t *testing.T) {
+	api, host := startFakeProjectSettingsAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProjectSettingsResourceConfig(host, `  build_fork_prs                = true
+  forks_receive_secret_env_vars = false`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_project_settings.test",
+						tfjsonpath.New("forks_receive_secret_env_vars"),
+						knownvalue.Bool(false),
+					),
+				},
+			},
+		},
+	})
+
+	body := api.onlyPatch(t)
+	assertPatchKeys(t, body, "build_fork_prs", "forks_receive_secret_env_vars")
+
+	if got := body["forks_receive_secret_env_vars"]; got != false {
+		t.Errorf("forks_receive_secret_env_vars sent as %v, want false", got)
+	}
+}
+
 // TestAccProjectSettingsResource exercises the resource through Terraform
 // itself, against the fake API.
 //
@@ -797,10 +934,13 @@ func TestAccProjectSettingsResource(t *testing.T) {
 						tfjsonpath.New("forks_receive_secret_env_vars"),
 						knownvalue.Null(),
 					),
+					// oss is the exception: Computed-only, so it reports what
+					// CircleCI holds. It is safe to adopt because it can never be
+					// written back.
 					statecheck.ExpectKnownValue(
 						"circleci_project_settings.test",
 						tfjsonpath.New("oss"),
-						knownvalue.Null(),
+						knownvalue.Bool(false),
 					),
 				},
 			},

@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // circleci_ephemeral_runner_token exists alongside the circleci_runner_token
@@ -58,7 +59,7 @@ func NewEphemeralRunnerTokenResource() ephemeral.EphemeralResource {
 }
 
 type ephemeralRunnerTokenResource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the ephemeral resource type name.
@@ -76,11 +77,10 @@ func (e *ephemeralRunnerTokenResource) Schema(_ context.Context, _ ephemeral.Sch
 			"it. Use this to bootstrap a runner within the same `terraform apply` that consumes the token " +
 			"(for example, passing it to a provisioner or to an external call that registers the runner " +
 			"agent); use the `circleci_runner_token` resource instead when the token must outlive this run.\n\n" +
-			"**Best-effort deletion.** The underlying runner admin API (circleci-sdk-go's runner client) " +
-			"returns untyped errors, so a delete failure because the token was already gone cannot be told " +
-			"apart from a genuine failure. `Close` still calls delete and, if it errors, raises a warning " +
-			"naming the token id rather than silently leaving a possibly-live credential unaccounted for — " +
-			"see that id in the warning if one appears, and check/delete it by hand.",
+			"**Best-effort deletion.** If `Close`'s delete fails for a reason other than the token already " +
+			"being gone, it raises a warning naming the token id rather than silently leaving a possibly-live " +
+			"credential unaccounted for — see that id in the warning if one appears, and check/delete it by " +
+			"hand.",
 		Attributes: map[string]schema.Attribute{
 			"organization_id": schema.StringAttribute{
 				Required:            true,
@@ -119,7 +119,7 @@ func (e *ephemeralRunnerTokenResource) Schema(_ context.Context, _ ephemeral.Sch
 
 // Configure adds the provider configured client to the ephemeral resource.
 func (e *ephemeralRunnerTokenResource) Configure(_ context.Context, req ephemeral.ConfigureRequest, resp *ephemeral.ConfigureResponse) {
-	client, ok := ephemeralRunnerService(req.ProviderData, &resp.Diagnostics)
+	client, ok := ephemeralAPIClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
 		return
 	}
@@ -136,7 +136,7 @@ func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.O
 		return
 	}
 
-	t, err := e.client.CreateToken(ctx, runner.CreateTokenRequest{
+	t, err := e.client.CreateToken(ctx, circleci.TokenInput{
 		OrganizationID: config.OrganizationID.ValueString(),
 		ResourceClass:  config.ResourceClass.ValueString(),
 		Nickname:       config.Nickname.ValueString(),
@@ -144,13 +144,13 @@ func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.O
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI runner token",
-			"Could not create runner token, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 
 		return
 	}
 
-	config.ID = types.StringValue(t.Id)
+	config.ID = types.StringValue(t.ID)
 	config.Token = types.StringValue(t.Token)
 	config.CreatedAt = types.StringValue(t.CreatedAt)
 
@@ -163,21 +163,21 @@ func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.O
 			"CircleCI runner token may not be cleaned up automatically",
 			fmt.Sprintf(
 				"Runner token %s was created, but the provider could not record its id for later cleanup. "+
-					"Delete it manually if it is no longer needed.", t.Id,
+					"Delete it manually if it is no longer needed.", t.ID,
 			),
 		)
 
 		return
 	}
 
-	idJSON, err := json.Marshal(t.Id)
+	idJSON, err := json.Marshal(t.ID)
 	if err != nil {
 		// A plain UUID string always marshals; this is defensive.
 		resp.Diagnostics.AddWarning(
 			"CircleCI runner token may not be cleaned up automatically",
 			fmt.Sprintf(
 				"Runner token %s was created, but its id could not be saved for later cleanup (%s). "+
-					"Delete it manually if it is no longer needed.", t.Id, err,
+					"Delete it manually if it is no longer needed.", t.ID, err,
 			),
 		)
 
@@ -189,12 +189,10 @@ func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.O
 
 // Close deletes the token Open created.
 //
-// circleci-sdk-go's runner client returns untyped errors (see the package
-// comment on runner_resource_class_resource.go), so a delete failure because
-// the token was already gone cannot be distinguished from one where it is
-// still live. Rather than guess, a failed delete raises a warning that names
-// the token id, so a practitioner can check and, if necessary, delete it by
-// hand instead of it being silently unaccounted for.
+// A token already gone (circleci.IsNotFound) is the desired end state, so it
+// is not warned about. Any other failure raises a warning that names the
+// token id, so a practitioner can check and, if necessary, delete it by hand
+// instead of it being silently unaccounted for.
 func (e *ephemeralRunnerTokenResource) Close(ctx context.Context, req ephemeral.CloseRequest, resp *ephemeral.CloseResponse) {
 	raw, diags := req.Private.GetKey(ctx, ephemeralRunnerTokenPrivateKey)
 	resp.Diagnostics.Append(diags...)
@@ -216,14 +214,15 @@ func (e *ephemeralRunnerTokenResource) Close(ctx context.Context, req ephemeral.
 		return
 	}
 
-	if err := e.client.DeleteToken(ctx, tokenID); err != nil {
+	// A token already gone is the desired end state, so absence is not a warning.
+	if err := e.client.DeleteToken(ctx, tokenID); err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddWarning(
 			"CircleCI runner token may not have been deleted",
 			fmt.Sprintf(
 				"Deleting runner token %s failed: %s. This token was created for a single Terraform run and "+
 					"is not stored in state, so it will not be retried automatically. Verify whether it still "+
 					"exists (list tokens for its resource class) and delete it by hand if so.",
-				tokenID, err,
+				tokenID, circleci.Detail(err),
 			),
 		)
 	}

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/common"
-	"github.com/CircleCI-Public/circleci-sdk-go/pipeline"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -18,7 +16,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
+
+// pipelineTypeName is the Terraform type name, used in the Cloud-only
+// diagnostic (see cloud_only.go).
+const pipelineTypeName = "circleci_pipeline"
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -50,7 +54,7 @@ func NewPipelineResource() resource.Resource {
 
 // pipelineResource is the resource implementation.
 type pipelineResource struct {
-	client *pipeline.PipelineService
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -61,15 +65,25 @@ func (r *pipelineResource) Metadata(_ context.Context, req resource.MetadataRequ
 // Schema defines the schema for the resource.
 func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a CircleCI pipeline definition. A pipeline definition specifies where to find the pipeline configuration and where to check out code from.",
+		MarkdownDescription: "Manages a CircleCI pipeline definition. A pipeline definition specifies where to find the pipeline configuration and where to check out code from.\n\n" +
+			"!> **CircleCI Cloud only.** Pipeline definitions live under `/api/v2` but are served by the " +
+			"public API service, which CircleCI Server does not route.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the pipeline.",
 				Computed:            true,
 			},
 			"project_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the project this pipeline belongs to.",
+				MarkdownDescription: "The ID of the project this pipeline belongs to. Changing this value forces a new resource to be created.",
 				Required:            true,
+				PlanModifiers: []planmodifier.String{
+					// A pipeline definition does not exist outside the project it was
+					// created under, so an in-place "update" of project_id would send
+					// its PATCH to the new project carrying the old (and, there,
+					// nonexistent) definition id. See DESIGN.md's characterization test
+					// notes for issue #26.
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the pipeline. Changing this value forces a new resource to be created.",
@@ -103,8 +117,18 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:            true,
 			},
 			"config_source_repo_external_id": schema.StringAttribute{
-				MarkdownDescription: "The external ID of the repository containing the pipeline configuration.",
+				MarkdownDescription: "The external ID of the repository containing the pipeline configuration. Changing this value forces a new resource to be created.",
 				Required:            true,
+				PlanModifiers: []planmodifier.String{
+					// The update endpoint's config_source accepts only file_path —
+					// provider and repo are immutable after creation (verified against
+					// the API's handler_update.go). Without RequiresReplace
+					// a change here plans an in-place update whose PATCH silently omits
+					// it: state would record the new value while the API kept the old
+					// one, and apply would report success. See DESIGN.md's
+					// characterization test notes for issue #26.
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"checkout_source_provider": schema.StringAttribute{
 				MarkdownDescription: "The VCS provider for the pipeline's checkout source. Must be one of `github_app` or `github_server`.",
@@ -125,133 +149,107 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 	}
 }
 
+// pipelineResourceModelFromAPI maps an API pipeline definition onto the
+// resource model. projectID is threaded through rather than read from the API
+// response because the definition itself carries no project_id field.
+func pipelineResourceModelFromAPI(projectID types.String, definition circleci.PipelineDefinition) pipelineResourceModel {
+	return pipelineResourceModel{
+		Id:                           types.StringValue(definition.ID),
+		ProjectId:                    projectID,
+		Name:                         types.StringValue(definition.Name),
+		Description:                  types.StringValue(definition.Description),
+		CreatedAt:                    types.StringValue(definition.CreatedAt),
+		ConfigSourceProvider:         types.StringValue(definition.ConfigSource.Provider),
+		ConfigSourceFilePath:         types.StringValue(definition.ConfigSource.FilePath),
+		ConfigSourceRepoFullName:     types.StringValue(definition.ConfigSource.Repo.FullName),
+		ConfigSourceRepoExternalId:   types.StringValue(definition.ConfigSource.Repo.ExternalID),
+		CheckoutSourceProvider:       types.StringValue(definition.CheckoutSource.Provider),
+		CheckoutSourceRepoFullName:   types.StringValue(definition.CheckoutSource.Repo.FullName),
+		CheckoutSourceRepoExternalId: types.StringValue(definition.CheckoutSource.Repo.ExternalID),
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *pipelineResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	// Retrieve values from plan
+	if !requireCloud(r.client, pipelineTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var plan pipelineResourceModel
-	diags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	configRepo := common.Repo{
-		FullName:   plan.ConfigSourceRepoFullName.ValueString(),
-		ExternalId: plan.ConfigSourceRepoExternalId.ValueString(),
-	}
-	configSource := common.ConfigSource{
-		Provider: plan.ConfigSourceProvider.ValueString(),
-		Repo:     configRepo,
-		FilePath: plan.ConfigSourceFilePath.ValueString(),
-	}
-	checkoutRepo := common.Repo{
-		FullName:   plan.CheckoutSourceRepoFullName.ValueString(),
-		ExternalId: plan.CheckoutSourceRepoExternalId.ValueString(),
-	}
-	checkoutSource := common.CheckoutSource{
-		Provider: plan.CheckoutSourceProvider.ValueString(),
-		Repo:     checkoutRepo,
-	}
-	newPipeline := pipeline.Pipeline{
-		ID:             plan.Id.ValueString(),
-		Name:           plan.Name.ValueString(),
-		Description:    plan.Description.ValueString(),
-		ConfigSource:   configSource,
-		CheckoutSource: checkoutSource,
+	input := circleci.CreatePipelineDefinitionInput{
+		Name:        plan.Name.ValueString(),
+		Description: plan.Description.ValueString(),
+		ConfigSource: circleci.PipelineConfigSourceInput{
+			Provider: plan.ConfigSourceProvider.ValueString(),
+			Repo:     circleci.RepoInput{ExternalID: plan.ConfigSourceRepoExternalId.ValueString()},
+			FilePath: plan.ConfigSourceFilePath.ValueString(),
+		},
+		CheckoutSource: circleci.PipelineCheckoutSourceInput{
+			Provider: plan.CheckoutSourceProvider.ValueString(),
+			Repo:     circleci.RepoInput{ExternalID: plan.CheckoutSourceRepoExternalId.ValueString()},
+		},
 	}
 
-	// Create new pipeline
-	createdPipeline, err := r.client.Create(ctx, newPipeline, plan.ProjectId.ValueString())
+	created, err := r.client.CreatePipelineDefinition(ctx, plan.ProjectId.ValueString(), input)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI pipeline",
-			"Could not create CircleCI pipeline, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
+
 		return
 	}
 
-	// Map response body to schema and populate Computed attribute values
-	plan.Id = types.StringValue(createdPipeline.ID)
-	// project_id is a particular attribute from the provider
-	plan.Name = types.StringValue(createdPipeline.Name)
-	plan.Description = types.StringValue(createdPipeline.Description)
-	plan.CreatedAt = types.StringValue(createdPipeline.CreatedAt)
-	plan.ConfigSourceProvider = types.StringValue(createdPipeline.ConfigSource.Provider)
-	plan.ConfigSourceFilePath = types.StringValue(createdPipeline.ConfigSource.FilePath)
-	plan.ConfigSourceRepoFullName = types.StringValue(createdPipeline.ConfigSource.Repo.FullName)
-	plan.ConfigSourceRepoExternalId = types.StringValue(createdPipeline.ConfigSource.Repo.ExternalId)
-	plan.CheckoutSourceProvider = types.StringValue(createdPipeline.CheckoutSource.Provider)
-	plan.CheckoutSourceRepoFullName = types.StringValue(createdPipeline.CheckoutSource.Repo.FullName)
-	plan.CheckoutSourceRepoExternalId = types.StringValue(createdPipeline.CheckoutSource.Repo.ExternalId)
-
-	// Set state to fully populated data
-	diags = resp.State.Set(ctx, plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, pipelineResourceModelFromAPI(plan.ProjectId, *created))...)
 }
 
 // Read refreshes the Terraform state with the latest data.
 func (r *pipelineResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	var pipelineState pipelineResourceModel
-	diags := req.State.Get(ctx, &pipelineState)
-	if diags != nil {
-		resp.Diagnostics.Append(diags...)
+	if !requireCloud(r.client, pipelineTypeName, &resp.Diagnostics) {
 		return
 	}
 
-	if pipelineState.Id.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing pipeline id",
-			"Missing pipeline id",
-		)
-		return
-	}
-
-	if pipelineState.ProjectId.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing pipeline project_id",
-			"Missing pipeline project_id",
-		)
-		return
-	}
-
-	retrievedPipeline, err := r.client.Get(ctx, pipelineState.ProjectId.ValueString(), pipelineState.Id.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Unable to Read CircleCI context with id "+pipelineState.Id.ValueString(),
-			err.Error(),
-		)
-		return
-	}
-
-	// Map response body to model
-	pipelineState = pipelineResourceModel{
-		Id:                           types.StringValue(retrievedPipeline.ID),
-		ProjectId:                    pipelineState.ProjectId,
-		Name:                         types.StringValue(retrievedPipeline.Name),
-		Description:                  types.StringValue(retrievedPipeline.Description),
-		CreatedAt:                    types.StringValue(retrievedPipeline.CreatedAt),
-		ConfigSourceProvider:         types.StringValue(retrievedPipeline.ConfigSource.Provider),
-		ConfigSourceFilePath:         types.StringValue(retrievedPipeline.ConfigSource.FilePath),
-		ConfigSourceRepoFullName:     types.StringValue(retrievedPipeline.ConfigSource.Repo.FullName),
-		ConfigSourceRepoExternalId:   types.StringValue(retrievedPipeline.ConfigSource.Repo.ExternalId),
-		CheckoutSourceProvider:       types.StringValue(retrievedPipeline.CheckoutSource.Provider),
-		CheckoutSourceRepoFullName:   types.StringValue(retrievedPipeline.CheckoutSource.Repo.FullName),
-		CheckoutSourceRepoExternalId: types.StringValue(retrievedPipeline.CheckoutSource.Repo.ExternalId),
-	}
-
-	// Set state
-	diags = resp.State.Set(ctx, &pipelineState)
-	resp.Diagnostics.Append(diags...)
+	var state pipelineResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	definition, err := r.client.GetPipelineDefinition(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
+	// A pipeline definition deleted outside Terraform must drop out of state so
+	// the next plan recreates it, rather than becoming a permanent refresh
+	// error. Absence is tested with circleci.IsNotFound rather than by
+	// string-matching the error: matching "404" also matches a 5xx whose body
+	// happens to mention it, which would silently remove live resources from
+	// state. See DESIGN.md's characterization test notes for issue #26.
+	if circleci.IsNotFound(err) {
+		resp.State.RemoveResource(ctx)
+
+		return
+	}
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to Read CircleCI pipeline with id "+state.Id.ValueString(),
+			circleci.Detail(err),
+		)
+
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, pipelineResourceModelFromAPI(state.ProjectId, *definition))...)
 }
 
 // Update updates the resource and sets the updated Terraform state on success.
 func (r *pipelineResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	if !requireCloud(r.client, pipelineTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var plan pipelineResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
@@ -264,88 +262,60 @@ func (r *pipelineResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
-	configSource := common.ConfigSource{
-		FilePath: plan.ConfigSourceFilePath.ValueString(),
-	}
-	checkoutRepo := common.Repo{
-		ExternalId: plan.CheckoutSourceRepoExternalId.ValueString(),
-	}
-	checkoutSource := common.CheckoutSource{
-		Provider: plan.CheckoutSourceProvider.ValueString(),
-		Repo:     checkoutRepo,
-	}
-	updates := pipeline.Pipeline{
-		ID:             plan.Id.ValueString(),
-		Name:           plan.Name.ValueString(),
-		Description:    plan.Description.ValueString(),
-		ConfigSource:   configSource,
-		CheckoutSource: checkoutSource,
+	input := circleci.UpdatePipelineDefinitionInput{
+		Name:        plan.Name.ValueString(),
+		Description: plan.Description.ValueString(),
+		ConfigSource: circleci.PipelineConfigSourceUpdateInput{
+			FilePath: plan.ConfigSourceFilePath.ValueString(),
+		},
+		CheckoutSource: circleci.PipelineCheckoutSourceInput{
+			Provider: plan.CheckoutSourceProvider.ValueString(),
+			Repo:     circleci.RepoInput{ExternalID: plan.CheckoutSourceRepoExternalId.ValueString()},
+		},
 	}
 
-	updatedPipeline, err := r.client.Update(ctx, updates, plan.ProjectId.ValueString(), state.Id.ValueString())
+	updated, err := r.client.UpdatePipelineDefinition(ctx, plan.ProjectId.ValueString(), state.Id.ValueString(), input)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Update CircleCI pipeline definition with id "+state.Id.ValueString()+" and project id "+state.ProjectId.ValueString(),
-			err.Error(),
+			circleci.Detail(err),
 		)
+
 		return
 	}
 
-	plan.Id = types.StringValue(updatedPipeline.ID)
-	plan.Name = types.StringValue(updatedPipeline.Name)
-	plan.Description = types.StringValue(updatedPipeline.Description)
-	plan.CreatedAt = types.StringValue(updatedPipeline.CreatedAt)
-	plan.ConfigSourceProvider = types.StringValue(updatedPipeline.ConfigSource.Provider)
-	plan.ConfigSourceFilePath = types.StringValue(updatedPipeline.ConfigSource.FilePath)
-	plan.ConfigSourceRepoFullName = types.StringValue(updatedPipeline.ConfigSource.Repo.FullName)
-	plan.ConfigSourceRepoExternalId = types.StringValue(updatedPipeline.ConfigSource.Repo.ExternalId)
-	plan.CheckoutSourceProvider = types.StringValue(updatedPipeline.CheckoutSource.Provider)
-	plan.CheckoutSourceRepoFullName = types.StringValue(updatedPipeline.CheckoutSource.Repo.FullName)
-	plan.CheckoutSourceRepoExternalId = types.StringValue(updatedPipeline.CheckoutSource.Repo.ExternalId)
-
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, pipelineResourceModelFromAPI(plan.ProjectId, *updated))...)
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
 func (r *pipelineResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	// Retrieve values from state
 	var state pipelineResourceModel
-	diags := req.State.Get(ctx, &state)
-	resp.Diagnostics.Append(diags...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	// Delete existing order
-	err := r.client.Delete(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
-	if err != nil {
+	// A definition already gone is the desired end state, so absence is not an
+	// error.
+	err := r.client.DeletePipelineDefinition(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
-			"Error Deleting CircleCi pipeline",
-			"Could not delete pipeline, unexpected error: "+err.Error(),
+			"Error Deleting CircleCI pipeline",
+			circleci.Detail(err),
 		)
+
 		return
 	}
 }
 
 // Configure adds the provider configured client to the resource.
 func (r *pipelineResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *circleciClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	r.client = client.PipelineService
+	r.client = client
 }
 
 func (r *pipelineResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

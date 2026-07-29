@@ -31,7 +31,7 @@ data "circleci_webhook" "example" {
 - `name` (String) The name of the webhook.
 - `scope_id` (String) The ID of the scope (project) for which the webhook is configured.
 - `scope_type` (String) The type of the scope.
-- `signing_secret` (String, Sensitive) The signing secret of the webhook.
+- `signing_secret` (String, Sensitive, Deprecated) Always null. The API never discloses a webhook's signing secret, masking it unconditionally, so there is nothing this attribute could ever return. Scheduled for removal in 1.0 (issue #21); use `circleci_webhooks`' `has_signing_secret` instead.
 - `updated_at` (String) The timestamp when the webhook was last updated.
 - `url` (String) The URL to which webhook payloads will be sent.
 - `verify_tls` (Boolean) Whether to verify TLS certificates when sending payloads.

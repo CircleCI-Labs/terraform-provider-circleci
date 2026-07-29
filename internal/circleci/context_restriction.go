@@ -6,7 +6,16 @@ package circleci
 import "context"
 
 // Context restriction routes. Restrictions are served by v2 on every deployment.
-const contextRestrictionsRoute = "/context/%s/restrictions"
+//
+// Shapes and semantics here follow the API's the CircleCI API
+// (context_restrictions_get.go, context_restriction_post.go,
+// context_restriction_delete.go) and
+// github.com/CircleCI-Public/circleci-cli's internal/apiclient/context.go
+// (MIT), which agree on routes and field names.
+const (
+	contextRestrictionsRoute = "/context/%s/restrictions"
+	contextRestrictionRoute  = "/context/%s/restrictions/%s"
+)
 
 // The kinds of restriction the API accepts.
 const (
@@ -48,4 +57,41 @@ func (c *Client) ListContextRestrictions(ctx context.Context, contextID string) 
 	}
 
 	return response.Items, nil
+}
+
+// CreateContextRestrictionRequest is the create body.
+type CreateContextRestrictionRequest struct {
+	RestrictionType  string `json:"restriction_type"`
+	RestrictionValue string `json:"restriction_value"`
+}
+
+// CreateContextRestriction adds a restriction to a context and returns it as
+// stored.
+//
+// The response never carries a "name": the API's postContextRestrictions
+// (context_restriction_post.go) response struct has no such field — the
+// human-readable name of whatever the restriction points at (e.g. a project's
+// slug) is learned out of band and only reported by a later list/read. Callers
+// must not treat the returned Name as meaningful; it decodes to "".
+func (c *Client) CreateContextRestriction(
+	ctx context.Context,
+	contextID string,
+	req CreateContextRestrictionRequest,
+) (*ContextRestriction, error) {
+	var created ContextRestriction
+	if err := c.PostV2(ctx, contextRestrictionsRoute, req, &created, RouteParams(contextID)); err != nil {
+		return nil, err
+	}
+
+	return &created, nil
+}
+
+// DeleteContextRestriction removes a restriction from a context.
+//
+// This route sits behind the same context-resolution step as GetContext and
+// DeleteContext (see context.go), so a context that no longer exists — and
+// therefore a restriction that no longer exists along with it — answers 403
+// rather than 404.
+func (c *Client) DeleteContextRestriction(ctx context.Context, contextID, restrictionID string) error {
+	return c.DeleteV2(ctx, contextRestrictionRoute, RouteParams(contextID, restrictionID))
 }

@@ -43,9 +43,8 @@ import (
 const (
 	// usageExportPollInterval is how often Open re-checks a job's status.
 	//
-	// GET .../usage_export_job/{id} is rate limited to 10 requests per minute
-	// per CircleCI's own routing config (the API's
-	// an internal routes served "10/minute (byPath)"). Polling
+	// GET .../usage_export_job/{id} is rate limited to 10 requests per minute,
+	// per path, according to CircleCI's own routing configuration. Polling
 	// every 10 seconds caps this resource at 6 requests per minute — enough
 	// headroom to poll from a single Open call while leaving room for other
 	// activity against the same organization, without ever tripping the limit

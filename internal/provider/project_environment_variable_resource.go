@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/envproject"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -39,7 +40,7 @@ func NewProjectEnvironmentVariableResource() resource.Resource {
 
 // projectEnvironmentVariableResource is the resource implementation.
 type projectEnvironmentVariableResource struct {
-	client *envproject.EnvService
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -92,22 +93,25 @@ func (r *projectEnvironmentVariableResource) Create(ctx context.Context, req res
 		return
 	}
 
-	// Create new project environment variable
-	newEnvVar, err := r.client.Create(ctx, plan.ProjectSlug.ValueString(), plan.Value.ValueString(), plan.Name.ValueString())
+	// Create new project environment variable. The returned Value is masked (the
+	// create response is read back through the same masking view as the list and
+	// single-get routes), so it is never mapped back onto plan.Value here.
+	newEnvVar, err := r.client.CreateProjectEnvironmentVariable(ctx, plan.ProjectSlug.ValueString(),
+		circleci.ProjectEnvironmentVariableInput{
+			Name:  plan.Name.ValueString(),
+			Value: plan.Value.ValueString(),
+		},
+	)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI project environment variable",
-			"Could not create CircleCI project environment variable, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
 	// Map response body to schema and populate Computed attribute values
-	if !newEnvVar.CreatedAt.IsZero() {
-		plan.CreatedAt = types.StringValue(newEnvVar.CreatedAt.Format("2006-01-02T15:04:05.000Z"))
-	} else {
-		plan.CreatedAt = types.StringValue("")
-	}
+	plan.CreatedAt = types.StringValue(newEnvVar.CreatedAt)
 
 	// Set state to fully populated data
 	diags = resp.State.Set(ctx, plan)
@@ -126,26 +130,28 @@ func (r *projectEnvironmentVariableResource) Read(ctx context.Context, req resou
 		return
 	}
 
-	envVar, err := r.client.Get(ctx, state.ProjectSlug.ValueString(), state.Name.ValueString())
+	envVar, err := r.client.GetProjectEnvironmentVariable(ctx, state.ProjectSlug.ValueString(), state.Name.ValueString())
+	// A variable deleted outside Terraform must drop out of state so the next
+	// plan recreates it. Absence is tested with circleci.IsNotFound rather than
+	// by string-matching the error: matching "404" also matches a 5xx whose body
+	// happens to mention it, which silently removed live resources from state.
+	if circleci.IsNotFound(err) {
+		resp.State.RemoveResource(ctx)
+		return
+	}
 	if err != nil {
-		if strings.Contains(err.Error(), "404") {
-			resp.State.RemoveResource(ctx)
-			return
-		}
 		resp.Diagnostics.AddError(
 			"Error Reading CircleCI Project Environment Variable",
-			"Could not read project environment variable "+state.Name.ValueString()+": "+err.Error(),
+			"Could not read project environment variable "+state.Name.ValueString()+": "+circleci.Detail(err),
 		)
 		return
 	}
 
 	state.Name = types.StringValue(envVar.Name)
-	// Preserve Value from state since the API returns masked values (e.g. xxxx1234)
-	if !envVar.CreatedAt.IsZero() {
-		state.CreatedAt = types.StringValue(envVar.CreatedAt.Format("2006-01-02T15:04:05.000Z"))
-	} else {
-		state.CreatedAt = types.StringValue("")
-	}
+	// Preserve Value from state: the API only ever returns a masked value (e.g.
+	// xxxx1234), and reading that into state would produce a permanent diff
+	// against the configured value on every refresh.
+	state.CreatedAt = types.StringValue(envVar.CreatedAt)
 
 	// Set state
 	diags = resp.State.Set(ctx, &state)
@@ -169,12 +175,13 @@ func (r *projectEnvironmentVariableResource) Delete(ctx context.Context, req res
 		return
 	}
 
-	// Delete existing project environment variable
-	err := r.client.Delete(ctx, state.ProjectSlug.ValueString(), state.Name.ValueString())
-	if err != nil {
+	// Delete existing project environment variable. One already gone is the
+	// desired end state, so absence is not an error.
+	err := r.client.DeleteProjectEnvironmentVariable(ctx, state.ProjectSlug.ValueString(), state.Name.ValueString())
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
 			"Error Deleting CircleCi Project Environment Variable",
-			"Could not delete project environment variable, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -182,23 +189,12 @@ func (r *projectEnvironmentVariableResource) Delete(ctx context.Context, req res
 
 // Configure adds the provider configured client to the resource.
 func (r *projectEnvironmentVariableResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *circleciClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	r.client = client.ProjectEnvironmentVariableService
+	r.client = client
 }
 
 // ImportState imports an existing resource into Terraform state.

@@ -17,15 +17,14 @@ import (
 // These are fake-server-backed unit tests for context_data_source.go: they
 // need no TF_ACC and no CircleCI credentials, unlike TestAccContextDataSource.
 //
-// context_data_source.go reads a context by id or name through
-// internal/circleci.Client, but reads its restrictions through the legacy
-// circleci-sdk-go ContextService — both against the same /api/v2/context
-// routes, so contextLegacyAPI (context_legacy_fake_test.go) serves both calls.
+// context_data_source.go reads a context by id or name and its restrictions
+// both through internal/circleci.Client, against the same /api/v2/context
+// routes, so contextFakeAPI (context_legacy_fake_test.go) serves both calls.
 
 const contextDataSourceUnitContextID = "ctx-fixed-3"
 
 func contextDataSourceByIDConfig(host, contextID string) string {
-	return legacyContextProviderConfig(host) + fmt.Sprintf(`
+	return contextFakeProviderConfig(host) + fmt.Sprintf(`
 data "circleci_context" "test" {
   id = %[1]q
 }
@@ -33,7 +32,7 @@ data "circleci_context" "test" {
 }
 
 func contextDataSourceByNameConfig(host, name, orgID string) string {
-	return legacyContextProviderConfig(host) + fmt.Sprintf(`
+	return contextFakeProviderConfig(host) + fmt.Sprintf(`
 data "circleci_context" "test" {
   name             = %[1]q
   organization_id  = %[2]q
@@ -42,7 +41,7 @@ data "circleci_context" "test" {
 }
 
 func TestContextDataSourceUnit_ByID(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	api.seedContext(contextDataSourceUnitContextID, contextUnitOrgID, "2024-01-18T02:16:55Z")
 	api.seedRestriction(contextDataSourceUnitContextID, "r1", "acme/api", "project", "22222222-2222-2222-2222-222222222222")
 	api.seedRestriction(contextDataSourceUnitContextID, "r2", "", "expression", `pipeline.git.branch == "main"`)
@@ -79,7 +78,7 @@ func TestContextDataSourceUnit_ByID(t *testing.T) {
 }
 
 func TestContextDataSourceUnit_ByName(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	api.seedContext(contextDataSourceUnitContextID, contextUnitOrgID, "2024-01-18T02:16:55Z")
 	// Another organization's context of the same name must not be matched.
 	api.seedContext("ctx-other", "org-other", "2024-01-01T00:00:00Z")
@@ -99,7 +98,7 @@ func TestContextDataSourceUnit_ByName(t *testing.T) {
 }
 
 func TestContextDataSourceUnit_NotFoundByID(t *testing.T) {
-	_, host := newContextLegacyAPI(t)
+	_, host := newContextFakeAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -111,7 +110,7 @@ func TestContextDataSourceUnit_NotFoundByID(t *testing.T) {
 }
 
 func TestContextDataSourceUnit_NotFoundByName(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	api.seedContext(contextDataSourceUnitContextID, contextUnitOrgID, "2024-01-18T02:16:55Z")
 
 	resource.UnitTest(t, resource.TestCase{
@@ -129,12 +128,12 @@ func TestContextDataSourceUnit_ExactlyOneOf(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				// Neither id nor name set.
-				Config:      legacyContextProviderConfig("http://127.0.0.1:1") + `data "circleci_context" "test" {}`,
+				Config:      contextFakeProviderConfig("http://127.0.0.1:1") + `data "circleci_context" "test" {}`,
 				ExpectError: regexp.MustCompile(`(?s)Missing Attribute Configuration.*[Ee]xactly one`),
 			},
 			{
 				// Both id and name set.
-				Config: legacyContextProviderConfig("http://127.0.0.1:1") + `
+				Config: contextFakeProviderConfig("http://127.0.0.1:1") + `
 data "circleci_context" "test" {
   id               = "ctx-1"
   name             = "build"
@@ -152,7 +151,7 @@ func TestContextDataSourceUnit_RequiredTogether(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			// name without organization_id.
-			Config: legacyContextProviderConfig("http://127.0.0.1:1") + `
+			Config: contextFakeProviderConfig("http://127.0.0.1:1") + `
 data "circleci_context" "test" {
   name = "build"
 }

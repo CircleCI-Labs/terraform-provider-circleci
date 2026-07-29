@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"strings"
 
-	ccicontext "github.com/CircleCI-Public/circleci-sdk-go/context"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -39,7 +40,7 @@ func NewContextResource() resource.Resource {
 
 // contextResource is the resource implementation.
 type contextResource struct {
-	client *ccicontext.ContextService
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -53,24 +54,37 @@ func (r *contextResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		MarkdownDescription: "Manages a CircleCI context. Contexts provide a mechanism for securing and sharing environment variables across projects.",
 		Attributes: map[string]schema.Attribute{
 			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the organization that owns this context.",
-				Required:            true,
+				MarkdownDescription: "The ID of the organization that owns this context. There is no API " +
+					"route to move a context between organizations, so changing this value forces a new " +
+					"resource to be created.",
+				Required: true,
+				PlanModifiers: []planmodifier.String{
+					// See the BUG note this replaces, below: without this, changing
+					// organization_id planned a silent in-place update that Update()
+					// could never actually perform.
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the context.",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the CircleCI context. Changing this value forces a new resource to be created.",
 				Required:            true,
 				PlanModifiers: []planmodifier.String{
-					// *** This tells Terraform to replace if 'name' changes ***
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"created_at": schema.StringAttribute{
 				MarkdownDescription: "The timestamp when the context was created.",
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -78,143 +92,147 @@ func (r *contextResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 
 // Create creates the resource and sets the initial Terraform state.
 func (r *contextResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	// Retrieve values from plan
 	var plan contextResourceModel
-	diags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	// Create new context
-	newCciContext, err := r.client.Create(ctx, plan.OrganizationId.ValueString(), plan.Name.ValueString())
+	created, err := r.client.CreateContext(ctx, plan.OrganizationId.ValueString(), plan.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI context",
-			"Could not create CircleCI context, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
+
 		return
 	}
 
-	// Map response body to schema and populate Computed attribute values
-	plan.CreatedAt = types.StringValue(newCciContext.CreatedAt)
-	plan.Id = types.StringValue(newCciContext.ID)
+	plan.Id = types.StringValue(created.ID)
+	plan.Name = types.StringValue(created.Name)
+	plan.CreatedAt = types.StringValue(created.CreatedAt)
 
-	// Set state to fully populated data
-	diags = resp.State.Set(ctx, plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 // Read refreshes the Terraform state with the latest data.
 func (r *contextResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	var contextState contextResourceModel
-	diags := req.State.Get(ctx, &contextState)
-	if diags != nil {
-		resp.Diagnostics.Append(diags...)
-		return
-	}
-
-	if contextState.Id.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing context id",
-			"Missing context id",
-		)
-		return
-	}
-
-	context, err := r.client.Get(ctx, contextState.Id.ValueString())
-	if err != nil {
-		// Safely retrieve the ID string for the error message
-		// Use .ValueString() only after checking IsNull() if this was the first access,
-		// but since we rely on it being set, let's simplify the error message to avoid the panic risk.
-
-		contextID := "unknown ID"
-		if !contextState.Id.IsNull() {
-			contextID = contextState.Id.ValueString()
-		}
-
-		resp.Diagnostics.AddError(
-			"Unable to Read CircleCI context with id "+contextID,
-			err.Error(),
-		)
-		return
-	}
-
-	// ⚠️ CRITICAL FIX: Handle successful transport but no resource returned (nil context)
-	if context == nil {
-		// This often happens if the context was deleted just before import,
-		// or if the API client returns nil instead of an error for a 404.
-		resp.Diagnostics.AddWarning(
-			"Context not found during Read",
-			fmt.Sprintf("Context ID %s could not be retrieved from CircleCI. Removing from state.", contextState.Id.ValueString()),
-		)
-		// Mark resource for removal from state
-		resp.State.RemoveResource(ctx)
-		return
-	}
-
-	// Map response body to model
-	contextState = contextResourceModel{
-		Id:             types.StringValue(context.ID),
-		Name:           types.StringValue(context.Name),
-		CreatedAt:      types.StringValue(context.CreatedAt),
-		OrganizationId: contextState.OrganizationId,
-	}
-
-	// Set state
-	diags = resp.State.Set(ctx, &contextState)
-	resp.Diagnostics.Append(diags...)
+	var state contextResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	found, err := r.client.GetContext(ctx, state.Id.ValueString())
+	if err != nil {
+		// A context deleted outside Terraform is not an error: drop it from
+		// state so the next plan recreates it. This is only reachable for the
+		// rare case documented on GetContext (a lookup that resolves the id but
+		// then fails to read it); see the 403 handling just below for the
+		// common case.
+		if circleci.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
+		// A context that no longer exists answers 403, not 404: every route
+		// addressing a context by id sits behind the API's the context-resolution step
+		// middleware, which maps a context that cannot be resolved — deleted,
+		// in another organization, or simply inaccessible to this token — to
+		// the same Forbidden response (see internal/circleci/context.go's
+		// GetContext comment).
+		//
+		// Silently removing the resource on 403 would mean a token that merely
+		// lost permission causes Terraform to recreate a live context on the
+		// next apply. Erroring instead — and naming both possible causes — is
+		// the safer default, matching circleci_group's Read.
+		if circleci.IsUnauthorized(err) {
+			resp.Diagnostics.AddError(
+				"Unable to read CircleCI context "+state.Id.ValueString(),
+				fmt.Sprintf(
+					"The API denied access to this context. It has either been deleted outside "+
+						"Terraform, or belongs to a different organization, or the configured token "+
+						"lacks permission — the API returns the same response for all three and does "+
+						"not distinguish them.\n\n"+
+						"If the context was deleted, remove it from state with:\n"+
+						"  terraform state rm %s\n\n%s",
+					"circleci_context."+state.Name.ValueString(),
+					circleci.Detail(err),
+				),
+			)
+
+			return
+		}
+
+		resp.Diagnostics.AddError(
+			"Unable to read CircleCI context "+state.Id.ValueString(),
+			circleci.Detail(err),
+		)
+
+		return
+	}
+
+	state.Id = types.StringValue(found.ID)
+	state.Name = types.StringValue(found.Name)
+	state.CreatedAt = types.StringValue(found.CreatedAt)
+	// OrganizationId is preserved from state: the read route does not report
+	// which organization a context belongs to.
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// Update updates the resource and sets the updated Terraform state on success.
+// Update is unreachable for a real configuration change: every attribute is
+// RequiresReplace, so Terraform never calls this for anything but a
+// refresh-driven re-apply of an unchanged plan. It persists the plan so that
+// case is a no-op rather than leaving the prior state's zero-value fields
+// behind.
 func (r *contextResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan contextResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
 func (r *contextResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	// Retrieve values from state
 	var state contextResourceModel
-	diags := req.State.Get(ctx, &state)
-	resp.Diagnostics.Append(diags...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	// Delete existing order
-	err := r.client.Delete(ctx, state.Id.ValueString())
+	err := r.client.DeleteContext(ctx, state.Id.ValueString())
 	if err != nil {
+		// Already gone is the desired end state. 403 counts as gone here,
+		// unlike in Read: DeleteContext documents that a missing context
+		// answers 403 through the same context-resolution step as GetContext,
+		// so it is the response an already-deleted context produces on delete.
+		// A destroy is not expected to distinguish "gone" from "never had
+		// permission" the way a refresh is, because there is no live resource
+		// left to protect either way.
+		if circleci.IsNotFound(err) || circleci.IsUnauthorized(err) {
+			return
+		}
+
 		resp.Diagnostics.AddError(
-			"Error Deleting CircleCi Context",
-			"Could not delete context, unexpected error: "+err.Error(),
+			"Error deleting CircleCI context",
+			circleci.Detail(err),
 		)
-		return
 	}
 }
 
 // Configure adds the provider configured client to the resource.
 func (r *contextResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *circleciClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
-	r.client = client.ContextService
+
+	r.client = client
 }
 
 func (r *contextResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
@@ -226,23 +244,13 @@ func (r *contextResource) ImportState(ctx context.Context, req resource.ImportSt
 			"Invalid Import ID Format",
 			fmt.Sprintf("Expected import ID format: 'organization_id/context_id'. Got: %s", req.ID),
 		)
+
 		return
 	}
 
 	organizationID := parts[0]
 	contextID := parts[1]
 
-	// 1. Set the primary key 'id'
-	resp.Diagnostics.Append(resp.State.SetAttribute(
-		ctx, path.Root("id"), contextID,
-	)...)
-
-	// 2. Set the required but unreadable 'organization_id'
-	resp.Diagnostics.Append(resp.State.SetAttribute(
-		ctx, path.Root("organization_id"), organizationID,
-	)...)
-
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), contextID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
 }

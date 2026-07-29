@@ -54,7 +54,18 @@ tasks:
       # minutes rather than seconds. It used to be -timeout=120s, which was only ever
       # sufficient because those tests were all skipping — see the note on
       # resource.UnitTest in DESIGN.md. Use `task test:fast` for the inner loop.
-      - go tool gotestsum -- -timeout=30m -parallel=10 -race {{.ARGS}}
+      # -parallel=4, not the Go default of GOMAXPROCS. Each test in
+      # internal/provider spawns a real terraform binary plus a provider process, so
+      # on a 12-core box the default meant 12 concurrent pairs under -race, and the
+      # terraform child would occasionally die with SIGSEGV — surfacing as
+      # "Error retrieving state, there may be dangling resources: signal:
+      # segmentation fault" on a random test that passes in isolation.
+      #
+      # This costs almost nothing: the full suite is 335s at -parallel=4 versus 326s
+      # at 12, because the bottleneck is terraform process startup rather than CPU.
+      # Worth keeping low — CI runners are usually smaller than a dev box, so they
+      # would hit this harder.
+      - go tool gotestsum -- -timeout=30m -parallel=4 -race {{.ARGS}}
 
   test:fast:
     desc: Run only the fast tests (the API client packages, no terraform binary)
@@ -64,6 +75,22 @@ tasks:
       # every test there spawns terraform. This is the inner-loop target; it is not a
       # substitute for `task test` before pushing.
       - go tool gotestsum -- -timeout=2m -parallel=10 -race ./internal/circleci/... ./internal/httpcl/...
+
+  vulncheck:
+    desc: Scan for known vulnerabilities that this code can actually reach
+    vars:
+      ARGS: '{{default "./..." .CLI_ARGS}}'
+    cmds:
+      # govulncheck does reachability analysis rather than version matching, so it
+      # reports only vulnerabilities this code can actually call. That precision is
+      # the point: it found 14 reachable issues here — seven in the Go standard
+      # library (crypto/tls, crypto/x509, net/http, net/textproto, html/template),
+      # fixed by a toolchain patch bump, plus a gRPC authorization bypass — none of
+      # which Dependabot surfaced for this branch.
+      #
+      # If this fails on a standard library finding, bump the `toolchain` directive
+      # in go.mod and the Go image in .circleci/config.yml together.
+      - go tool govulncheck {{.ARGS}}
 
   generate:
     desc: Run generation of any generated code
@@ -103,7 +130,8 @@ tasks:
       - mkdir -p {{.RESULTS_DIR}}
       # -coverprofile (not just -cover) so the coverage can be summarized and
       # stored as an artifact rather than only printed per package.
-      - go tool gotestsum --junitfile="{{.TEST_REPORT}}" -- -race -coverprofile="{{.COVERAGE_PROFILE}}" -covermode=atomic -timeout 120m -count=1 {{.ARGS}}
+      # -parallel=4 for the same reason as `task test` — see the comment there.
+      - go tool gotestsum --junitfile="{{.TEST_REPORT}}" -- -race -parallel=4 -coverprofile="{{.COVERAGE_PROFILE}}" -covermode=atomic -timeout 120m -count=1 {{.ARGS}}
 
   ci:diff:
     desc: Check that generated files are up to date

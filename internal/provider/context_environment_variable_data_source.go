@@ -5,12 +5,12 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/envcontext"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -20,6 +20,13 @@ var (
 )
 
 // contextEnvironmentVariableDataSourceModel maps the output schema.
+//
+// There is deliberately no "value" attribute: the API never returns one (see
+// internal/circleci/environment_variable.go), and TruncatedValue is not
+// exposed either, following the project's rule that a value the API only ever
+// masks is not surfaced as a string a configuration could mistake for the real
+// thing (see DESIGN.md, "Values the API never returns are not exposed as
+// strings").
 type contextEnvironmentVariableDataSourceModel struct {
 	Name      types.String `tfsdk:"name"`
 	UpdatedAt types.String `tfsdk:"updated_at"`
@@ -34,7 +41,7 @@ func NewContextEnvironmentVariableDataSource() datasource.DataSource {
 
 // ContextEnvironmentVariableDataSource is the data source implementation.
 type ContextEnvironmentVariableDataSource struct {
-	client *envcontext.EnvService
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -45,7 +52,9 @@ func (d *ContextEnvironmentVariableDataSource) Metadata(_ context.Context, req d
 // Schema defines the schema for the data source.
 func (d *ContextEnvironmentVariableDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Fetches metadata about a CircleCI context environment variable.",
+		MarkdownDescription: "Fetches metadata about a CircleCI context environment variable. The value " +
+			"is never exposed: the API does not return it on any route, so there is no `value` attribute " +
+			"to read.",
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the environment variable.",
@@ -69,76 +78,45 @@ func (d *ContextEnvironmentVariableDataSource) Schema(_ context.Context, _ datas
 
 // Read refreshes the Terraform state with the latest data.
 func (d *ContextEnvironmentVariableDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
-	var contextEnvironmentVariableState contextEnvironmentVariableDataSourceModel
-	diags := req.Config.Get(ctx, &contextEnvironmentVariableState)
-	if diags != nil {
-		resp.Diagnostics.Append(diags...)
+	var state contextEnvironmentVariableDataSourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	if contextEnvironmentVariableState.ContextId.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing environment variable context id",
-			"Missing environment variable context id",
-		)
-		return
-	}
-
-	if contextEnvironmentVariableState.Name.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing environment variable name",
-			"Missing environment variable name",
-		)
-		return
-	}
-
-	contextEnvironmentVariables, err := d.client.List(ctx, contextEnvironmentVariableState.ContextId.ValueString())
+	vars, err := d.client.ListContextEnvironmentVariables(ctx, state.ContextId.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to Read CircleCI context environment variable with context id "+contextEnvironmentVariableState.ContextId.ValueString(),
-			err.Error(),
+			"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
-	// Fill restrictions
-	for _, elem := range contextEnvironmentVariables {
-		if elem.Variable == contextEnvironmentVariableState.Name.ValueString() {
-			contextEnvironmentVariableState = contextEnvironmentVariableDataSourceModel{
+	// Documents current behavior when no environment variable matches the
+	// requested name: this does not error, it just leaves created_at/updated_at
+	// unset (see TestContextEnvVarDataSourceUnit_NotFound).
+	for _, elem := range vars {
+		if elem.Variable == state.Name.ValueString() {
+			state = contextEnvironmentVariableDataSourceModel{
 				Name:      types.StringValue(elem.Variable),
-				UpdatedAt: types.StringValue(elem.UpdatedAt.Format("2006-01-02T15:04:05.000Z")),
-				CreatedAt: types.StringValue(elem.CreatedAt.Format("2006-01-02T15:04:05.000Z")),
-				ContextId: types.StringValue(elem.ContextId),
+				UpdatedAt: types.StringValue(elem.UpdatedAt),
+				CreatedAt: types.StringValue(elem.CreatedAt),
+				ContextId: types.StringValue(elem.ContextID),
 			}
 			break
 		}
 	}
 
-	// Set state
-	diags = resp.State.Set(ctx, &contextEnvironmentVariableState)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 // Configure adds the provider configured client to the data source.
 func (d *ContextEnvironmentVariableDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *client.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.EnvironmentVariableService
+	d.client = client
 }

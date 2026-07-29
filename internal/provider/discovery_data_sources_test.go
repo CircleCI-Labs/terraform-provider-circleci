@@ -4,7 +4,6 @@
 package provider
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	fwdatasource "github.com/hashicorp/terraform-plugin-framework/datasource"
-	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 )
 
 // The read-only discovery data sources — GitHub App repositories, the execution
@@ -31,38 +25,21 @@ import (
 // they are deliberately verbatim rather than convenient: a mock that matched the
 // provider's assumptions instead of the API's would let a wrong field name pass.
 
-// discoveryProvider serves only the discovery data sources.
+// discoveryProviderFactories instantiates the provider for the discovery tests.
 //
-// The provider's own DataSources list is registered separately, so these tests
-// bring their own provider rather than depending on that registration.
-type discoveryProvider struct {
-	*CircleCiProvider
-}
-
-func (p *discoveryProvider) Resources(_ context.Context) []func() fwresource.Resource {
-	return nil
-}
-
-func (p *discoveryProvider) DataSources(_ context.Context) []func() fwdatasource.DataSource {
-	return []func() fwdatasource.DataSource{
-		NewGitHubAppRepositoryDataSource,
-		NewGitHubAppRepositoriesDataSource,
-		NewCatalogOfferingsDataSource,
-		NewUserDataSource,
-		NewUserCollaborationsDataSource,
-		NewInsightsWorkflowsDataSource,
-		NewInsightsFlakyTestsDataSource,
-		NewInsightsSummaryDataSource,
-	}
-}
-
-// discoveryProviderFactories mirrors testAccProtoV6ProviderFactories for the
-// discovery data sources.
-var discoveryProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
-	"circleci": providerserver.NewProtocol6WithError(
-		&discoveryProvider{CircleCiProvider: &CircleCiProvider{version: "test"}},
-	),
-}
+// It is deliberately an alias for the shared factory rather than a cut-down provider
+// of its own. There used to be a `discoveryProvider` wrapper here that overrode
+// DataSources() with a hardcoded list of eight, on the reasoning that these tests
+// should not depend on the real registration. That turned out to be a footgun: it
+// silently shadowed the real list, so a data source added later was simply absent and
+// any test reusing this factory failed with "the provider does not support data
+// source" — which reads like a broken data source rather than a stale test list.
+// circleci_pipeline_values and circleci_github_app_installation both hit exactly that.
+//
+// TestEveryConstructorIsRegistered already guarantees the real list is complete, so
+// depending on it is strictly better than duplicating it. This mirrors
+// runnerProtoV6ProviderFactories in runner_fake_test.go.
+var discoveryProviderFactories = testAccProtoV6ProviderFactories
 
 // discoveryProviderConfig renders a provider block pointed at the mock API.
 func discoveryProviderConfig(host, deployment string) string {

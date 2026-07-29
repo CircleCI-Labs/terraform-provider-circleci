@@ -13,19 +13,14 @@ import (
 	"testing"
 )
 
-// contextLegacyAPI is an in-memory stand-in for the /api/v2/context endpoints.
+// contextFakeAPI is an in-memory stand-in for the /api/v2/context endpoints,
+// backing every circleci_context* resource and data source (all now on
+// internal/circleci.Client; the name is kept only because every sibling
+// _test.go file already refers to it).
 //
-// Two different clients read and write these routes: the provider's own
-// internal/circleci.Client (used by contextDataSource for id/name lookup) and
-// the legacy circleci-sdk-go context/envcontext services (used by
-// contextResource, contextRestrictionResource,
-// contextEnvironmentVariableResource and
-// contextEnvironmentVariableDataSource). Both hit the exact same routes, so one
-// fake serves every context_* resource and data source under test.
-//
-// The wire shapes are copied from the API's the CircleCI API not
-// from the Go client structs, so a mock cannot merely agree with a client that
-// disagrees with production:
+// The wire shapes and status codes are copied from the API's
+// the CircleCI API and middleware, not from any Go client's structs, so
+// a mock cannot merely agree with a client that disagrees with production:
 //   - the API (postOrgContext): create response is only {id,name,created_at}
 //   - the API (getOrgContext): read response also carries org_id,
 //     environment_variables and restrictions
@@ -45,17 +40,30 @@ import (
 //     never returned by the API)
 //   - context_env_var_put.go (putContextEnvVar): {variable,context_id,created_at,updated_at}
 //   - context_env_var_delete.go: {"message":"Environment variable deleted."}
-type contextLegacyAPI struct {
+//
+// The most consequential shape modeled here is not a JSON field but a status
+// code: every one of the routes above that addresses a context by id sits
+// behind the API's context-resolution step
+// (the CircleCI API), which resolves the id to its owning
+// organization through a *separate* lookup and maps ANY failure of that
+// lookup — a context that never existed, one that was deleted, one in
+// another organization, or a token that cannot see it — to HTTP 403, before
+// the route's own handler (which might otherwise 404) ever runs. resolveOrFail
+// below is that middleware. Only the collection routes (list, create), which
+// carry no context id, are exempt.
+type contextFakeAPI struct {
 	t  *testing.T
 	mu sync.Mutex
 
-	contexts map[string]*fakeLegacyContext // keyed by context id
+	contexts map[string]*fakeContext // keyed by context id
 
 	nextContextSeq     int
 	nextRestrictionSeq int
 
-	// missingContexts makes a GET or DELETE on these context ids answer 404,
-	// simulating a context deleted outside Terraform.
+	// missingContexts makes a lookup on these context ids answer 403, on every
+	// route addressed by context id, simulating a context deleted outside
+	// Terraform (or one this token can no longer see — the API does not
+	// distinguish the two; see the context-resolution step above).
 	missingContexts map[string]bool
 
 	requests []string
@@ -68,36 +76,36 @@ type contextLegacyAPI struct {
 	nextEnvVarUpdateSeq int
 }
 
-type fakeLegacyContext struct {
+type fakeContext struct {
 	id        string
 	name      string
 	createdAt string
 	orgID     string
 
-	restrictions []*fakeLegacyRestriction
-	envVars      map[string]*fakeLegacyEnvVar
+	restrictions []*fakeContextRestriction
+	envVars      map[string]*fakeContextEnvVar
 }
 
-type fakeLegacyRestriction struct {
+type fakeContextRestriction struct {
 	id               string
 	name             string
 	restrictionType  string
 	restrictionValue string
 }
 
-type fakeLegacyEnvVar struct {
+type fakeContextEnvVar struct {
 	value     string
 	createdAt string
 	updatedAt string
 }
 
-// newContextLegacyAPI starts the stand-in API and returns it alongside its origin.
-func newContextLegacyAPI(t *testing.T) (*contextLegacyAPI, string) {
+// newContextFakeAPI starts the stand-in API and returns it alongside its origin.
+func newContextFakeAPI(t *testing.T) (*contextFakeAPI, string) {
 	t.Helper()
 
-	api := &contextLegacyAPI{
+	api := &contextFakeAPI{
 		t:               t,
-		contexts:        map[string]*fakeLegacyContext{},
+		contexts:        map[string]*fakeContext{},
 		missingContexts: map[string]bool{},
 	}
 
@@ -107,7 +115,7 @@ func newContextLegacyAPI(t *testing.T) (*contextLegacyAPI, string) {
 	return api, srv.URL
 }
 
-func (a *contextLegacyAPI) handler() http.Handler {
+func (a *contextFakeAPI) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/v2/context", a.postContext)
@@ -130,7 +138,7 @@ func (a *contextLegacyAPI) handler() http.Handler {
 
 // withRequestLog records every request line before delegating to next, so
 // tests can assert on the exact method and path the provider sent.
-func withRequestLog(a *contextLegacyAPI, next http.Handler) http.Handler {
+func withRequestLog(a *contextFakeAPI, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.requests = append(a.requests, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
@@ -142,7 +150,7 @@ func withRequestLog(a *contextLegacyAPI, next http.Handler) http.Handler {
 
 // recorded returns the request lines seen so far, trimmed of a trailing bare
 // "?" when the request carried no query string.
-func (a *contextLegacyAPI) recorded() []string {
+func (a *contextFakeAPI) recorded() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -162,8 +170,12 @@ func trimBareQuery(req string) string {
 	return req
 }
 
-// fail makes every subsequent request answer with a v2 error body.
-func (a *contextLegacyAPI) fail(status int, message string) {
+// fail makes every subsequent request answer with a v2 error body. This is a
+// test-only escape hatch for exercising arbitrary status codes (4xx surfacing
+// as a diagnostic, etc.); it takes priority over resolveOrFail below, the same
+// way a real infrastructure failure would preempt any application-level
+// middleware.
+func (a *contextFakeAPI) fail(status int, message string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -171,9 +183,9 @@ func (a *contextLegacyAPI) fail(status int, message string) {
 	a.failMessage = message
 }
 
-// setMissing makes a context id answer 404 on GET, simulating deletion outside
-// Terraform.
-func (a *contextLegacyAPI) setMissing(contextID string, missing bool) {
+// setMissing makes a context id resolve to "missing" on every route addressed
+// by context id (see resolveOrFail), simulating deletion outside Terraform.
+func (a *contextFakeAPI) setMissing(contextID string, missing bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -184,22 +196,22 @@ func (a *contextLegacyAPI) setMissing(contextID string, missing bool) {
 // that need a context to already exist (read, restriction, env var tests).
 // Every caller in this package names it "build"; the name is fixed here rather
 // than threaded through as a parameter that would never vary.
-func (a *contextLegacyAPI) seedContext(id, orgID, createdAt string) {
+func (a *contextFakeAPI) seedContext(id, orgID, createdAt string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.contexts[id] = &fakeLegacyContext{
+	a.contexts[id] = &fakeContext{
 		id:        id,
 		name:      "build",
 		orgID:     orgID,
 		createdAt: createdAt,
-		envVars:   map[string]*fakeLegacyEnvVar{},
+		envVars:   map[string]*fakeContextEnvVar{},
 	}
 }
 
 // seedEnvVar adds an environment variable directly to a seeded context,
 // bypassing the PUT route, for data-source read tests.
-func (a *contextLegacyAPI) seedEnvVar(contextID, name, value, createdAt, updatedAt string) {
+func (a *contextFakeAPI) seedEnvVar(contextID, name, value, createdAt, updatedAt string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -208,12 +220,12 @@ func (a *contextLegacyAPI) seedEnvVar(contextID, name, value, createdAt, updated
 		a.t.Fatalf("seedEnvVar: no such context %q", contextID)
 	}
 
-	ctx.envVars[name] = &fakeLegacyEnvVar{value: value, createdAt: createdAt, updatedAt: updatedAt}
+	ctx.envVars[name] = &fakeContextEnvVar{value: value, createdAt: createdAt, updatedAt: updatedAt}
 }
 
 // removeEnvVar deletes an environment variable directly, bypassing the delete
 // route, to simulate deletion outside Terraform for drift tests.
-func (a *contextLegacyAPI) removeEnvVar(contextID, name string) {
+func (a *contextFakeAPI) removeEnvVar(contextID, name string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -222,8 +234,28 @@ func (a *contextLegacyAPI) removeEnvVar(contextID, name string) {
 	}
 }
 
+// removeRestriction deletes a restriction directly, bypassing the delete
+// route, to simulate deletion outside Terraform for drift tests.
+func (a *contextFakeAPI) removeRestriction(contextID, id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	ctx, ok := a.contexts[contextID]
+	if !ok {
+		return
+	}
+
+	for i, res := range ctx.restrictions {
+		if res.id == id {
+			ctx.restrictions = append(ctx.restrictions[:i], ctx.restrictions[i+1:]...)
+
+			return
+		}
+	}
+}
+
 // seedRestriction adds a restriction directly to a seeded context.
-func (a *contextLegacyAPI) seedRestriction(contextID, id, name, restrictionType, value string) {
+func (a *contextFakeAPI) seedRestriction(contextID, id, name, restrictionType, value string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -232,7 +264,7 @@ func (a *contextLegacyAPI) seedRestriction(contextID, id, name, restrictionType,
 		a.t.Fatalf("seedRestriction: no such context %q", contextID)
 	}
 
-	ctx.restrictions = append(ctx.restrictions, &fakeLegacyRestriction{
+	ctx.restrictions = append(ctx.restrictions, &fakeContextRestriction{
 		id:               id,
 		name:             name,
 		restrictionType:  restrictionType,
@@ -240,7 +272,7 @@ func (a *contextLegacyAPI) seedRestriction(contextID, id, name, restrictionType,
 	})
 }
 
-func (a *contextLegacyAPI) failed(w http.ResponseWriter) bool {
+func (a *contextFakeAPI) failed(w http.ResponseWriter) bool {
 	a.mu.Lock()
 	status, message := a.failStatus, a.failMessage
 	a.mu.Unlock()
@@ -254,9 +286,32 @@ func (a *contextLegacyAPI) failed(w http.ResponseWriter) bool {
 	return true
 }
 
+// resolveOrFail stands in for the API's context-resolution step
+// (the CircleCI API): every route below that addresses a context
+// by id calls this before doing anything else, and a context this token
+// cannot resolve — deleted, never existed, or in another organization —
+// answers 403 "Forbidden" here, before the route-specific handler runs at
+// all. That is why a context_restriction or context_environment_variable
+// route also 403s when its owning context is gone: they call this exactly
+// the same way GetContext and DeleteContext do.
+func (a *contextFakeAPI) resolveOrFail(w http.ResponseWriter, contextID string) (*fakeContext, bool) {
+	a.mu.Lock()
+	ctx, ok := a.contexts[contextID]
+	missing := a.missingContexts[contextID]
+	a.mu.Unlock()
+
+	if !ok || missing {
+		a.write(w, http.StatusForbidden, map[string]any{"message": "Forbidden"})
+
+		return nil, false
+	}
+
+	return ctx, true
+}
+
 // --- handlers ---
 
-func (a *contextLegacyAPI) postContext(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) postContext(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
@@ -283,12 +338,12 @@ func (a *contextLegacyAPI) postContext(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.nextContextSeq++
 	id := fmt.Sprintf("ctx-%d", a.nextContextSeq)
-	ctx := &fakeLegacyContext{
+	ctx := &fakeContext{
 		id:        id,
 		name:      body.Name,
 		orgID:     body.Owner.ID,
 		createdAt: "2024-01-02T03:04:05.000Z",
-		envVars:   map[string]*fakeLegacyEnvVar{},
+		envVars:   map[string]*fakeContextEnvVar{},
 	}
 	a.contexts[id] = ctx
 	a.mu.Unlock()
@@ -301,7 +356,7 @@ func (a *contextLegacyAPI) postContext(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *contextLegacyAPI) getContexts(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) getContexts(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
@@ -341,21 +396,13 @@ func (a *contextLegacyAPI) getContexts(w http.ResponseWriter, r *http.Request) {
 	a.write(w, http.StatusOK, map[string]any{"items": items, "next_page_token": nil})
 }
 
-func (a *contextLegacyAPI) getContext(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) getContext(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	id := r.PathValue("contextID")
-
-	a.mu.Lock()
-	ctx, ok := a.contexts[id]
-	missing := a.missingContexts[id]
-	a.mu.Unlock()
-
-	if !ok || missing {
-		a.write(w, http.StatusNotFound, map[string]any{"message": "context not found"})
-
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
+	if !ok {
 		return
 	}
 
@@ -372,46 +419,35 @@ func (a *contextLegacyAPI) getContext(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *contextLegacyAPI) deleteContext(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) deleteContext(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
 	id := r.PathValue("contextID")
 
-	a.mu.Lock()
-	_, ok := a.contexts[id]
-	if ok {
-		delete(a.contexts, id)
-	}
-	a.mu.Unlock()
-
-	if !ok {
-		a.write(w, http.StatusBadRequest, map[string]any{"message": "context not found"})
-
+	if _, ok := a.resolveOrFail(w, id); !ok {
 		return
 	}
+
+	a.mu.Lock()
+	delete(a.contexts, id)
+	a.mu.Unlock()
 
 	a.write(w, http.StatusOK, map[string]any{"message": "Context deleted."})
 }
 
-func (a *contextLegacyAPI) getRestrictions(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) getRestrictions(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	id := r.PathValue("contextID")
-
-	a.mu.Lock()
-	ctx, ok := a.contexts[id]
-	a.mu.Unlock()
-
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
 	if !ok {
-		a.write(w, http.StatusNotFound, map[string]any{"message": "context not found"})
-
 		return
 	}
 
+	a.mu.Lock()
 	items := make([]map[string]any, 0, len(ctx.restrictions))
 	for _, res := range ctx.restrictions {
 		item := map[string]any{
@@ -426,26 +462,20 @@ func (a *contextLegacyAPI) getRestrictions(w http.ResponseWriter, r *http.Reques
 		}
 		items = append(items, item)
 	}
+	a.mu.Unlock()
 
 	// Deliberately no "next_page_token" key: production's getContextRestrictions
 	// returns the whole set in one body via newListResponse, not newListResponsePage.
 	a.write(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (a *contextLegacyAPI) postRestriction(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) postRestriction(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	id := r.PathValue("contextID")
-
-	a.mu.Lock()
-	ctx, ok := a.contexts[id]
-	a.mu.Unlock()
-
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
 	if !ok {
-		a.write(w, http.StatusNotFound, map[string]any{"message": "context not found"})
-
 		return
 	}
 
@@ -468,7 +498,7 @@ func (a *contextLegacyAPI) postRestriction(w http.ResponseWriter, r *http.Reques
 
 	a.mu.Lock()
 	a.nextRestrictionSeq++
-	res := &fakeLegacyRestriction{
+	res := &fakeContextRestriction{
 		id:               fmt.Sprintf("rst-%d", a.nextRestrictionSeq),
 		restrictionType:  body.RestrictionType,
 		restrictionValue: body.RestrictionValue,
@@ -493,31 +523,36 @@ func (a *contextLegacyAPI) postRestriction(w http.ResponseWriter, r *http.Reques
 	a.write(w, http.StatusCreated, resp)
 }
 
-func (a *contextLegacyAPI) deleteRestriction(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) deleteRestriction(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	contextID := r.PathValue("contextID")
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
+	if !ok {
+		return
+	}
+
 	restrictionID := r.PathValue("restrictionID")
 
 	a.mu.Lock()
-	ctx, ok := a.contexts[contextID]
 	var found bool
-	if ok {
-		for i, res := range ctx.restrictions {
-			if res.id == restrictionID {
-				ctx.restrictions = append(ctx.restrictions[:i], ctx.restrictions[i+1:]...)
-				found = true
+	for i, res := range ctx.restrictions {
+		if res.id == restrictionID {
+			ctx.restrictions = append(ctx.restrictions[:i], ctx.restrictions[i+1:]...)
+			found = true
 
-				break
-			}
+			break
 		}
 	}
 	a.mu.Unlock()
 
-	if !ok || !found {
-		a.write(w, http.StatusBadRequest, map[string]any{"message": "restriction not found"})
+	if !found {
+		// The context resolved fine, but this particular restriction did not:
+		// the API.ErrNotFound, mapped to a real 404 by the API
+		// — distinct from the context-level 403 above, which never reached the
+		// handler at all.
+		a.write(w, http.StatusNotFound, map[string]any{"message": "restriction not found"})
 
 		return
 	}
@@ -525,23 +560,17 @@ func (a *contextLegacyAPI) deleteRestriction(w http.ResponseWriter, r *http.Requ
 	a.write(w, http.StatusOK, map[string]any{"message": "Context restriction deleted."})
 }
 
-func (a *contextLegacyAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	id := r.PathValue("contextID")
-
-	a.mu.Lock()
-	ctx, ok := a.contexts[id]
-	a.mu.Unlock()
-
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
 	if !ok {
-		a.write(w, http.StatusNotFound, map[string]any{"message": "context not found"})
-
 		return
 	}
 
+	a.mu.Lock()
 	names := make([]string, 0, len(ctx.envVars))
 	for name := range ctx.envVars {
 		names = append(names, name)
@@ -559,27 +588,22 @@ func (a *contextLegacyAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
 			"updated_at":      ev.updatedAt,
 		})
 	}
+	a.mu.Unlock()
 
 	a.write(w, http.StatusOK, map[string]any{"items": items, "next_page_token": nil})
 }
 
-func (a *contextLegacyAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	id := r.PathValue("contextID")
-	name := r.PathValue("name")
-
-	a.mu.Lock()
-	ctx, ok := a.contexts[id]
-	a.mu.Unlock()
-
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
 	if !ok {
-		a.write(w, http.StatusBadRequest, map[string]any{"message": "context not found"})
-
 		return
 	}
+
+	name := r.PathValue("name")
 
 	var body struct {
 		Value string `json:"value"`
@@ -593,7 +617,7 @@ func (a *contextLegacyAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	ev, exists := ctx.envVars[name]
 	if !exists {
-		ev = &fakeLegacyEnvVar{createdAt: "2024-01-02T03:04:05.000Z"}
+		ev = &fakeContextEnvVar{createdAt: "2024-01-02T03:04:05.000Z"}
 		ctx.envVars[name] = ev
 	}
 	ev.value = body.Value
@@ -611,31 +635,24 @@ func (a *contextLegacyAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *contextLegacyAPI) deleteEnvVar(w http.ResponseWriter, r *http.Request) {
+func (a *contextFakeAPI) deleteEnvVar(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
 	}
 
-	id := r.PathValue("contextID")
-	name := r.PathValue("name")
-
-	a.mu.Lock()
-	ctx, ok := a.contexts[id]
-	if ok {
-		delete(ctx.envVars, name)
-	}
-	a.mu.Unlock()
-
+	ctx, ok := a.resolveOrFail(w, r.PathValue("contextID"))
 	if !ok {
-		a.write(w, http.StatusBadRequest, map[string]any{"message": "context not found"})
-
 		return
 	}
+
+	a.mu.Lock()
+	delete(ctx.envVars, r.PathValue("name"))
+	a.mu.Unlock()
 
 	a.write(w, http.StatusOK, map[string]any{"message": "Environment variable deleted."})
 }
 
-func (a *contextLegacyAPI) write(w http.ResponseWriter, status int, body any) {
+func (a *contextFakeAPI) write(w http.ResponseWriter, status int, body any) {
 	a.t.Helper()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -645,8 +662,8 @@ func (a *contextLegacyAPI) write(w http.ResponseWriter, status int, body any) {
 	}
 }
 
-// legacyContextProviderConfig points the provider at the stand-in API.
-func legacyContextProviderConfig(host string) string {
+// contextFakeProviderConfig points the provider at the stand-in API.
+func contextFakeProviderConfig(host string) string {
 	return fmt.Sprintf(`
 provider "circleci" {
   host = %q

@@ -5,14 +5,14 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/organization"
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -37,7 +37,7 @@ func NewOrganizationDataSource() datasource.DataSource {
 
 // OrganizationDataSource is the data source implementation.
 type OrganizationDataSource struct {
-	client *organization.OrganizationService
+	client *circleci.Client
 }
 
 // ConfigValidators requires exactly one identifier. The API route segment is
@@ -104,21 +104,21 @@ func (d *OrganizationDataSource) Read(ctx context.Context, req datasource.ReadRe
 		identifier = state.Slug.ValueString()
 	}
 
-	org, err := d.client.Get(ctx, identifier)
+	org, err := d.client.GetOrganization(ctx, identifier)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Read CircleCI organization "+identifier,
-			err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
 	// Map response body to model
 	state = organizationDataSourceModel{
-		Id:      types.StringValue(org.Id),
+		Id:      types.StringValue(org.ID),
 		Name:    types.StringValue(org.Name),
 		Slug:    types.StringValue(org.Slug),
-		VcsType: types.StringValue(org.VcsType),
+		VcsType: types.StringValue(org.VCSType),
 	}
 
 	// Set state
@@ -128,18 +128,10 @@ func (d *OrganizationDataSource) Read(ctx context.Context, req datasource.ReadRe
 
 // Configure adds the provider configured client to the data source.
 func (d *OrganizationDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
 		return
 	}
 
-	d.client = client.OrganizationService
+	d.client = client
 }

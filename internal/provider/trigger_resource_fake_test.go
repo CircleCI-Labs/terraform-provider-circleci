@@ -5,7 +5,6 @@ package provider
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,71 +16,30 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
 // This file backs `circleci_trigger` (trigger_resource.go) and its singular
 // data source (trigger_data_source.go) with an in-process stand-in for the
-// public API service, so their CRUD paths — and the documented 404-detection
-// bug — run without TF_ACC or credentials.
+// public API service, so their CRUD paths run without TF_ACC or credentials.
 //
-// Routes and field names come from
-// github.com/CircleCI-Public/circleci-sdk-go's trigger package, cross-checked
-// against the CircleCI API's
+// Routes and field names come from internal/circleci's trigger methods
+// (internal/circleci/trigger.go), cross-checked against
+// the CircleCI API's
 // openapi_definitions/v2_endpoints/trigger/schemas.yaml and
 // the CircleCI API Notably: Get/Update/Delete hit
 // /projects/{project_id}/triggers/{trigger_id} (no pipeline-definitions
 // segment), while only Create/List do.
-
-// --- direct unit test of the 404-detection bug (no network at all) ---
-
-// TestIsApiNotFoundError_500WithLiteral404InBody locks down the documented bug
-// in trigger_resource.go's isApiNotFoundError: it decides "not found" by
-// string-matching "404" (or "not found") anywhere in err.Error(), rather than
-// inspecting an actual status code. The circleci-sdk-go client's error format
-// is "<res.Status>: <body>" (see client.request in
-// github.com/CircleCI-Public/circleci-sdk-go/client/client.go), so a 500 whose
-// body happens to mention "404" — e.g. while describing an upstream failure —
-// is misclassified as "the trigger doesn't exist", which makes
-// triggerResource.Read silently call RemoveResource on a trigger that is very
-// much still there.
-func TestIsApiNotFoundError_500WithLiteral404InBody(t *testing.T) {
-	tests := []struct {
-		name         string
-		err          error
-		wantNotFound bool
-	}{
-		{
-			name:         "genuine 404",
-			err:          errors.New("404 Not Found: {\"message\":\"Trigger not found.\"}"),
-			wantNotFound: true,
-		},
-		{
-			name:         "500 whose body happens to contain the digits 404",
-			err:          errors.New("500 Internal Server Error: {\"message\":\"upstream gateway 404 timeout while resolving actor\"}"),
-			wantNotFound: true, // BUG: should be false. A live trigger gets dropped from state.
-		},
-		{
-			name:         "502 with an unrelated body",
-			err:          errors.New("502 Bad Gateway: {\"message\":\"upstream unavailable\"}"),
-			wantNotFound: false,
-		},
-		{
-			name:         "429 rate limit",
-			err:          errors.New("429 Too Many Requests: {\"message\":\"slow down\"}"),
-			wantNotFound: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := isApiNotFoundError(tc.err)
-			if got != tc.wantNotFound {
-				t.Errorf("isApiNotFoundError(%q) = %v, want %v", tc.err.Error(), got, tc.wantNotFound)
-			}
-		})
-	}
-}
+//
+// Before the SDK migration (issue #26), trigger_resource.go had an
+// isApiNotFoundError helper that decided "not found" by string-matching "404"
+// (or "not found") anywhere in err.Error(), rather than inspecting an actual
+// status code — so a 500 whose body happened to mention "404" was
+// misclassified as "the trigger doesn't exist", silently dropping a live
+// trigger from state. That helper is gone; Read now uses circleci.IsNotFound,
+// which checks the real HTTP status. See
+// TestTriggerResourceUnit_ServerErrorMentioning404DoesNotRemoveFromState below.
 
 // --- fake trigger API ---
 
@@ -480,13 +438,13 @@ func TestTriggerResourceUnit_GithubAppCRUD(t *testing.T) {
 			{
 				ResourceName: "circleci_trigger.test",
 				ImportState:  true,
-				// BUG: trigger_resource.go's ImportState only sets "id" and
-				// "project_id"; Read() never populates PipelineId either. pipeline_id
-				// is Required, so importing a trigger leaves it permanently null
-				// until the practitioner edits state by hand.
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"pipeline_id"},
-				ImportStateIdFunc:       importStateIDFor("circleci_trigger.test", "project_id"),
+				// The import id carries the pipeline definition id as its middle
+				// segment, because the API never returns it: a trigger is created
+				// under a definition but read under the project, and the response has
+				// no reference back. pipeline_id therefore round-trips only because
+				// the practitioner supplies it here.
+				ImportStateVerify: true,
+				ImportStateIdFunc: triggerImportID("circleci_trigger.test"),
 			},
 		},
 	})
@@ -522,8 +480,11 @@ resource "circleci_trigger" "test" {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
-			Config:      cfg,
-			ExpectError: regexp.MustCompile(`(?s)requires event_source_repo_external_id`),
+			Config: cfg,
+			// \s+ rather than a literal space: the diagnostic renderer word-wraps
+			// long messages, and this one happens to wrap exactly between
+			// "requires" and "event_source_repo_external_id".
+			ExpectError: regexp.MustCompile(`(?s)requires\s+event_source_repo_external_id`),
 		}},
 	})
 }
@@ -599,11 +560,15 @@ func TestTriggerResourceUnit_WebhookCRUD(t *testing.T) {
 				},
 			},
 			{
-				ResourceName:            "circleci_trigger.test",
-				ImportState:             true,
-				ImportStateVerify:       true,
+				ResourceName:      "circleci_trigger.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// BUG: trigger_resource.go's ImportState only sets "id" and
+				// "project_id"; Read() never populates PipelineId either — same
+				// pre-existing gap noted in TestTriggerResourceUnit_GithubAppCRUD
+				// above.
 				ImportStateVerifyIgnore: []string{"event_source_web_hook_url"},
-				ImportStateIdFunc:       importStateIDFor("circleci_trigger.test", "project_id"),
+				ImportStateIdFunc:       triggerImportID("circleci_trigger.test"),
 			},
 		},
 	})
@@ -732,10 +697,9 @@ func TestTriggerResourceUnit_ScheduleCRUD(t *testing.T) {
 				// permanent diff between an imported trigger and its configuration.
 				ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{
-					"pipeline_id",
 					"event_source_schedule_attribution_actor",
 				},
-				ImportStateIdFunc: importStateIDFor("circleci_trigger.test", "project_id"),
+				ImportStateIdFunc: triggerImportID("circleci_trigger.test"),
 			},
 		},
 	})
@@ -852,18 +816,23 @@ resource "circleci_trigger" "test" {
 
 // --- the critical bug: a 5xx whose body mentions "404" must not look like a 404 ---
 
-// TestTriggerResourceUnit_500WithBody404DoesNotRemoveFromState is the
-// end-to-end companion to TestIsApiNotFoundError_500WithLiteral404InBody: it
-// proves the bug through the actual resource.Read path rather than by calling
-// the helper directly.
+// TestTriggerResourceUnit_ServerErrorMentioning404DoesNotRemoveFromState is the
+// trigger-side companion to
+// TestPipelineResourceUnit_ServerErrorMentioning404DoesNotDropState.
 //
-// This test is slow (the circleci-sdk-go client's underlying retryablehttp
-// client hardcodes RetryMax = 10 with the library's default 1s..30s
-// exponential backoff — see
-// github.com/CircleCI-Public/circleci-sdk-go/client/client.go's NewClient —
-// and that cannot be overridden from outside the vendored package, and 5xx
-// responses are retried), so it exercises the failure exactly once.
-func TestTriggerResourceUnit_500WithBody404DoesNotRemoveFromState(t *testing.T) {
+// Before the SDK migration, trigger_resource.go's Read() decided
+// "not found" with an isApiNotFoundError helper that string-matched "404" (or
+// "not found") anywhere in err.Error(). A 500 whose body happened to mention
+// "404" — e.g. while describing an upstream failure — was misclassified as
+// "the trigger doesn't exist", so Read silently called RemoveResource on a
+// trigger that was very much still there: the live trigger was never actually
+// deleted from the API, only from Terraform's state, so the next plan proposed
+// recreating it — a real-world duplicate trigger.
+//
+// Read now uses circleci.IsNotFound, which inspects the actual HTTP status, so
+// a 500 must surface as an error diagnostic and the trigger must stay in
+// state.
+func TestTriggerResourceUnit_ServerErrorMentioning404DoesNotRemoveFromState(t *testing.T) {
 	api, host := newFakeTriggerAPI(t)
 
 	cfg := triggerFakeGithubAppConfig(host, "ext-1", "all-pushes", false)
@@ -879,30 +848,38 @@ func TestTriggerResourceUnit_500WithBody404DoesNotRemoveFromState(t *testing.T) 
 					api.setFail(http.StatusInternalServerError,
 						`{"message":"upstream gateway 404 timeout while resolving actor"}`)
 				},
-				Config: cfg,
-				// This documents the BUG rather than the fix: a correct provider
-				// would fail this refresh with an error diagnostic ("Error Reading
-				// Trigger") because a 500 is not a 404. Instead,
-				// trigger_resource.go's isApiNotFoundError string-matches "404"
-				// anywhere in err.Error() (see
-				// TestIsApiNotFoundError_500WithLiteral404InBody above), so Read
-				// silently calls RemoveResource. The live trigger is never actually
-				// deleted from the API — only from Terraform's state — so the plan
-				// now proposes recreating it (a non-empty plan), which is what
-				// this assertion pins down. If isApiNotFoundError is fixed to check
-				// an actual status code, this step must be changed to
-				// `ExpectError: regexp.MustCompile("Error Reading Trigger")` instead.
-				PlanOnly:           true,
-				ExpectNonEmptyPlan: true,
+				Config:      cfg,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?s)Error Reading Trigger`),
 			},
 			{
-				// The original trigger is still live on the (simulated) server —
-				// only gone from state — so this step creates a SECOND trigger
-				// rather than adopting the first. That duplication is the real-world
-				// consequence of the bug above.
+				// Transient failure over: the trigger must still be managed, and the
+				// plan must be empty. A create here would mean state was dropped.
 				PreConfig: func() { api.clearFail() },
 				Config:    cfg,
 			},
 		},
 	})
+}
+
+// triggerImportID builds the three-segment import id a trigger needs:
+// "project_id/pipeline_id/trigger_id". The middle segment cannot be recovered from
+// the API, which is why it is part of the address rather than something Read fills in.
+func triggerImportID(resourceAddr string) func(s *terraform.State) (string, error) {
+	return func(s *terraform.State) (string, error) {
+		res := s.RootModule().Resources[resourceAddr]
+		if res == nil {
+			return "", fmt.Errorf("resource %s not found in state", resourceAddr)
+		}
+
+		for _, attr := range []string{"project_id", "pipeline_id", "id"} {
+			if _, ok := res.Primary.Attributes[attr]; !ok {
+				return "", fmt.Errorf("attribute %s.%s not found", resourceAddr, attr)
+			}
+		}
+
+		return res.Primary.Attributes["project_id"] + "/" +
+			res.Primary.Attributes["pipeline_id"] + "/" +
+			res.Primary.Attributes["id"], nil
+	}
 }

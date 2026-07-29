@@ -5,7 +5,10 @@ package circleci_test
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -126,4 +129,229 @@ func TestListPipelineDefinitionsEscapesRouteParams(t *testing.T) {
 	if got := (*seen)[0].rawURI; got != wantURI {
 		t.Errorf("raw request URI = %q, want %q", got, wantURI)
 	}
+}
+
+// recordedBodyServer captures method, request URI and decoded JSON body of the
+// last request, then answers 200 with the given body.
+//
+// It always answers 200: the error paths go through newRecordingServer instead,
+// which takes a status. Keeping a status parameter here that only ever receives 200
+// would suggest error coverage lives in this helper when it does not.
+func recordedBodyServer(t *testing.T, respBody string) (*httptest.Server, *fakeRecordedRequest) {
+	t.Helper()
+
+	var rec fakeRecordedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body := map[string]any{}
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &body)
+		}
+		rec = fakeRecordedRequest{Method: r.Method, Path: r.URL.Path, Body: body}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, respBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv, &rec
+}
+
+// fakeRecordedRequest mirrors internal/provider's helper of the same name, kept
+// separate because circleci_test must not import the provider package.
+type fakeRecordedRequest struct {
+	Method string
+	Path   string
+	Body   map[string]any
+}
+
+func TestCreatePipelineDefinitionRequest(t *testing.T) {
+	t.Parallel()
+
+	// The shape mirrors the API's
+	// the CircleCI API's createRequest:
+	// config_source carries provider, repo.external_id and file_path;
+	// checkout_source carries provider and repo.external_id. Every field is
+	// sent unconditionally.
+	srv, rec := recordedBodyServer(t, `{"id":"44444444-4444-4444-4444-444444444444",
+		"name":"build","description":"Main pipeline","created_at":"2024-05-01T10:00:00Z",
+		"config_source":{"provider":"github_app","file_path":".circleci/config.yml",
+		                 "repo":{"full_name":"acme/api","external_id":"123456"}},
+		"checkout_source":{"provider":"github_app","repo":{"full_name":"acme/api","external_id":"123456"}}}`)
+
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	input := circleci.CreatePipelineDefinitionInput{
+		Name:        "build",
+		Description: "Main pipeline",
+		ConfigSource: circleci.PipelineConfigSourceInput{
+			Provider: "github_app",
+			Repo:     circleci.RepoInput{ExternalID: "123456"},
+			FilePath: ".circleci/config.yml",
+		},
+		CheckoutSource: circleci.PipelineCheckoutSourceInput{
+			Provider: "github_app",
+			Repo:     circleci.RepoInput{ExternalID: "123456"},
+		},
+	}
+
+	created, err := client.CreatePipelineDefinition(context.Background(), testDefinitionProjectID, input)
+	if err != nil {
+		t.Fatalf("CreatePipelineDefinition returned error: %v", err)
+	}
+
+	if rec.Method != http.MethodPost {
+		t.Errorf("method = %q, want POST", rec.Method)
+	}
+	wantPath := "/api/v2/projects/" + testDefinitionProjectID + "/pipeline-definitions"
+	if rec.Path != wantPath {
+		t.Errorf("path = %q, want %q", rec.Path, wantPath)
+	}
+
+	configSource, _ := rec.Body["config_source"].(map[string]any)
+	if configSource["provider"] != "github_app" || configSource["file_path"] != ".circleci/config.yml" {
+		t.Errorf("request config_source = %v, want github_app/.circleci/config.yml", configSource)
+	}
+	repo, _ := configSource["repo"].(map[string]any)
+	if repo["external_id"] != "123456" {
+		t.Errorf("request config_source.repo.external_id = %v, want 123456", repo["external_id"])
+	}
+	checkoutSource, _ := rec.Body["checkout_source"].(map[string]any)
+	if checkoutSource["provider"] != "github_app" {
+		t.Errorf("request checkout_source.provider = %v, want github_app", checkoutSource["provider"])
+	}
+
+	if created.ID != "44444444-4444-4444-4444-444444444444" || created.Name != "build" {
+		t.Errorf("created = %+v, want id 44444444-4444-4444-4444-444444444444 and name build", created)
+	}
+}
+
+func TestGetPipelineDefinitionRequest(t *testing.T) {
+	t.Parallel()
+
+	srv, rec := recordedBodyServer(t, `{"id":"44444444-4444-4444-4444-444444444444",
+		"name":"build","config_source":{"provider":"github_app"},"checkout_source":{"provider":"github_app"}}`)
+
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	found, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "44444444-4444-4444-4444-444444444444")
+	if err != nil {
+		t.Fatalf("GetPipelineDefinition returned error: %v", err)
+	}
+
+	if rec.Method != http.MethodGet {
+		t.Errorf("method = %q, want GET", rec.Method)
+	}
+	wantPath := "/api/v2/projects/" + testDefinitionProjectID + "/pipeline-definitions/44444444-4444-4444-4444-444444444444"
+	if rec.Path != wantPath {
+		t.Errorf("path = %q, want %q", rec.Path, wantPath)
+	}
+	if found.Name != "build" {
+		t.Errorf("found.Name = %q, want build", found.Name)
+	}
+}
+
+func TestGetPipelineDefinitionNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Pipeline definition not found"}`)
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	_, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "nope")
+	if !circleci.IsNotFound(err) {
+		t.Errorf("GetPipelineDefinition error = %v, want a not found error", err)
+	}
+}
+
+func TestUpdatePipelineDefinitionRequest(t *testing.T) {
+	t.Parallel()
+
+	// Pins the bug-4 fix at the client layer: the update body's config_source
+	// must carry ONLY file_path (verified against handler_update.go's
+	// updateRequestConfigSource, which has no provider or repo field at all),
+	// while checkout_source carries both provider and repo.external_id,
+	// matching the create shape.
+	srv, rec := recordedBodyServer(t, `{"id":"44444444-4444-4444-4444-444444444444",
+		"name":"build","config_source":{"provider":"github_app","file_path":"new.yml"},
+		"checkout_source":{"provider":"github_app","repo":{"external_id":"789"}}}`)
+
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	input := circleci.UpdatePipelineDefinitionInput{
+		Name:        "build",
+		Description: "updated",
+		ConfigSource: circleci.PipelineConfigSourceUpdateInput{
+			FilePath: "new.yml",
+		},
+		CheckoutSource: circleci.PipelineCheckoutSourceInput{
+			Provider: "github_app",
+			Repo:     circleci.RepoInput{ExternalID: "789"},
+		},
+	}
+
+	if _, err := client.UpdatePipelineDefinition(context.Background(), testDefinitionProjectID, "44444444-4444-4444-4444-444444444444", input); err != nil {
+		t.Fatalf("UpdatePipelineDefinition returned error: %v", err)
+	}
+
+	if rec.Method != http.MethodPatch {
+		t.Errorf("method = %q, want PATCH", rec.Method)
+	}
+	wantPath := "/api/v2/projects/" + testDefinitionProjectID + "/pipeline-definitions/44444444-4444-4444-4444-444444444444"
+	if rec.Path != wantPath {
+		t.Errorf("path = %q, want %q", rec.Path, wantPath)
+	}
+
+	configSource, _ := rec.Body["config_source"].(map[string]any)
+	if len(configSource) != 1 {
+		t.Errorf("update config_source has keys %v, want only file_path", keysOf(configSource))
+	}
+	if configSource["file_path"] != "new.yml" {
+		t.Errorf("update config_source.file_path = %v, want new.yml", configSource["file_path"])
+	}
+	checkoutSource, _ := rec.Body["checkout_source"].(map[string]any)
+	if checkoutSource["provider"] != "github_app" {
+		t.Errorf("update checkout_source.provider = %v, want github_app", checkoutSource["provider"])
+	}
+}
+
+func TestDeletePipelineDefinitionRequest(t *testing.T) {
+	t.Parallel()
+
+	srv, rec := recordedBodyServer(t, `{"message":"Pipeline definition deleted."}`)
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	if err := client.DeletePipelineDefinition(context.Background(), testDefinitionProjectID, "44444444-4444-4444-4444-444444444444"); err != nil {
+		t.Fatalf("DeletePipelineDefinition returned error: %v", err)
+	}
+
+	if rec.Method != http.MethodDelete {
+		t.Errorf("method = %q, want DELETE", rec.Method)
+	}
+	wantPath := "/api/v2/projects/" + testDefinitionProjectID + "/pipeline-definitions/44444444-4444-4444-4444-444444444444"
+	if rec.Path != wantPath {
+		t.Errorf("path = %q, want %q", rec.Path, wantPath)
+	}
+}
+
+func TestDeletePipelineDefinitionNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Pipeline definition not found"}`)
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	err := client.DeletePipelineDefinition(context.Background(), testDefinitionProjectID, "nope")
+	if !circleci.IsNotFound(err) {
+		t.Errorf("DeletePipelineDefinition error = %v, want a not found error", err)
+	}
+}
+
+// keysOf returns the keys of m, for a readable failure message.
+func keysOf(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	return keys
 }

@@ -21,7 +21,7 @@ import (
 const contextEnvVarDataSourceUnitContextID = "ctx-fixed-4"
 
 func contextEnvVarDataSourceUnitConfig(host, contextID, name string) string {
-	return legacyContextProviderConfig(host) + fmt.Sprintf(`
+	return contextFakeProviderConfig(host) + fmt.Sprintf(`
 data "circleci_context_environment_variable" "test" {
   context_id = %[1]q
   name       = %[2]q
@@ -30,7 +30,7 @@ data "circleci_context_environment_variable" "test" {
 }
 
 func TestContextEnvVarDataSourceUnit_Found(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	api.seedContext(contextEnvVarDataSourceUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
 	api.seedEnvVar(contextEnvVarDataSourceUnitContextID, "API_KEY", "s3cr3t", "2024-01-02T03:04:05.000Z", "2024-02-03T04:05:06.000Z")
 
@@ -52,7 +52,7 @@ func TestContextEnvVarDataSourceUnit_Found(t *testing.T) {
 // no environment variable matches the requested name: Read (context_environment_variable_data_source.go)
 // does not error, it just leaves created_at/updated_at unset.
 func TestContextEnvVarDataSourceUnit_NotFound(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	api.seedContext(contextEnvVarDataSourceUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
 
 	resource.UnitTest(t, resource.TestCase{
@@ -70,8 +70,40 @@ func TestContextEnvVarDataSourceUnit_NotFound(t *testing.T) {
 
 // TestContextEnvVarDataSourceUnit_APIError proves a 4xx from the API surfaces
 // as a Terraform diagnostic rather than a panic.
+// TestContextEnvVarDataSourceUnit_NoValueAttributeExposed asserts the design
+// rule that a value the API never returns is not exposed as a string a
+// configuration could mistake for the real thing (see DESIGN.md, "Values the
+// API never returns are not exposed as strings"). The schema
+// (context_environment_variable_data_source.go) has no "value" attribute at
+// all, so referencing one is a configuration-time error rather than reading
+// back "" or a mask.
+func TestContextEnvVarDataSourceUnit_NoValueAttributeExposed(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	api.seedContext(contextEnvVarDataSourceUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
+	api.seedEnvVar(contextEnvVarDataSourceUnitContextID, "API_KEY", "s3cr3t", "2024-01-02T03:04:05.000Z", "2024-02-03T04:05:06.000Z")
+
+	cfg := contextFakeProviderConfig(host) + fmt.Sprintf(`
+data "circleci_context_environment_variable" "test" {
+  context_id = %[1]q
+  name       = "API_KEY"
+}
+
+output "leaked" {
+  value = data.circleci_context_environment_variable.test.value
+}
+`, contextEnvVarDataSourceUnitContextID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      cfg,
+			ExpectError: regexp.MustCompile(`(?s)([Uu]nsupported attribute|does not have an attribute)`),
+		}},
+	})
+}
+
 func TestContextEnvVarDataSourceUnit_APIError(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	api.seedContext(contextEnvVarDataSourceUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
 	api.fail(400, "context not found")
 
@@ -79,7 +111,7 @@ func TestContextEnvVarDataSourceUnit_APIError(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
 			Config:      contextEnvVarDataSourceUnitConfig(host, contextEnvVarDataSourceUnitContextID, "API_KEY"),
-			ExpectError: regexp.MustCompile(`(?s)Unable to Read CircleCI context environment variable`),
+			ExpectError: regexp.MustCompile(`(?s)Unable to read CircleCI context environment variable`),
 		}},
 	})
 }

@@ -33,8 +33,9 @@ func providerData(data any, diags *diag.Diagnostics) (*CircleCiClientWrapper, bo
 }
 
 // apiClient extracts the provider's own API client from a Configure request's
-// ProviderData. New resources and data sources use this rather than one of the
-// legacy circleci-sdk-go services.
+// ProviderData. Every resource and data source uses this; it used to be "new
+// resources use this rather than one of the legacy circleci-sdk-go services",
+// but the SDK is gone (see DESIGN.md) and there is now only one client.
 func apiClient(data any, diags *diag.Diagnostics) (*circleci.Client, bool) {
 	wrapper, ok := providerData(data, diags)
 	if !ok {

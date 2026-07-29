@@ -8,15 +8,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/client"
-	ccicontext "github.com/CircleCI-Public/circleci-sdk-go/context"
-	"github.com/CircleCI-Public/circleci-sdk-go/envcontext"
-	"github.com/CircleCI-Public/circleci-sdk-go/envproject"
-	"github.com/CircleCI-Public/circleci-sdk-go/organization"
-	"github.com/CircleCI-Public/circleci-sdk-go/pipeline"
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
-	"github.com/CircleCI-Public/circleci-sdk-go/trigger"
-	"github.com/CircleCI-Public/circleci-sdk-go/webhook"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
@@ -36,23 +27,17 @@ var _ provider.Provider = &CircleCiProvider{}
 var _ provider.ProviderWithFunctions = &CircleCiProvider{}
 var _ provider.ProviderWithEphemeralResources = &CircleCiProvider{}
 
-// circleciClientWrapper wraps all the services provided by the circleci API client.
+// CircleCiClientWrapper carries the provider's API client to every resource, data
+// source and ephemeral resource through Terraform's ProviderData.
 //
-// Client is the provider's own API client and is what new resources must use. The
-// circleci-sdk-go services below it are legacy: they are retained for the
-// resources written against them and shrink as those are migrated. See
-// internal/httpcl/DIVERGENCES.md for why.
+// It used to hold eight `circleci-sdk-go` services alongside Client, which is why it
+// is a wrapper struct rather than the client itself. Those are gone — see
+// `DESIGN.md`, "`circleci-sdk-go` is removed, not wrapped" — but the struct stays: it
+// is what `apiClient` and `ephemeralAPIClient` type-assert against, and collapsing it
+// to a bare `*circleci.Client` would churn every Configure method for no gain. It is
+// also the obvious place to hang anything else that must be shared provider-wide.
 type CircleCiClientWrapper struct {
 	Client *circleci.Client
-
-	ContextService                    *ccicontext.ContextService
-	EnvironmentVariableService        *envcontext.EnvService
-	PipelineService                   *pipeline.PipelineService
-	OrganizationService               *organization.OrganizationService
-	TriggerService                    *trigger.TriggerService
-	WebhookService                    *webhook.WebhookService
-	ProjectEnvironmentVariableService *envproject.EnvService
-	RunnerService                     *runner.Service
 }
 
 // circleciProviderModel maps provider schema data to a Go type.
@@ -219,36 +204,8 @@ func (p *CircleCiProvider) Configure(ctx context.Context, req provider.Configure
 		UserAgent:  "terraform-provider-circleci/" + p.version,
 	})
 
-	// Legacy circleci-sdk-go client. Its base URL must carry the version, since
-	// the SDK builds request paths relative to it.
-	circleciClient := client.NewClient(origin+"/api/v2", key)
-	contextService := ccicontext.NewContextService(circleciClient)
-	organizationService := organization.NewOrganizationService(circleciClient)
-	pipelineService := pipeline.NewPipelineService(circleciClient)
-	environmentVariableService := envcontext.NewEnvService(circleciClient)
-	triggerService := trigger.NewTriggerService(circleciClient)
-	webhookService := webhook.NewWebhookService(circleciClient)
-	projectEnvVarService := envproject.NewEnvService(circleciClient)
-	var runnerService *runner.Service
-	if runner_host == "" {
-		runnerService = runner.NewService(circleciClient)
-	} else {
-		runnerService = runner.NewServiceWithBaseURL(circleciClient, runner_host)
-	}
-	// TODO: would it be possible to verify that the client is correctly configured?
-
 	// Make the CircleCI client available during DataSource and Resource type Configure methods.
-	cccw := CircleCiClientWrapper{
-		Client:                            ownClient,
-		ContextService:                    contextService,
-		EnvironmentVariableService:        environmentVariableService,
-		OrganizationService:               organizationService,
-		PipelineService:                   pipelineService,
-		TriggerService:                    triggerService,
-		WebhookService:                    webhookService,
-		ProjectEnvironmentVariableService: projectEnvVarService,
-		RunnerService:                     runnerService,
-	}
+	cccw := CircleCiClientWrapper{Client: ownClient}
 	resp.DataSourceData = &cccw
 	resp.ResourceData = &cccw
 	// Ephemeral resources get their provider data through a separate field. Leaving

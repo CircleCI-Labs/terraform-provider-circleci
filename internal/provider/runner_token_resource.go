@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -41,7 +42,7 @@ func NewRunnerTokenResource() resource.Resource {
 
 // runnerTokenResource is the resource implementation.
 type runnerTokenResource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -111,7 +112,7 @@ func (r *runnerTokenResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	createReq := runner.CreateTokenRequest{
+	createReq := circleci.TokenInput{
 		OrganizationID: plan.OrganizationId.ValueString(),
 		ResourceClass:  plan.ResourceClass.ValueString(),
 		Nickname:       plan.Nickname.ValueString(),
@@ -121,12 +122,12 @@ func (r *runnerTokenResource) Create(ctx context.Context, req resource.CreateReq
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI runner token",
-			"Could not create runner token, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
-	plan.Id = types.StringValue(t.Id)
+	plan.Id = types.StringValue(t.ID)
 	plan.ResourceClass = types.StringValue(t.ResourceClass)
 	plan.Nickname = types.StringValue(t.Nickname)
 	plan.Token = types.StringValue(t.Token)
@@ -149,15 +150,15 @@ func (r *runnerTokenResource) Read(ctx context.Context, req resource.ReadRequest
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner tokens",
-			"Could not list runner tokens for resource class "+state.ResourceClass.ValueString()+": "+err.Error(),
+			"Could not list runner tokens for resource class "+state.ResourceClass.ValueString()+": "+circleci.Detail(err),
 		)
 		return
 	}
 
-	var found *runner.Token
-	for i := range tokens.Items {
-		if tokens.Items[i].Id == state.Id.ValueString() {
-			found = &tokens.Items[i]
+	var found *circleci.Token
+	for i := range tokens {
+		if tokens[i].ID == state.Id.ValueString() {
+			found = &tokens[i]
 			break
 		}
 	}
@@ -167,7 +168,7 @@ func (r *runnerTokenResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	state.Id = types.StringValue(found.Id)
+	state.Id = types.StringValue(found.ID)
 	state.ResourceClass = types.StringValue(found.ResourceClass)
 	state.Nickname = types.StringValue(found.Nickname)
 	state.CreatedAt = types.StringValue(found.CreatedAt)
@@ -191,30 +192,23 @@ func (r *runnerTokenResource) Delete(ctx context.Context, req resource.DeleteReq
 	}
 
 	err := r.client.DeleteToken(ctx, state.Id.ValueString())
-	if err != nil {
+	// A token already gone is the desired end state, so absence is not an error.
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
 			"Error deleting CircleCI runner token",
-			"Could not delete runner token "+state.Id.ValueString()+": "+err.Error(),
+			"Could not delete runner token "+state.Id.ValueString()+": "+circleci.Detail(err),
 		)
 	}
 }
 
 // Configure adds the provider configured client to the resource.
 func (r *runnerTokenResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
 		return
 	}
 
-	r.client = client.RunnerService
+	r.client = client
 }
 
 // ImportState imports an existing runner token into Terraform state.

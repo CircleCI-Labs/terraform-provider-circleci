@@ -9,7 +9,7 @@ description: |-
 
 Manages a CircleCI project and its advanced settings.
 
-Use this for a project Terraform creates. For a project that **already exists**, use [`circleci_project_settings`](project_settings) instead: it manages only the settings you name, whereas this resource owns the project's whole settings record and writes `false` for any setting the configuration leaves out. Never point both at the same project — they overwrite each other's changes on every apply.
+Use this for a project Terraform creates. For a project that **already exists**, use [`circleci_project_settings`](project_settings) instead: this resource owns the project's whole settings record, and it can neither adopt a project it did not create nor be pointed at one alongside another resource — two resources managing the same project overwrite each other's changes on every apply.
 
 ## Example Usage
 
@@ -22,7 +22,6 @@ resource "circleci_project" "example" {
   build_fork_prs                = false
   disable_ssh                   = true
   forks_receive_secret_env_vars = false
-  oss                           = false
   set_github_status             = true
   setup_workflows               = false
   write_settings_requires_admin = false
@@ -47,7 +46,6 @@ resource "circleci_project" "example" {
 ~> On GitLab this is not a project setting but a per-trigger filter, so it has no effect there.
 - `disable_ssh` (Boolean) Whether to disable SSH access to builds.
 - `forks_receive_secret_env_vars` (Boolean) Whether forked pull requests can access secret environment variables.
-- `oss` (Boolean) Whether the project is free and open source, which grants additional credits and makes builds visible to everyone. CircleCI only honours `true` for a repository that is genuinely open source; it reports success and leaves the setting unchanged otherwise, which this resource surfaces as an error.
 - `pr_only_branch_overrides` (List of String) List of branches that override the PR-only build setting.
 - `set_github_status` (Boolean) Whether to set GitHub commit status on builds.
 - `setup_workflows` (Boolean) Whether setup workflows are enabled.
@@ -58,6 +56,9 @@ resource "circleci_project" "example" {
 - `id` (String) The unique identifier of the project.
 - `organization_name` (String) The name of the owning organization.
 - `organization_slug` (String) The slug of the owning organization.
+- `oss` (Boolean) Whether the project is treated as free and open source, which grants additional credits and makes builds visible to everyone.
+
+~> **Read-only.** This is reported by the API but cannot be set through it. The settings endpoint rejects the field outright — `400 Unexpected field 'advanced.oss'.` — and because it rejects the whole request, including it broke every project create and settings update. CircleCI derives it from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application rather than here.
 - `slug` (String) The project slug in the format `vcs-type/org-name/repo-name`.
 - `vcs_info_default_branch` (String) The default branch of the project repository.
 - `vcs_info_provider` (String) The VCS provider (e.g., `github`, `bitbucket`).
@@ -71,8 +72,29 @@ Import is supported using the project slug (`vcs-type/org-name/repo-name`):
 terraform import circleci_project.example "github/my-org/my-repo"
 ```
 
+## Settings you leave out
+
+A setting this configuration does not mention is **not sent at all**, so CircleCI applies its own default. This is worth knowing, because the defaults are not uniformly `false`:
+
+| Setting | Default when never set |
+| --- | --- |
+| `auto_cancel_builds` | `false` |
+| `build_fork_prs` | `false` |
+| `build_prs_only` | `false` |
+| `disable_ssh` | `false`, unless an organization-level value says otherwise |
+| `forks_receive_secret_env_vars` | **`true` on a private project**, `false` on a public one |
+| `set_github_status` | **`true`** |
+| `setup_workflows` | **`true`** for projects created after 2023-12-01 |
+| `write_settings_requires_admin` | `false`, unless an organization-level value says otherwise |
+| `pr_only_branch_overrides` | the repository's default branch, for example `["main"]` |
+| `oss` | derived from the repository, and read-only — see below |
+
+Earlier versions of this provider sent every setting on create, writing `false` for anything the configuration left out. That forced `set_github_status` off on every Terraform-created project and cleared `pr_only_branch_overrides`, so it was fixed: nothing unmentioned is written, and the value CircleCI chose is read back into state.
+
+~> Because `forks_receive_secret_env_vars` defaults to **`true`** on a private project, a configuration that sets `build_fork_prs = true` must also set `forks_receive_secret_env_vars` explicitly. The provider reports an error at validate time otherwise: leaving it unset on a private project means pull requests from forks receive this project's environment variables, secrets and build cache, so anyone who can open one can read them.
+
 ## Notes on `oss`
 
-CircleCI only honours `oss = true` for a project whose underlying repository is genuinely open source. For anything else it answers successfully and leaves the setting unchanged, so this resource compares what it asked for with what CircleCI reports and fails with an explanation rather than showing a diff that can never converge.
+`oss` is **read-only**. CircleCI reports it but the settings API does not accept it: a request carrying it answers `400 Unexpected field 'advanced.oss'.` and is rejected in full, so a single unwritable field would fail every write. CircleCI derives the value from whether the repository is public together with an organization-level flag — set it in the CircleCI web application, not here.
 
-Every other setting on this resource is written on create, including the ones the configuration leaves out — those are sent as their CircleCI default. Use [`circleci_project_settings`](project_settings) if you need a project's settings updated selectively.
+Use [`circleci_project_settings`](project_settings) to manage the settings of a project Terraform did not create, or to have several configurations manage disjoint settings on one project.

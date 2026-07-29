@@ -19,6 +19,35 @@ Server from one client.
 only ever speak one version — which makes the Cloud/Server split inexpressible.
 That, plus its untyped errors (below), is why the provider owns its client.
 
+### `circleci-sdk-go` is removed, not wrapped
+
+Originally the plan was to keep `circleci-sdk-go` for the resources that already
+shipped on it and use the owned client only for new work — add value first, retire the
+dependency later. That was the right call at the time and the wrong one to keep:
+**eight bugs were traced to the SDK**, one of them a shipped security bug
+(`circleci_webhook` silently never sending `signing_secret`). The maintainer's decision
+was to pull the band-aid off in one go.
+
+The SDK's problems were not incidental. They were structural, and each produced a
+distinct class of bug:
+
+| SDK property | What it caused |
+|---|---|
+| Hyphenated JSON tags against a snake_case API that ignores unknown keys | Fields silently never sent, or permanently empty. **Three separate instances**: `signing-secret`/`verify-tls` (the security bug), `public-key`/`created-at` on checkout keys, `created-at` on project environment variables |
+| Untyped errors — every failure is `fmt.Errorf("%s: %s", status, body)` | Drift detection by `strings.Contains(err.Error(), "404")`, which also matches a 5xx whose body mentions 404, **silently dropping live resources from state** |
+| Version baked into the client's base URL | "v3 on Cloud, v2 on Server" inexpressible; also a hardcoded `https://circleci.com` that made project creation impossible on Server |
+| `Configure` receiving a narrow service (`*pipeline.PipelineService`) rather than a client | `circleci_pipeline` could not be deployment-gated **at all** — the service carried no deployment information |
+| Missing fields (`AdvanceSettings` has no `build_prs_only`) | Settings simply unreachable from Terraform |
+
+The last row is the one worth remembering: a wrapper cannot fix a field the wrapped type
+does not have. That is why this was a removal rather than an adapter.
+
+**Wire shapes were re-derived from the API, not ported from the SDK.** Porting
+would have carried the tag bugs across intact. `CircleCI-Public/circleci-cli`'s
+`internal/apiclient` was the primary reference — MIT, actively maintained, and covering
+the same entities — cribbed with attribution since it lives under `internal/` and cannot
+be imported.
+
 ### `internal/httpcl` is vendored, not authored
 
 Copied verbatim from `CircleCI-Public/circleci-cli` (MIT). It lives under
@@ -62,6 +91,13 @@ values are sent, so two configurations can manage disjoint toggles on one object
 
 A test asserts no settings attribute is Computed, so this cannot regress quietly.
 
+The one exception is a setting the API will not accept on write. `circleci_project_settings.oss`
+is `Computed`-only, not `Optional`: the settings `PATCH` answers
+`400 Unexpected field 'advanced.oss'.` and rejects the whole request when the field is
+present, so the attribute can only ever report. Adopting a value that can never be
+written back cannot lead to writing it, which is what makes the exception safe — and the
+same test now asserts `oss` is *not* `Optional`, for the opposite reason.
+
 ### Destroy must mirror what create actually did
 
 Not a stylistic preference — it prevented data loss. `circleci_organization`'s
@@ -97,6 +133,33 @@ there too, so this is gated the same way as the v3-only resources, out of
 caution rather than confirmed routing. If that turns out to be wrong for some
 Server installation, the fix is to drop the gate, not to loosen it further.
 
+### Contexts answer 403 for absence too, and the middleware decides before the handler
+
+Every `/api/v2/context/{id}/...` route — get, delete, both restriction routes, both
+env-var mutating routes, both list routes — sits behind the API's `the context-resolution step`
+middleware (`the CircleCI API`, wired in `api.go`). That middleware resolves
+the id through a separate domain-service lookup and maps **every** failure to **HTTP
+403**: genuinely deleted, belongs to another organization, or the token lacks permission.
+It runs *before* the route's own handler, so handlers that would have answered 404 never
+get the chance.
+
+This was not previously modelled anywhere here. Worse, `context_fake_test.go`
+asserted 404 for missing reads and **400** for missing deletes, restrictions and env
+vars — so the fake disagreed with production on every one of those paths, and context
+drift detection could never have worked. Ninth bug of the same family, and the reason
+the rule above says to read the handler *and its middleware*.
+
+Handling mirrors `circleci_group` rather than folding 403 into `IsNotFound`:
+
+- **Read** treats 403 as a hard diagnostic naming all three possible causes, leaving
+  state untouched. Silently removing the resource would let a token that merely lost
+  permission cause a recreate of a live context — with real environment variables in it.
+- **Delete** treats 403 *and* 404 as already-gone, because the desired end state is
+  reached either way.
+
+A genuine 404 — the narrow race where the middleware resolves and the handler then fails
+— does still drop state for a clean recreate.
+
 ### `requireStandaloneCapable` is deliberately necessary-but-not-sufficient
 
 Groups and GitHub App routes need a `circleci` type (standalone) organization.
@@ -118,7 +181,7 @@ receiver and never is one. Same reasoning excludes `token` from
 
 The highest-leverage decision in the project. An audit against the API
 found **six bugs where the client and the mock were wrong in the same way**, so
-every test passed:
+every test passed (two more were found later, below, bringing the total to eight):
 
 - checkout key tags were `public-key`/`created-at`; production sends
   `public_key`/`created_at`, so `public_key` was permanently empty
@@ -135,6 +198,15 @@ every test passed:
 the API and its own test fixtures. Write the fixture in the
 production shape so a struct-tag regression fails even if a mock is changed to
 match it.
+
+**Eighth bug, and the third of exactly the same kind.** `circleci-sdk-go`'s
+`envproject.EnvVariable` tagged the creation timestamp `json:"created-at"` against the
+API's `created_at`, so `circleci_project_environment_variable.created_at` was always
+empty. That is the third hyphenated-tag bug from the same dependency, after the checkout
+key (`public-key`/`created-at`) and the webhook (`signing-secret`/`verify-tls`).
+
+Three instances of one mistake in one library is the strongest single argument for the
+removal: it is not a bug to be fixed but a habit encoded in a codebase nobody maintains.
 
 **Seventh bug, found by applying the rule to a resource that predated it.**
 `circleci-sdk-go` tags the webhook fields `json:"verify-tls"` and
@@ -217,6 +289,28 @@ proxy config: the five above, plus `GET .../organizations/{org_id}/audit-log/acc
 `POST /api/v2/audit-log/configs/connection/check` (a stateless validate-only
 call, deliberately not wired up — see "Deliberate omissions").
 
+### A `Required` attribute the server ignores is still worth sending
+
+`circleci_runner_resource_class.organization_id` is `Required`, and the provider sends
+`org_id` in the create body — but the API's the API **never reads
+it**. It derives the owning organization from the resource class's namespace and the
+caller's admin permissions on that namespace.
+
+It is still sent, for two reasons: the schema requires it, so removing it from the body
+while leaving it `Required` would be more confusing than the redundancy; and the server
+ignoring a field today is not a promise it will keep. The client documents why.
+
+Two other things the same handler read revealed, both invisible from the spec:
+
+- `GET /api/v3/runner/resource` accepts `namespace` *or* `org-id`, and when both are
+  present **`org-id` wins and `namespace` is silently ignored** — not an error. A data
+  source passing both would appear to filter by namespace and would not.
+- A missing resource class and an unauthorized caller both answer **404**
+  (`middleware.AccessDeniedMsg`). Same anti-enumeration conflation as groups answering
+  403, and the same conclusion: absence and forbidden are not distinguishable here, so
+  Delete may treat 404 as success while Read must not silently drop state on a
+  permission change.
+
 ### Semantic equality where the API reformats a value
 
 `durationValue` implements `StringSemanticEquals` so `90m`, `1h30m` and `5400s`
@@ -246,6 +340,50 @@ of credential-gated helpers is *computed*, not hardcoded — a helper qualifies 
 calls `t.Skip`/`Skipf`/`SkipNow`, or calls another helper that does — so a new fixture
 helper in `acctest_test.go` is picked up automatically instead of silently widening the
 hole.
+
+### A test provider must never shadow the real registration list
+
+`discovery_data_sources_test.go` used to define its own `discoveryProvider` that
+embedded the real provider but overrode `DataSources()` with a hardcoded list of eight,
+reasoning that those tests "should not depend on the real registration".
+
+That reasoning was backwards, and it cost two data sources their entire test coverage.
+`circleci_pipeline_values` and `circleci_github_app_installation` were correctly
+implemented, correctly registered, and had tests that reused this factory — so both
+failed with **"the provider does not support data source"**, which reads like a broken
+data source rather than a stale list in a test helper. Neither was actually exercised.
+
+`TestEveryConstructorIsRegistered` already guarantees the real list is complete, so
+depending on it is strictly safer than duplicating it. The factory is now an alias:
+
+```go
+var discoveryProviderFactories = testAccProtoV6ProviderFactories
+```
+
+**Rule:** a test may narrow the *provider configuration* (host, deployment, credentials)
+as much as it likes, but it must not narrow the *type registry*. Any list of registered
+types that exists in more than one place will drift, and the copy in the test wins
+silently.
+
+### Vulnerability scanning is reachability-based, and it runs in CI
+
+`task vulncheck` runs `govulncheck`, which analyses whether this code can actually
+*call* a vulnerable function rather than just comparing version numbers.
+
+It is in CI because it found something a version-matching scanner did not. Dependabot
+reported 43 alerts against the default branch's dependency set; the set reachable from
+*this* branch was different, and included seven Go **standard library**
+vulnerabilities — `crypto/tls`, `crypto/x509`, `net/http`, `net/textproto`,
+`html/template` — reachable from the provider's own HTTP client and from
+`providerserver`, plus a gRPC **authorization bypass** reachable from
+`providerserver.Serve`. A dependency scanner keyed on `go.mod` will not flag a
+standard library issue at all, because the standard library is not a dependency: it
+comes from the toolchain.
+
+**Rule:** the `toolchain` directive in `go.mod` and the Go image in
+`.circleci/config.yml` move together. A patch-level Go bump is a security fix here,
+not housekeeping — a Terraform provider is a long-lived binary that terminates TLS to
+an API and is handed credentials.
 
 ## Operational hazards
 
@@ -287,7 +425,7 @@ the *reasoning*; that file is the *checklist*.
 | Orb promotion as a resource | Promotion creates a *new* version rather than mutating one, so it has no idempotent Terraform shape. The client method exists and is tested. |
 | 7 of 10 insights endpoints | They answer "what happened in this run" with unbounded row counts that would churn state on every refresh. Two are deprecated in the v2 API routes served. |
 | VCS connection setup, account creation, API token creation, SSO/SAML, audit log retrieval | No API. Account and VCS steps are browser consent flows; `POST /user/token` is session-only auth, which is a deliberate privilege boundary. |
-| ~~User invitations~~ | **Corrected — this was wrong.** `GET`/`POST /api/v2/organizations/{org_id}/users` and `GET`/`PATCH`/`DELETE .../users/{user_id}` are fully specified in `openapi_definitions/v2_endpoints/user_groups/`. The capability was recorded as absent because the routes are **not registered in the API's router at all** — the API serves them directly via gateway, on the `a host reserved for internal use` origin. A search of the service that fronts most of v2 therefore found nothing. **Not yet implemented** — it is the largest remaining capability gap, tracked in `NEEDS-FROM-MAINTAINER.md` because shipping it needs sign-off on using an `a host reserved for internal use` route. |
+| ~~User invitations~~ | **Corrected — this was wrong.** Routes to list organization members, invite them with a role, change a role and remove a member are fully specified. The capability was recorded as absent because those routes are not registered in the service that fronts most of v2 — the gateway sends them straight to their API — so searching there found nothing. **Deliberately not implemented:** they are served on a host reserved for internal use rather than through the public API. This is the largest remaining capability gap; see `NEEDS-FROM-MAINTAINER.md`. |
 | Cloud resource classes | A config-level flag, not an API object. |
 | Docker layer caching | ~~No API object.~~ **Corrected:** `DELETE /api/v3/projects/{id}/dlc` does exist — it purges the cache. But it is a one-shot side effect with nothing to read back, so it cannot be modelled as a resource; Terraform has no primitive for "run this once". Enabling DLC remains a config-level flag. |
 | `POST /api/v2/audit-log/configs/connection/check` as its own primitive | It is a stateless validate-only call with nothing to read back or manage, the same shape problem as DLC above. It is also redundant with what `create`/`update` already do: `CreateAuditLogConfig` verifies connectivity unconditionally, and `UpdateAuditLogConfig` does whenever `is_disabled = false` — so calling it as a pre-flight step before create/update would duplicate a check the API is about to perform anyway, for the same failure mode and message. |
@@ -320,8 +458,8 @@ on the record.
 The number was never one number. It measured 12% locally and 60% under CI, and the
 whole difference was **tests skipping rather than code being untested** — see "A
 fake-backed test uses `resource.UnitTest`" above. Unskipping the fake-backed suite and
-adding fakes for the resources that had only credential-gated tests took it to about
-77% with the same measurement everywhere.
+adding fakes for the resources that had only credential-gated tests took it to **78.4%**
+with the same measurement everywhere. `internal/circleci` is at **90.5%**.
 
 So credentials were never the blocker for *coverage*. What they are still needed for
 is the class of bug mocks cannot find, which is a different thing and remains the top

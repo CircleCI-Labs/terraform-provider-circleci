@@ -25,6 +25,8 @@ var (
 	_ resource.ResourceWithModifyPlan = &orbResource{}
 	_ resource.ResourceWithModifyPlan = &orbVersionResource{}
 	_ resource.ResourceWithModifyPlan = &organizationSettingsResource{}
+	_ resource.ResourceWithModifyPlan = &pipelineResource{}
+	_ resource.ResourceWithModifyPlan = &triggerResource{}
 )
 
 // Each ModifyPlan below is a no-op in two cases: when the client is unset
@@ -63,4 +65,29 @@ func (r *organizationSettingsResource) ModifyPlan(_ context.Context, req resourc
 	}
 
 	requireCloud(r.client, organizationSettingsTypeName, &resp.Diagnostics)
+}
+
+// circleci_pipeline and circleci_trigger are not v3, but pipeline definitions
+// and triggers are served by the public API service under /api/v2 rather than
+// the v2 API, and CircleCI Server does not route them there either — see
+// pipelineDefinitionsRoute and triggersRoute in internal/circleci. Before this
+// migration Configure only received *pipeline.PipelineService /
+// *trigger.TriggerService, neither of which carries any deployment
+// information, so no gate was possible at all; see DESIGN.md's
+// characterization test notes for issue #26.
+
+func (r *pipelineResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if r.client == nil || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	requireCloud(r.client, pipelineTypeName, &resp.Diagnostics)
+}
+
+func (r *triggerResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if r.client == nil || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	requireCloud(r.client, triggerTypeName, &resp.Diagnostics)
 }

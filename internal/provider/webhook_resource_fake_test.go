@@ -44,10 +44,14 @@ import (
 // API, and TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire now asserts both
 // that the correct keys are sent and that the hyphenated ones are absent.
 //
-// webhook_data_source.go is still on the SDK, so its signing_secret always reads
-// back empty — see TestWebhookDataSourceUnit_SigningSecretMismatchAlwaysEmpty. That
-// attribute is misleading regardless of the bug (the API only ever returns a mask),
-// so it is queued for removal in 1.0 rather than being fixed here (issue #21).
+// webhook_data_source.go is migrated too, so it now reads the API's real
+// signing_secret value rather than the SDK's mistagged (and always-empty) field.
+// That value is only ever the "****" mask or "" — the API never discloses a real
+// secret — so the data source still does not surface it as a Sensitive string:
+// TestWebhookDataSourceUnit_SigningSecretIsAlwaysNull asserts it comes back null
+// either way rather than exposing "****" as if it were a credential a
+// configuration could pass to a receiver. That attribute is queued for removal in
+// 1.0 in favor of `circleci_webhooks`' `has_signing_secret` (issue #21).
 
 type fakeWebhookAPI struct {
 	t *testing.T
@@ -497,19 +501,18 @@ data "circleci_webhook" "test" {
 	})
 }
 
-// TestWebhookDataSourceUnit_SigningSecretMismatchAlwaysEmpty proves the same
-// wire mismatch from the read side: even when the real API masks a configured
-// secret as "****" (server/.../webhook/schemas.yaml's documented behavior),
-// the data source's signing_secret ends up "" — because
-// circleci-sdk-go/webhook.Webhook.SigningSecret is tagged
-// `json:"signing-secret"` and the response body has no such key.
-//
-// This happens to avoid ever leaking the "****" placeholder as if it were a
-// real credential (the concern in the known bug history), but only as a side
-// effect of a field-name bug, not by design: the attribute is misleading
-// either way, since "" also means "no secret is configured" in the schema's
-// own MarkdownDescription.
-func TestWebhookDataSourceUnit_SigningSecretMismatchAlwaysEmpty(t *testing.T) {
+// TestWebhookDataSourceUnit_SigningSecretIsAlwaysNull covers the read side of
+// the design decision documented on webhook_data_source.go's schema and in
+// DESIGN.md's "Values the API never returns are not exposed as strings": even
+// when the real API masks a configured secret as "****" (server/.../webhook/
+// schemas.yaml's documented behavior), signing_secret is null, never the
+// literal mask. Before this resource was migrated off circleci-sdk-go, the
+// same outcome happened for the wrong reason — the SDK tagged the field
+// `json:"signing-secret"` and the response body had no such key, so the value
+// came back "" (a plain empty string) by mistake rather than null by design.
+// The distinction matters: "" is indistinguishable from "no secret is
+// configured", whereas null says plainly that this attribute cannot tell you.
+func TestWebhookDataSourceUnit_SigningSecretIsAlwaysNull(t *testing.T) {
 	api, host := newFakeWebhookAPI(t)
 	api.mu.Lock()
 	api.webhooks["fixed-id"] = map[string]any{
@@ -523,11 +526,25 @@ func TestWebhookDataSourceUnit_SigningSecretMismatchAlwaysEmpty(t *testing.T) {
 		"created_at":     "2024-07-01T00:00:00.000Z",
 		"updated_at":     "2024-07-01T00:00:00.000Z",
 	}
+	api.webhooks["no-secret-id"] = map[string]any{
+		"id":             "no-secret-id",
+		"name":           "hook-2",
+		"url":            "https://example.com/hook2",
+		"verify_tls":     true,
+		"signing_secret": "", // no secret configured at all
+		"scope":          map[string]any{"id": fakeWebhookScopeID, "type": "project"},
+		"events":         []any{"workflow-completed"},
+		"created_at":     "2024-07-01T00:00:00.000Z",
+		"updated_at":     "2024-07-01T00:00:00.000Z",
+	}
 	api.mu.Unlock()
 
 	cfg := webhookFakeProviderConfig(host) + `
-data "circleci_webhook" "test" {
+data "circleci_webhook" "with_secret" {
   id = "fixed-id"
+}
+data "circleci_webhook" "without_secret" {
+  id = "no-secret-id"
 }
 `
 
@@ -536,10 +553,11 @@ data "circleci_webhook" "test" {
 		Steps: []resource.TestStep{{
 			Config: cfg,
 			ConfigStateChecks: []statecheck.StateCheck{
-				// BUG: this should be "****" (the real API's mask). It is ""
-				// because of the hyphen/underscore mismatch — the data source can
-				// never distinguish "no secret" from "the API masked one".
-				statecheck.ExpectKnownValue("data.circleci_webhook.test", tfjsonpath.New("signing_secret"), knownvalue.StringExact("")),
+				// Neither the mask nor a plain "" is ever exposed: a Sensitive string
+				// holding "****" looks exactly like a real credential a configuration
+				// could pass to a receiver, and never would be one.
+				statecheck.ExpectKnownValue("data.circleci_webhook.with_secret", tfjsonpath.New("signing_secret"), knownvalue.Null()),
+				statecheck.ExpectKnownValue("data.circleci_webhook.without_secret", tfjsonpath.New("signing_secret"), knownvalue.Null()),
 			},
 		}},
 	})

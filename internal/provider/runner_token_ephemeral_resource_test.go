@@ -11,12 +11,12 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/client"
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // See the top of usage_export_ephemeral_resource_test.go for why these tests
@@ -114,20 +114,19 @@ ephemeral "circleci_ephemeral_runner_token" "this" {
 }
 
 // TestAccEphemeralRunnerTokenResource_closeDeleteFailureDoesNotFailApply
-// asserts the design choice documented on Close: circleci-sdk-go's runner
-// client returns untyped errors, so a delete failure cannot be distinguished
-// from "already gone", and Close therefore warns rather than errors. A
-// warning must not fail the apply that opened the ephemeral resource.
+// asserts the design choice documented on Close: a delete failure that is not
+// "already gone" (circleci.IsNotFound) warns rather than errors, so it must
+// not fail the apply that opened the ephemeral resource.
 func TestAccEphemeralRunnerTokenResource_closeDeleteFailureDoesNotFailApply(t *testing.T) {
 	var deleteCalls int
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			deleteCalls++
-			// 400, not 5xx: circleci-sdk-go's client retries 5xx responses up
-			// to 10 times with exponential backoff, which would make this
-			// test itself take minutes. A 4xx is not retried and still
-			// exercises the same "delete failed" path in Close.
+			// 400, not 5xx: the provider's client retries 5xx responses up to
+			// 3 times with exponential backoff, which would slow this test
+			// down. A 4xx is not retried and still exercises the same
+			// "delete failed" path in Close.
 			http.Error(w, "boom", http.StatusBadRequest)
 
 			return
@@ -188,8 +187,8 @@ func TestEphemeralRunnerTokenResource_Open(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	circleciClient := client.NewClient(srv.URL, "tok")
-	e := &ephemeralRunnerTokenResource{client: runner.NewServiceWithBaseURL(circleciClient, srv.URL)}
+	circleciClient := circleci.New(circleci.Config{Host: "http://127.0.0.1:1", RunnerHost: srv.URL, Token: "tok"})
+	e := &ephemeralRunnerTokenResource{client: circleciClient}
 
 	var schemaResp ephemeral.SchemaResponse
 	e.Schema(context.Background(), ephemeral.SchemaRequest{}, &schemaResp)
@@ -244,8 +243,8 @@ func TestEphemeralRunnerTokenClose_noPrivateStateIsANoOp(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	circleciClient := client.NewClient(srv.URL, "tok")
-	e := &ephemeralRunnerTokenResource{client: runner.NewServiceWithBaseURL(circleciClient, srv.URL)}
+	circleciClient := circleci.New(circleci.Config{Host: "http://127.0.0.1:1", RunnerHost: srv.URL, Token: "tok"})
+	e := &ephemeralRunnerTokenResource{client: circleciClient}
 
 	// req.Private is left at its zero value (nil): GetKey on a nil
 	// *privatestate.ProviderData is documented to return (nil, nil) rather

@@ -5,12 +5,12 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/pipeline"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -19,7 +19,7 @@ var (
 	_ datasource.DataSourceWithConfigure = &PipelineDataSource{}
 )
 
-// projectDataSourceModel maps the output schema.
+// pipelineDataSourceModel maps the output schema.
 type pipelineDataSourceModel struct {
 	Id                           types.String `tfsdk:"id"`
 	ProjectId                    types.String `tfsdk:"project_id"`
@@ -40,9 +40,9 @@ func NewPipelineDataSource() datasource.DataSource {
 	return &PipelineDataSource{}
 }
 
-// pipelinPipelineDataSourceeDataSource is the data source implementation.
+// PipelineDataSource is the data source implementation.
 type PipelineDataSource struct {
-	client *pipeline.PipelineService
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -53,7 +53,9 @@ func (d *PipelineDataSource) Metadata(_ context.Context, req datasource.Metadata
 // Schema defines the schema for the data source.
 func (d *PipelineDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Fetches information about a CircleCI pipeline definition.",
+		MarkdownDescription: "Fetches information about a CircleCI pipeline definition.\n\n" +
+			"!> **CircleCI Cloud only.** Pipeline definitions live under `/api/v2` but are served by the " +
+			"public API service, which CircleCI Server does not route.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The ID of the pipeline.",
@@ -109,83 +111,59 @@ func (d *PipelineDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 
 // Read refreshes the Terraform state with the latest data.
 func (d *PipelineDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
-	var pipelineState pipelineDataSourceModel
-	diags := req.Config.Get(ctx, &pipelineState)
-	if diags != nil {
-		resp.Diagnostics.Append(diags...)
+	// Gate before the request: on CircleCI Server the route is not present at
+	// all and the HTTP 404 would read as "no such pipeline".
+	if !requireCloud(d.client, pipelineTypeName, &resp.Diagnostics) {
 		return
 	}
 
-	if pipelineState.Id.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing pipeline Id",
-			"Missing pipeline Id",
-		)
-		return
-	}
-
-	if pipelineState.ProjectId.IsNull() {
-		resp.Diagnostics.AddError(
-			"Missing pipeline project_id",
-			"Missing pipeline project_id",
-		)
-		return
-	}
-
-	retrievedPipeline, err := d.client.Get(ctx, pipelineState.ProjectId.ValueString(), pipelineState.Id.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError(
-			fmt.Sprintf(
-				"Unable to Read CircleCI Pipeline with Project ID %s and Pipeline ID %s",
-				pipelineState.ProjectId.ValueString(),
-				pipelineState.Id.ValueString(),
-			),
-			err.Error(),
-		)
-		return
-	}
-
-	// Map response body to model
-	pipelineState = pipelineDataSourceModel{
-		Id:                           types.StringValue(retrievedPipeline.ID),
-		ProjectId:                    pipelineState.ProjectId,
-		Name:                         types.StringValue(retrievedPipeline.Name),
-		Description:                  types.StringValue(retrievedPipeline.Description),
-		CreatedAt:                    types.StringValue(retrievedPipeline.CreatedAt),
-		ConfigSourceProvider:         types.StringValue(retrievedPipeline.ConfigSource.Provider),
-		ConfigSourceFilePath:         types.StringValue(retrievedPipeline.ConfigSource.FilePath),
-		ConfigSourceRepoFullName:     types.StringValue(retrievedPipeline.ConfigSource.Repo.FullName),
-		ConfigSourceRepoExternalId:   types.StringValue(retrievedPipeline.ConfigSource.Repo.ExternalId),
-		CheckoutSourceProvider:       types.StringValue(retrievedPipeline.CheckoutSource.Provider),
-		CheckoutSourceRepoFullName:   types.StringValue(retrievedPipeline.CheckoutSource.Repo.FullName),
-		CheckoutSourceRepoExternalId: types.StringValue(retrievedPipeline.CheckoutSource.Repo.ExternalId),
-	}
-
-	// Set state
-	diags = resp.State.Set(ctx, &pipelineState)
-	resp.Diagnostics.Append(diags...)
+	var state pipelineDataSourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	definition, err := d.client.GetPipelineDefinition(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to Read CircleCI pipeline with id "+state.Id.ValueString(),
+			circleci.Detail(err),
+		)
+
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, pipelineResourceModelToDataSource(state.ProjectId, *definition))...)
+}
+
+// pipelineResourceModelToDataSource maps an API pipeline definition onto the
+// data source model. It is a distinct function from
+// pipelineResourceModelFromAPI (which returns pipelineResourceModel) because
+// the resource and data source use separate model types, even though their
+// fields are identical.
+func pipelineResourceModelToDataSource(projectID types.String, definition circleci.PipelineDefinition) pipelineDataSourceModel {
+	return pipelineDataSourceModel{
+		Id:                           types.StringValue(definition.ID),
+		ProjectId:                    projectID,
+		Name:                         types.StringValue(definition.Name),
+		Description:                  types.StringValue(definition.Description),
+		CreatedAt:                    types.StringValue(definition.CreatedAt),
+		ConfigSourceProvider:         types.StringValue(definition.ConfigSource.Provider),
+		ConfigSourceFilePath:         types.StringValue(definition.ConfigSource.FilePath),
+		ConfigSourceRepoFullName:     types.StringValue(definition.ConfigSource.Repo.FullName),
+		ConfigSourceRepoExternalId:   types.StringValue(definition.ConfigSource.Repo.ExternalID),
+		CheckoutSourceProvider:       types.StringValue(definition.CheckoutSource.Provider),
+		CheckoutSourceRepoFullName:   types.StringValue(definition.CheckoutSource.Repo.FullName),
+		CheckoutSourceRepoExternalId: types.StringValue(definition.CheckoutSource.Repo.ExternalID),
 	}
 }
 
 // Configure adds the provider configured client to the data source.
 func (d *PipelineDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *client.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.PipelineService
+	d.client = client
 }

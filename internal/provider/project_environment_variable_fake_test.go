@@ -16,15 +16,15 @@ import (
 // variable endpoints that circleci_project_environment_variable and its data
 // source depend on.
 //
-// Both go through github.com/CircleCI-Public/circleci-sdk-go's envproject
-// package rather than this provider's own internal/circleci client. That SDK
-// decodes the creation timestamp from a "created-at" JSON key (hyphenated,
-// typed as time.Time) — see envproject.EnvVariable — which is why this fake
-// sends "created-at" rather than the "created_at" key
-// internal/circleci/environment_variable.go and the rest of the v2 API use.
-// See the CreatedAt field key mismatch noted in this task's final report:
-// this fake matches what the vendored SDK actually parses, not necessarily
-// what CircleCI's real API sends.
+// The field key is "created_at" (underscore), matching
+// internal/circleci/environment_variable.go's ProjectEnvironmentVariable and
+// the production shape confirmed against the API's env-var-public-view
+// (the CircleCI API). An earlier revision of this fake sent the
+// hyphenated "created-at" that the old vendored client library's own (wrongly
+// tagged) environment-variable type decoded, which meant the real API's
+// created_at was silently dropped whatever that library reported — that
+// mismatch is now moot because this provider no longer goes through it at
+// all.
 type fakeEnvVarAPI struct {
 	t *testing.T
 
@@ -119,14 +119,17 @@ func (a *fakeEnvVarAPI) handleCreate(w http.ResponseWriter, r *http.Request, slu
 	if a.vars[slug] == nil {
 		a.vars[slug] = map[string]fakeEnvVar{}
 	}
-	// A creation response returns the value unmasked, unlike a subsequent read.
-	a.vars[slug][body.Name] = fakeEnvVar{value: body.Value, createdAt: "2024-01-02T03:04:05Z"}
+	a.vars[slug][body.Name] = fakeEnvVar{value: body.Value, createdAt: "2024-01-02T03:04:05.000Z"}
 	a.mu.Unlock()
 
+	// Matches create-env-var-response (the CircleCI API): even
+	// the create response's value comes back through env-var-read-api, i.e.
+	// already masked. No route ever discloses the literal value, not even the
+	// one that just set it.
 	a.write(w, http.StatusCreated, map[string]any{
 		"name":       body.Name,
-		"value":      body.Value,
-		"created-at": "2024-01-02T03:04:05Z",
+		"value":      maskEnvVarValue(body.Value),
+		"created_at": "2024-01-02T03:04:05.000Z",
 	})
 }
 
@@ -155,7 +158,7 @@ func (a *fakeEnvVarAPI) handleGet(w http.ResponseWriter, slug, name string) {
 
 	body := map[string]any{"name": name, "value": maskEnvVarValue(v.value)}
 	if v.createdAt != "" {
-		body["created-at"] = v.createdAt
+		body["created_at"] = v.createdAt
 	}
 
 	a.write(w, http.StatusOK, body)

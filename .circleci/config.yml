@@ -7,12 +7,15 @@ orbs:
   go: circleci/go@3.0.3
   terraform: circleci/terraform@3.7.0
 
-# The Go image must match the `go` directive in go.mod. The provider needs 1.26
-# because internal/httpcl uses errors.AsType from the 1.26 standard library.
+# The Go image must match the `toolchain` directive in go.mod. The provider needs
+# 1.26 because internal/httpcl uses errors.AsType from the 1.26 standard library,
+# and the patch level matters: govulncheck reported seven reachable standard
+# library vulnerabilities on 1.26.1, in crypto/tls, crypto/x509, net/http,
+# net/textproto and html/template. Keep this in step with go.mod's toolchain.
 executors:
   go:
     docker:
-      - image: cimg/go:1.26.1
+      - image: cimg/go:1.26.5
 
 commands:
   store_results:
@@ -47,6 +50,13 @@ jobs:
             # Verifies that generated documentation, formatting and go.mod are
             # committed. This regenerates docs, so it needs terraform on PATH.
             - run: task ci:diff
+            # Reachability-based vulnerability scan. This is here because it
+            # actually caught something: 14 reachable vulnerabilities, most of
+            # them standard library issues fixed by a Go patch release, plus a
+            # gRPC authorization bypass. Dependabot did not surface them for this
+            # branch, and a provider binary shipping reachable TLS and x509
+            # vulnerabilities is not something to find out about by accident.
+            - run: task vulncheck
       - store_results
 
   build-and-test:
@@ -84,9 +94,15 @@ workflows:
             - lint
           matrix:
             parameters:
+              # The last three Terraform minor lines. Rotating this matrix — dropping
+              # the oldest and adding a new minor — is a judgement call, not a bump,
+              # so only the newest slot is tracked automatically. Renovate opens a
+              # pull request when a newer patch of the current latest minor appears;
+              # when a whole new minor ships, move each entry down by hand.
               terraform-version:
                 - "1.12.2"
                 - "1.13.5"
+                # renovate: terraform
                 - "1.14.6"
 
 # Enabling the acceptance tests against a real organization

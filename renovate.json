@@ -1,6 +1,98 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:best-practices",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "Etc/UTC",
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "postUpdateOptions": [
+    "gomodTidy",
+    "gomodUpdateImportPaths"
+  ],
+  "vulnerabilityAlerts": {
+    "description": "Security updates skip the schedule and the grouping. This repository shipped a binary with reachable crypto/tls, crypto/x509 and gRPC authorization-bypass vulnerabilities, so these must not sit in a batch waiting for company.",
+    "enabled": true,
+    "labels": [
+      "security"
+    ],
+    "schedule": [
+      "at any time"
+    ],
+    "minimumReleaseAge": null
+  },
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "description": "The Go toolchain and the CI Go image must move together. go.mod's `toolchain` directive decides which standard library the released binary is built against; the image in .circleci/config.yml decides what CI actually validates. Split across two pull requests, one of them is silently wrong until both land. And a patch-level Go bump is a security fix here rather than housekeeping: seven of the fourteen reachable vulnerabilities found in this repository were standard library issues, which no dependency scanner can see because the standard library comes from the toolchain, not from go.mod.",
+      "groupName": "Go toolchain",
+      "matchPackageNames": [
+        "go",
+        "golang",
+        "cimg/go"
+      ],
+      "labels": [
+        "go-toolchain"
+      ]
+    },
+    {
+      "description": "golang.org/x/* move in lockstep often enough that separate pull requests are noise, and they are where most transitive CVEs land.",
+      "groupName": "golang.org/x",
+      "matchPackageNames": [
+        "golang.org/x/**"
+      ]
+    },
+    {
+      "description": "terraform-plugin-framework, terraform-plugin-testing and terraform-plugin-go are a coupled set — updating one alone tends not to compile. Grouping makes the pull request either work or fail cleanly, instead of half-working.",
+      "groupName": "terraform-plugin",
+      "matchPackageNames": [
+        "github.com/hashicorp/terraform-plugin-**"
+      ]
+    },
+    {
+      "description": "Build and lint tooling from the `tool` block in go.mod. None of it ships in the provider binary, so it can be grouped and merged more freely than a runtime dependency.",
+      "groupName": "build tooling",
+      "matchPackageNames": [
+        "github.com/hashicorp/copywrite",
+        "github.com/hashicorp/terraform-plugin-docs",
+        "github.com/rinchsan/gosimports",
+        "golang.org/x/vuln",
+        "gotest.tools/gotestsum"
+      ]
+    },
+    {
+      "description": "golangci-lint alone, never grouped: a minor bump usually surfaces new lint findings, which is code to write rather than a dependency to bump. Mixing that into a batch makes the batch unmergeable for an unrelated reason.",
+      "matchPackageNames": [
+        "github.com/golangci/golangci-lint**"
+      ],
+      "groupName": null
+    },
+    {
+      "description": "Terraform CLI versions in the CI matrix, tracked by the custom manager below. Grouped so the matrix moves as one unit.",
+      "groupName": "terraform CLI matrix",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "hashicorp/terraform"
+      ]
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "The CI matrix pins Terraform CLI versions as plain strings in .circleci/config.yml, which no built-in manager reads, so they would silently rot. That matters more than usual here: the acceptance tests drive a real terraform binary, so the versions in the matrix are the versions the provider is actually validated against. Annotate a version with `# renovate: terraform` to have it tracked.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.circleci/config\\.yml$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*terraform\\s*\\n\\s*-?\\s*\"?(?<currentValue>\\d+\\.\\d+\\.\\d+)\"?"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "hashicorp/terraform",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
   ]
 }

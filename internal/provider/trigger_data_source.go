@@ -5,13 +5,13 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/trigger"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -20,7 +20,7 @@ var (
 	_ datasource.DataSourceWithConfigure = &TriggerDataSource{}
 )
 
-// TriggerDataSourceModel maps the output schema.
+// triggerDataSourceModel maps the output schema.
 type triggerDataSourceModel struct {
 	Id                                  types.String `tfsdk:"id"`
 	ProjectId                           types.String `tfsdk:"project_id"`
@@ -45,7 +45,7 @@ func NewTriggerDataSource() datasource.DataSource {
 
 // TriggerDataSource is the data source implementation.
 type TriggerDataSource struct {
-	client *trigger.TriggerService
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -56,7 +56,9 @@ func (d *TriggerDataSource) Metadata(_ context.Context, req datasource.MetadataR
 // Schema defines the schema for the data source.
 func (d *TriggerDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Fetches information about a CircleCI pipeline trigger.",
+		MarkdownDescription: "Fetches information about a CircleCI pipeline trigger.\n\n" +
+			"!> **CircleCI Cloud only.** Triggers live under `/api/v2` but are served by the public API " +
+			"service, which CircleCI Server does not route.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The ID of the trigger.",
@@ -121,6 +123,12 @@ func (d *TriggerDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 
 // Read refreshes the Terraform state with the latest data.
 func (d *TriggerDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
+	// Gate before the request: on CircleCI Server the route is not present at
+	// all and the HTTP 404 would read as "no such trigger".
+	if !requireCloud(d.client, triggerTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var triggerState triggerDataSourceModel
 	diags := req.Config.Get(ctx, &triggerState)
 	if diags != nil {
@@ -144,18 +152,18 @@ func (d *TriggerDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	retrievedTrigger, err := d.client.Get(ctx, triggerState.ProjectId.ValueString(), triggerState.Id.ValueString())
+	retrievedTrigger, err := d.client.GetTrigger(ctx, triggerState.ProjectId.ValueString(), triggerState.Id.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Read CircleCI Trigger with id "+triggerState.Id.ValueString(),
-			err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
 	// Map parameters from API response
-	paramAttrs := make(map[string]attr.Value, len(retrievedTrigger.Parameters))
-	for k, v := range retrievedTrigger.Parameters {
+	paramAttrs := make(map[string]attr.Value, len(retrievedTrigger.ParameterStrings()))
+	for k, v := range retrievedTrigger.ParameterStrings() {
 		paramAttrs[k] = types.StringValue(v)
 	}
 	parameters, paramDiags := types.MapValue(types.StringType, paramAttrs)
@@ -164,23 +172,21 @@ func (d *TriggerDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	disabled := retrievedTrigger.Disabled != nil && *retrievedTrigger.Disabled
-
 	// Map response body to model
 	triggerState = triggerDataSourceModel{
 		Id:                                  types.StringValue(retrievedTrigger.ID),
 		ProjectId:                           triggerState.ProjectId,
 		CreatedAt:                           types.StringValue(retrievedTrigger.CreatedAt),
 		CheckoutRef:                         types.StringValue(retrievedTrigger.CheckoutRef),
-		Disabled:                            types.BoolValue(disabled),
+		Disabled:                            types.BoolValue(retrievedTrigger.IsDisabled()),
 		EventName:                           types.StringValue(retrievedTrigger.EventName),
 		EventPreset:                         types.StringValue(retrievedTrigger.EventPreset),
 		EventSourceProvider:                 types.StringValue(retrievedTrigger.EventSource.Provider),
 		EventSourceRepositoryName:           types.StringValue(retrievedTrigger.EventSource.Repo.FullName),
-		EventSourceRepositoryExternalId:     types.StringValue(retrievedTrigger.EventSource.Repo.ExternalId),
-		EventSourceWebHookUrl:               types.StringValue(retrievedTrigger.EventSource.Webhook.Url),
+		EventSourceRepositoryExternalId:     types.StringValue(retrievedTrigger.EventSource.Repo.ExternalID),
+		EventSourceWebHookUrl:               types.StringValue(retrievedTrigger.EventSource.Webhook.URL),
 		EventSourceScheduleCronExpression:   types.StringValue(retrievedTrigger.EventSource.Schedule.CronExpression),
-		EventSourceScheduleAttributionActor: types.StringValue(retrievedTrigger.EventSource.Schedule.AttributionActor.Id),
+		EventSourceScheduleAttributionActor: types.StringValue(retrievedTrigger.EventSource.Schedule.AttributionActor.ID),
 		Parameters:                          parameters,
 	}
 
@@ -194,21 +200,10 @@ func (d *TriggerDataSource) Read(ctx context.Context, req datasource.ReadRequest
 
 // Configure adds the provider configured client to the data source.
 func (d *TriggerDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.TriggerService
+	d.client = client
 }

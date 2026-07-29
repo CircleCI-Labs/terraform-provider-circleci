@@ -26,7 +26,7 @@ const contextRestrictionUnitContextID = "ctx-fixed-1"
 // contextRestrictionUnitContextID; that is fixed here rather than threaded
 // through as a parameter that would never vary.
 func contextRestrictionResourceUnitConfig(host, restrictionType, value string) string {
-	return legacyContextProviderConfig(host) + fmt.Sprintf(`
+	return contextFakeProviderConfig(host) + fmt.Sprintf(`
 resource "circleci_context_restriction" "test" {
   context_id = %[1]q
   type       = %[2]q
@@ -37,12 +37,12 @@ resource "circleci_context_restriction" "test" {
 
 // seedFixedContext seeds a context whose id is stable across test runs, so
 // restriction tests do not depend on the create-context flow.
-func seedFixedContext(api *contextLegacyAPI) {
+func seedFixedContext(api *contextFakeAPI) {
 	api.seedContext(contextRestrictionUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
 }
 
 func TestContextRestrictionResourceUnit_ProjectType(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 
 	projectID := "33333333-3333-3333-3333-333333333333"
@@ -90,7 +90,7 @@ func TestContextRestrictionResourceUnit_ProjectType(t *testing.T) {
 }
 
 func TestContextRestrictionResourceUnit_ExpressionType(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 
 	expr := `pipeline.git.branch == "main"`
@@ -113,7 +113,7 @@ func TestContextRestrictionResourceUnit_ExpressionType(t *testing.T) {
 }
 
 func TestContextRestrictionResourceUnit_GroupType(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 
 	groupID := "44444444-4444-4444-4444-444444444444"
@@ -144,7 +144,7 @@ func TestContextRestrictionResourceUnit_RejectsInvalidType(t *testing.T) {
 }
 
 func TestContextRestrictionResourceUnit_Delete(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 
 	resource.UnitTest(t, resource.TestCase{
@@ -155,7 +155,7 @@ func TestContextRestrictionResourceUnit_Delete(t *testing.T) {
 			},
 			// An empty config destroys the resource.
 			{
-				Config: legacyContextProviderConfig(host),
+				Config: contextFakeProviderConfig(host),
 			},
 		},
 	})
@@ -183,7 +183,7 @@ func TestContextRestrictionResourceUnit_Delete(t *testing.T) {
 // verification because create and import/read populate it differently (see the
 // BUG note in TestContextRestrictionResourceUnit_ProjectType).
 func TestContextRestrictionResourceUnit_Import(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 
 	projectID := "55555555-5555-5555-5555-555555555555"
@@ -210,7 +210,7 @@ func TestContextRestrictionResourceUnit_Import(t *testing.T) {
 }
 
 func TestContextRestrictionResourceUnit_ImportInvalidID(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 
 	resource.UnitTest(t, resource.TestCase{
@@ -232,7 +232,7 @@ func TestContextRestrictionResourceUnit_ImportInvalidID(t *testing.T) {
 // TestContextRestrictionResourceUnit_CreateAPIError proves a 4xx from the API
 // surfaces as a Terraform diagnostic rather than a panic.
 func TestContextRestrictionResourceUnit_CreateAPIError(t *testing.T) {
-	api, host := newContextLegacyAPI(t)
+	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
 	api.fail(409, "The restriction you're trying to add already exists.")
 
@@ -242,5 +242,84 @@ func TestContextRestrictionResourceUnit_CreateAPIError(t *testing.T) {
 			Config:      contextRestrictionResourceUnitConfig(host, "expression", "true"),
 			ExpectError: regexp.MustCompile(`(?s)Error creating CircleCI context.*already exists`),
 		}},
+	})
+}
+
+// TestContextRestrictionResourceUnit_RemovedOutsideTerraform proves drift
+// detection: the restriction vanishing from the context's list drops the
+// resource from state, so the next plan recreates it.
+func TestContextRestrictionResourceUnit_RemovedOutsideTerraform(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextRestrictionResourceUnitConfig(host, "expression", "true"),
+			},
+			{
+				PreConfig:          func() { api.removeRestriction(contextRestrictionUnitContextID, "rst-1") },
+				Config:             contextRestrictionResourceUnitConfig(host, "expression", "true"),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+		},
+	})
+}
+
+// TestContextRestrictionResourceUnit_ForbiddenIsNotSilentlyRemoved mirrors
+// context_resource_unit_test.go's test of the same name: a context this token
+// cannot resolve answers 403 through the same context-resolution step, so
+// Read must surface a diagnostic naming the ambiguity rather than silently
+// dropping the restriction (and recreating a possibly-live one) the way a
+// genuine 404 does.
+func TestContextRestrictionResourceUnit_ForbiddenIsNotSilentlyRemoved(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextRestrictionResourceUnitConfig(host, "expression", "true"),
+			},
+			{
+				PreConfig:   func() { api.setMissing(contextRestrictionUnitContextID, true) },
+				Config:      contextRestrictionResourceUnitConfig(host, "expression", "true"),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?s)Unable to read CircleCI context restriction.*denied access.*lacks permission`),
+			},
+			{
+				PreConfig: func() { api.setMissing(contextRestrictionUnitContextID, false) },
+				Config:    contextRestrictionResourceUnitConfig(host, "expression", "true"),
+			},
+		},
+	})
+}
+
+// TestContextRestrictionResourceUnit_DestroyAlreadyGoneSucceeds proves Delete
+// treats a 403 (the context is gone, so the restriction cannot have survived
+// it) as success rather than failing the destroy. See
+// TestContextResourceUnit_DestroyAlreadyGoneSucceeds for why the test ends on
+// an errored RefreshState step rather than an explicit destroy step: the
+// framework's own end-of-test cleanup calls Delete directly, without
+// refreshing first.
+func TestContextRestrictionResourceUnit_DestroyAlreadyGoneSucceeds(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextRestrictionResourceUnitConfig(host, "expression", "true"),
+			},
+			{
+				PreConfig:    func() { api.setMissing(contextRestrictionUnitContextID, true) },
+				RefreshState: true,
+				ExpectError:  regexp.MustCompile(`(?s)Unable to read CircleCI context restriction`),
+			},
+		},
 	})
 }

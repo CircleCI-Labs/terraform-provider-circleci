@@ -6,7 +6,6 @@ package provider
 import (
 	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -42,7 +41,13 @@ func ephemeralProviderData(data any, diags *diag.Diagnostics) (*CircleCiClientWr
 }
 
 // ephemeralAPIClient extracts the provider's own API client from an ephemeral
-// resource Configure request's ProviderData. circleci_usage_export uses this.
+// resource Configure request's ProviderData.
+//
+// Both ephemeral resources use this. circleci_ephemeral_runner_token previously
+// needed a separate helper handing back circleci-sdk-go's runner service, because
+// the runner admin API lives on its own origin; the provider's own client now
+// reaches that origin itself (see internal/circleci/runner.go), so one helper
+// serves both.
 func ephemeralAPIClient(data any, diags *diag.Diagnostics) (*circleci.Client, bool) {
 	wrapper, ok := ephemeralProviderData(data, diags)
 	if !ok {
@@ -59,27 +64,4 @@ func ephemeralAPIClient(data any, diags *diag.Diagnostics) (*circleci.Client, bo
 	}
 
 	return wrapper.Client, true
-}
-
-// ephemeralRunnerService extracts the legacy circleci-sdk-go runner service
-// from an ephemeral resource Configure request's ProviderData.
-// circleci_ephemeral_runner_token uses this: it talks to the same runner admin
-// API as the circleci_runner_token resource (see runner_token_resource.go), not
-// the provider's own client.
-func ephemeralRunnerService(data any, diags *diag.Diagnostics) (*runner.Service, bool) {
-	wrapper, ok := ephemeralProviderData(data, diags)
-	if !ok {
-		return nil, false
-	}
-
-	if wrapper.RunnerService == nil {
-		diags.AddError(
-			"Provider Not Configured",
-			"The CircleCI runner service is unset. Please report this issue to the provider developers.",
-		)
-
-		return nil, false
-	}
-
-	return wrapper.RunnerService, true
 }

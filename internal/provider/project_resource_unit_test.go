@@ -62,20 +62,16 @@ const testProjectResourceOrgID = "org-11111111"
 // every configured setting must reach the settings PATCH unquoted (bug history
 // item 1).
 //
-// It also surfaces a bug this task was not looking for: every
-// "if !plan.X.IsNull()" guard in Create (project_resource.go lines 198-245) is
-// dead code. An Optional+Computed attribute the configuration omits is
-// *unknown* at Create time, not null — types.Bool.IsNull() is false for an
-// unknown value, so every guarded branch is taken regardless of whether the
-// practitioner configured the setting, and BoolValue.ValueBoolPointer()
-// returns a pointer to false for an unknown value. So every toggle is sent on
-// every create, always as false when unconfigured. That is invisible for the
-// toggles whose "else" branch also picks false (build_fork_prs, disable_ssh,
-// oss, set_github_status) — the else branch is dead, but the visible result is
-// the same. It is not invisible for forks_receive_secret_env_vars: its else
-// branch says the unconfigured default should be `true`
-// (project_resource.go:230), but that branch can never run, so an unconfigured
-// circleci_project always disables it, the opposite of the documented intent.
+// It also used to document a bug found alongside those: every
+// "if !plan.X.IsNull()" guard in Create was dead code, because an
+// Optional+Computed attribute the configuration omits is *unknown* at Create
+// time rather than null. IsNull() is false for an unknown value, so every guard
+// was taken whatever the configuration said, and ValueBoolPointer() on an
+// unknown value yields a pointer to false — so every toggle was written as
+// false on every create. That has been fixed: the guards now check IsUnknown()
+// too (projectSettingRequest), an unconfigured toggle is left out of the
+// request, and CircleCI's own default applies. The assertion at the end of this
+// test is what holds that fix in place.
 func TestProjectResourceUnit_CreateClassicOrgAppliesSettings(t *testing.T) {
 	api, host := newFakeProjectAPI(t, "classic")
 
@@ -134,21 +130,183 @@ func TestProjectResourceUnit_CreateClassicOrgAppliesSettings(t *testing.T) {
 		t.Errorf(`pr_only_branch_overrides sent as %v, want ["main" "release/1.x"] unquoted`, branches)
 	}
 
-	// --- the dead-code finding above: forks_receive_secret_env_vars ---
+	// --- the dead-code bug described above, now fixed ---
 	//
-	// This assertion documents current (buggy) behaviour; it is not a
-	// statement that false is correct. project_resource.go:227-231 intends an
-	// unconfigured circleci_project to default forks_receive_secret_env_vars
-	// to true, but that branch is unreachable at Create (see the bug writeup
-	// above this test), so false is sent instead. If that guard is ever fixed
-	// to check IsUnknown() too, this assertion must flip to true.
-	if got := body["forks_receive_secret_env_vars"]; got != false {
+	// This configuration says nothing about forks_receive_secret_env_vars, so the
+	// setting must be absent from the request body entirely. It used to be sent as
+	// false, which is what the unreachable "else" branch and this assertion once
+	// documented. Sending anything at all here would decide a security-relevant
+	// setting on the practitioner's behalf; leaving it out lets CircleCI apply its
+	// own default, which is true on a private project.
+	if got, ok := body["forks_receive_secret_env_vars"]; ok {
 		t.Errorf(
-			"forks_receive_secret_env_vars sent as %v for an unconfigured circleci_project, want false "+
-				"(the current, buggy behaviour this test documents — see the bug writeup on this test). "+
-				"If this now sends true, the dead-code bug was fixed: update this test to assert true instead.",
+			"forks_receive_secret_env_vars sent as %v for a configuration that never mentions it, "+
+				"want it absent from the body so CircleCI's own default applies",
 			got,
 		)
+	}
+
+	// Only the two configured settings, and never oss: it is read-only, and the
+	// API rejects the whole request when it is present.
+	assertPatchKeys(t, body, "build_prs_only", "pr_only_branch_overrides")
+}
+
+// TestProjectResourceUnit_CreateNeverSendsOSS is the regression test for the bug
+// that broke every project create against the real API.
+//
+// oss is read-only on v2. The settings PATCH answers
+// 400 "Unexpected field 'advanced.oss'." and rejects the *whole* request, so
+// creating a project always failed at the settings step even though the project
+// itself had been created. Every mocked test passed regardless, because the fake
+// accepted the field; it now rejects it the way the real API does, so a
+// regression fails here twice: on the key assertion and on the create itself.
+func TestProjectResourceUnit_CreateNeverSendsOSS(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: projectResourceConfig(host, "my-repo", `
+  auto_cancel_builds            = true
+  build_fork_prs                = true
+  forks_receive_secret_env_vars = false
+`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					// oss is still reported, read from the API into state.
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("oss"), knownvalue.Bool(false)),
+				},
+			},
+		},
+	})
+
+	body := api.onlyPatch(t)
+	if got, ok := body["oss"]; ok {
+		t.Errorf("PATCH body carried oss (%v); it is read-only and the API rejects the whole request for it", got)
+	}
+	assertPatchKeys(t, body, "autocancel_builds", "build_fork_prs", "forks_receive_secret_env_vars")
+}
+
+// TestProjectResourceUnit_CreateRejectsConfiguredOSS proves oss cannot be set from
+// a configuration at all: it is Computed-only, so Terraform itself refuses before
+// the provider is asked to write anything.
+func TestProjectResourceUnit_CreateRejectsConfiguredOSS(t *testing.T) {
+	_, host := newFakeProjectAPI(t, "classic")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:      projectResourceConfig(host, "my-repo", `  oss = true`),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Configuration for Read-Only Attribute.*oss`),
+			},
+		},
+	})
+}
+
+// TestProjectResourceUnit_CreateOmitsUnconfiguredToggles is the core regression
+// test for the Optional+Computed guard bug.
+//
+// An omitted toggle must be absent from the request body rather than sent as
+// false, and a configured one must be sent with the value asked for — including an
+// explicit false, which is indistinguishable from "unset" once it reaches a plain
+// bool. set_github_status is the setting that makes the difference visible: the
+// fake defaults it to true, the way CircleCI does, so an unconfigured project must
+// read back true instead of the false the old code forced.
+func TestProjectResourceUnit_CreateOmitsUnconfiguredToggles(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: projectResourceConfig(host, "my-repo", `
+  auto_cancel_builds = true
+  disable_ssh        = false
+`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("auto_cancel_builds"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("disable_ssh"), knownvalue.Bool(false)),
+					// Never configured, so never sent: state reports CircleCI's own
+					// defaults, read back from the settings response.
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("set_github_status"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("setup_workflows"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("forks_receive_secret_env_vars"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(
+						"circleci_project.test",
+						tfjsonpath.New("pr_only_branch_overrides"),
+						knownvalue.ListExact([]knownvalue.Check{knownvalue.StringExact("main")}),
+					),
+				},
+			},
+		},
+	})
+
+	body := api.onlyPatch(t)
+
+	// Exactly the two configured settings, and nothing else. Every other key would
+	// be a value nobody asked the provider to decide.
+	assertPatchKeys(t, body, "autocancel_builds", "disable_ssh")
+
+	if got := body["autocancel_builds"]; got != true {
+		t.Errorf("autocancel_builds sent as %v, want true", got)
+	}
+
+	// An explicitly configured false must survive: it is a value the practitioner
+	// chose, not an absence.
+	if got, ok := body["disable_ssh"]; !ok || got != false {
+		t.Errorf("disable_ssh sent as %v (present: %t), want false", got, ok)
+	}
+}
+
+// TestProjectResourceUnit_CreateWithNoSettingsWritesNothing covers a project
+// created with no settings at all. There is nothing to write, and the API rejects
+// a body with no fields ("No JSON fields found."), so no PATCH must be sent — and
+// state must still hold a known value for every Computed toggle, read from the
+// project's existing settings.
+func TestProjectResourceUnit_CreateWithNoSettingsWritesNothing(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: projectResourceConfig(host, "my-repo", ""),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("set_github_status"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("auto_cancel_builds"), knownvalue.Bool(false)),
+				},
+			},
+		},
+	})
+
+	if patches := api.recordedPatches(); len(patches) != 0 {
+		t.Errorf("the provider sent %d settings PATCH requests for a project that configures none, want 0: %v", len(patches), patches)
+	}
+}
+
+// TestProjectResourceUnit_RequiresExplicitForkSecrets covers the one dangerous
+// default that omitting unset settings exposes, on circleci_project.
+//
+// forks_receive_secret_env_vars is true on a private project when it was never
+// set, so enabling fork builds without naming it would hand the project's secrets
+// to anyone who can open a pull request. The validator fires at validate time, so
+// the project is never even created.
+func TestProjectResourceUnit_RequiresExplicitForkSecrets(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:      projectResourceConfig(host, "my-repo", `  build_fork_prs = true`),
+				ExpectError: regexp.MustCompile(`(?s)forks_receive_secret_env_vars.*would receive the project's secrets`),
+			},
+		},
+	})
+
+	if requests := api.recordedRequests(); len(requests) != 0 {
+		t.Errorf("the provider made %v, want none: the configuration never passed validation", requests)
 	}
 }
 
@@ -176,20 +334,22 @@ func TestProjectResourceUnit_CreateStandaloneOrgSkipsFollow(t *testing.T) {
 	}
 }
 
-// TestProjectResourceUnit_UpdateDropsBuildPrsOnly is the regression test for
-// known bug history item 4, confirmed present at project_resource.go:421-431:
-// Update's settings payload has no BuildPrsOnly field at all, unlike Create's
-// (project_resource.go:202-204). Changing build_prs_only in configuration is
-// therefore silently never sent to CircleCI on an update.
+// TestProjectResourceUnit_UpdateSendsBuildPrsOnly is the regression test for known
+// bug history item 4, now fixed.
 //
-// Because Update always writes state from whatever the API reports
-// (project_resource.go:450), and the API still reports the old value since it
-// was never asked to change, the practitioner's new value and the state
-// Update saves disagree — which is exactly the shape of "provider produced an
-// invalid plan" that terraform-plugin-testing catches for us: the second step
-// below is expected to fail apply, not to quietly succeed with a stale value.
-func TestProjectResourceUnit_UpdateDropsBuildPrsOnly(t *testing.T) {
-	_, host := newFakeProjectAPI(t, "classic")
+// Update's settings payload had no BuildPrsOnly field at all, while every other
+// toggle was present — so changing build_prs_only on an existing project was
+// silently never sent. Update then wrote state from whatever the API reported,
+// which was still the old value, so the state it saved contradicted the plan it had
+// promised and Terraform failed the apply with "provider produced inconsistent
+// result after apply". A user would see a confusing provider bug rather than the
+// real cause, which was one missing struct field.
+//
+// Asserting on the request body as well as on state matters here: state agreeing
+// with the plan is necessary but not sufficient, since the whole failure mode was
+// state and the API disagreeing.
+func TestProjectResourceUnit_UpdateSendsBuildPrsOnly(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -201,21 +361,33 @@ func TestProjectResourceUnit_UpdateDropsBuildPrsOnly(t *testing.T) {
 				},
 			},
 			{
-				// build_prs_only:false never reaches the API (the bug), so the
-				// state Update saves still says true, contradicting the plan that
-				// promised false. Terraform's own consistency check is what
-				// surfaces the bug, without this test needing to inspect the wire
-				// body itself.
+				// Turning it off must reach the API and survive the read-back. Before
+				// the fix this step failed the apply outright.
 				Config: projectResourceConfig(host, "my-repo", `  build_prs_only = false`),
-				ExpectError: regexp.MustCompile(
-					`(?s)(produced an? (invalid|unexpected) (plan|new value)|inconsistent result after apply)`,
-				),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("build_prs_only"), knownvalue.Bool(false)),
+				},
 			},
 		},
 	})
+
+	// The last settings PATCH must carry build_prs_only:false explicitly. An absent
+	// key would leave the project unchanged and is exactly the bug.
+	patches := api.recordedPatches()
+	if len(patches) == 0 {
+		t.Fatal("no settings PATCH recorded")
+	}
+
+	last := patches[len(patches)-1]
+	got, present := last["build_prs_only"]
+	if !present {
+		t.Errorf("final settings PATCH omitted build_prs_only (body: %v); the update would "+
+			"silently not happen", last)
+	} else if got != false {
+		t.Errorf("final settings PATCH sent build_prs_only = %v, want false", got)
+	}
 }
 
-// TestProjectResourceUnit_UpdateSendsUnquotedBranchOverrides is bug history
 // TestProjectResourceUnit_NameChangeForcesReplacement proves the
 // RequiresReplace plan modifier on `name` is actually wired up.
 //
@@ -265,12 +437,15 @@ func TestProjectResourceUnit_UpdateSendsUnquotedBranchOverrides(t *testing.T) {
 		Steps: []resource.TestStep{
 			{Config: projectResourceConfig(host, "my-repo", "")},
 			{
-				Config: projectResourceConfig(host, "my-repo", `  pr_only_branch_overrides = ["main"]`),
+				// "develop" rather than "main" on purpose: the fake defaults the
+				// overrides to the default branch, the way the real API does, so
+				// asking for ["main"] would plan no change at all and send nothing.
+				Config: projectResourceConfig(host, "my-repo", `  pr_only_branch_overrides = ["develop"]`),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_project.test",
 						tfjsonpath.New("pr_only_branch_overrides"),
-						knownvalue.ListExact([]knownvalue.Check{knownvalue.StringExact("main")}),
+						knownvalue.ListExact([]knownvalue.Check{knownvalue.StringExact("develop")}),
 					),
 				},
 			},
@@ -284,8 +459,8 @@ func TestProjectResourceUnit_UpdateSendsUnquotedBranchOverrides(t *testing.T) {
 
 	last := patches[len(patches)-1]
 	branches, ok := last["pr_only_branch_overrides"].([]any)
-	if !ok || len(branches) != 1 || branches[0] != "main" {
-		t.Errorf(`last PATCH pr_only_branch_overrides = %v, want ["main"] unquoted`, last["pr_only_branch_overrides"])
+	if !ok || len(branches) != 1 || branches[0] != "develop" {
+		t.Errorf(`last PATCH pr_only_branch_overrides = %v, want ["develop"] unquoted`, last["pr_only_branch_overrides"])
 	}
 }
 

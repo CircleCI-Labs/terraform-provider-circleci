@@ -5,13 +5,13 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/webhook"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -41,7 +41,7 @@ func NewWebhookDataSource() datasource.DataSource {
 
 // WebhookDataSource is the data source implementation.
 type WebhookDataSource struct {
-	client *webhook.WebhookService
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -52,7 +52,12 @@ func (d *WebhookDataSource) Metadata(_ context.Context, req datasource.MetadataR
 // Schema defines the schema for the data source.
 func (d *WebhookDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Fetches information about an existing CircleCI webhook.",
+		MarkdownDescription: "Fetches information about an existing CircleCI webhook.\n\n" +
+			"~> **The signing secret is not returned.** The API masks it unconditionally, so " +
+			"`signing_secret` is always null here rather than the mask -- a `Sensitive` string holding " +
+			"the literal mask would look exactly like a real credential a configuration could pass to a " +
+			"receiver, and never would be one. Use the `circleci_webhooks` (plural) data source's " +
+			"`has_signing_secret` to check only whether one is configured.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the webhook.",
@@ -71,9 +76,15 @@ func (d *WebhookDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				Computed:            true,
 			},
 			"signing_secret": schema.StringAttribute{
-				MarkdownDescription: "The signing secret of the webhook.",
-				Computed:            true,
-				Sensitive:           true,
+				MarkdownDescription: "Always null. The API never discloses a webhook's signing secret, " +
+					"masking it unconditionally, so there is nothing this attribute could ever return. " +
+					"Scheduled for removal in 1.0 (issue #21); use `circleci_webhooks`' " +
+					"`has_signing_secret` instead.",
+				DeprecationMessage: "Always null: the API never discloses a signing secret. Scheduled for " +
+					"removal in 1.0 (issue #21). Use the circleci_webhooks (plural) data source's " +
+					"has_signing_secret instead.",
+				Computed:  true,
+				Sensitive: true,
 			},
 			"scope_id": schema.StringAttribute{
 				MarkdownDescription: "The ID of the scope (project) for which the webhook is configured.",
@@ -117,19 +128,15 @@ func (d *WebhookDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	webhookData, err := d.client.Get(ctx, config.Id.ValueString())
+	// A data source has no state to drop a missing webhook from, so unlike
+	// webhook_resource.go's Read, IsNotFound is not special-cased: circleci.Detail
+	// already carries the API's "Webhook not found" message through into the
+	// diagnostic.
+	webhookData, err := d.client.GetWebhook(ctx, config.Id.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Read CircleCI webhook with id "+config.Id.ValueString(),
-			err.Error(),
-		)
-		return
-	}
-
-	if webhookData == nil {
-		resp.Diagnostics.AddError(
-			"Webhook not found",
-			fmt.Sprintf("Webhook with ID %s not found.", config.Id.ValueString()),
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -145,23 +152,21 @@ func (d *WebhookDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	// Map response to state
+	// Map response to state. signing_secret is deliberately left null: the API
+	// masks every secret unconditionally (see Webhook.SigningSecret), so the only
+	// value this attribute could ever carry is the literal mask, and a Sensitive
+	// string holding that looks exactly like a real credential a configuration
+	// could pass to a receiver -- and never would be one.
 	state := webhookDataSourceModel{
-		Id:            types.StringValue(webhookData.Id),
-		Name:          types.StringValue(webhookData.Name),
-		Url:           types.StringValue(webhookData.Url),
-		SigningSecret: types.StringValue(webhookData.SigningSecret),
-		ScopeId:       types.StringValue(webhookData.Scope.Id),
-		ScopeType:     types.StringValue(webhookData.Scope.Type),
-		Events:        eventsList,
-		CreatedAt:     types.StringValue(webhookData.CreatedAt),
-		UpdatedAt:     types.StringValue(webhookData.UpdatedAt),
-	}
-
-	if webhookData.VerifyTls != nil {
-		state.VerifyTls = types.BoolValue(*webhookData.VerifyTls)
-	} else {
-		state.VerifyTls = types.BoolValue(true)
+		Id:        types.StringValue(webhookData.ID),
+		Name:      types.StringValue(webhookData.Name),
+		Url:       types.StringValue(webhookData.URL),
+		VerifyTls: types.BoolValue(webhookData.VerifyTLS),
+		ScopeId:   types.StringValue(webhookData.Scope.ID),
+		ScopeType: types.StringValue(webhookData.Scope.Type),
+		Events:    eventsList,
+		CreatedAt: types.StringValue(webhookData.CreatedAt),
+		UpdatedAt: types.StringValue(webhookData.UpdatedAt),
 	}
 
 	// Set state
@@ -174,18 +179,10 @@ func (d *WebhookDataSource) Read(ctx context.Context, req datasource.ReadRequest
 
 // Configure adds the provider configured client to the data source.
 func (d *WebhookDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
 		return
 	}
 
-	d.client = client.WebhookService
+	d.client = client
 }

@@ -76,8 +76,20 @@ resource "circleci_trigger" "webhook" {
 
 ## Import
 
-Import is supported using `project_id/trigger_id`:
+Import is supported using `project_id/pipeline_id/trigger_id`:
 
 ```shell
-terraform import circleci_trigger.example "<project_id>/<trigger_id>"
+terraform import circleci_trigger.example "<project_id>/<pipeline_id>/<trigger_id>"
 ```
+
+-> **Why the pipeline definition id is part of the address.** A trigger is *created*
+under a pipeline definition (`POST .../pipeline-definitions/{pipeline_definition_id}/triggers`)
+but *read* under the project (`GET /projects/{project_id}/triggers/{trigger_id}`), and
+the read response carries no reference back to the definition. `pipeline_id` therefore
+cannot be recovered from the API and has to be supplied.
+
+~> **Changed in 0.5.0.** Earlier versions accepted `project_id/trigger_id`. That form
+left `pipeline_id` — a required attribute — unset in state after import, leaving the
+next plan with no way to converge short of editing state by hand. Supplying the third
+segment is what makes import produce usable state; the two-segment form now reports an
+error explaining this rather than silently importing something broken.

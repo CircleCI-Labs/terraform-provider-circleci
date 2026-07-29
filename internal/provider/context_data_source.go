@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	ccicontext "github.com/CircleCI-Public/circleci-sdk-go/context"
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -50,9 +49,6 @@ func NewContextDataSource() datasource.DataSource {
 // contextDataSource is the data source implementation.
 type ContextDataSource struct {
 	client *circleci.Client
-	// restrictions still comes from circleci-sdk-go: the restriction list is not
-	// yet on the provider's own client.
-	restrictions *ccicontext.ContextService
 }
 
 // resolveContext finds the context the configuration identifies, by id or by name.
@@ -198,11 +194,11 @@ func (d *ContextDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	restrictions, err := d.restrictions.GetRestrictions(ctx, found.ID)
+	restrictions, err := d.client.ListContextRestrictions(ctx, found.ID)
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to Read CircleCI context restrictions",
-			err.Error(),
+			"Unable to read CircleCI context restrictions for "+found.ID,
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -214,7 +210,7 @@ func (d *ContextDataSource) Read(ctx context.Context, req datasource.ReadRequest
 			restrictionDataSourceModel{
 				Id:        types.StringValue(elem.ID),
 				Name:      types.StringValue(elem.Name),
-				ProjectId: types.StringValue(elem.ProjectId),
+				ProjectId: types.StringValue(elem.ProjectID),
 				Type:      types.StringValue(elem.RestrictionType),
 				Value:     types.StringValue(elem.RestrictionValue),
 			}
@@ -241,22 +237,10 @@ func (d *ContextDataSource) Read(ctx context.Context, req datasource.ReadRequest
 
 // Configure adds the provider configured client to the data source.
 func (d *ContextDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *circleciClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.Client
-	d.restrictions = client.ContextService
+	d.client = client
 }

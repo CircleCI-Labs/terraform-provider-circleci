@@ -34,13 +34,95 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   Note `circleci_webhook`'s `signing_secret` still cannot be read back — the API
   masks it. That is a separate, cosmetic issue ([#21](../../issues/21)).
 
+### SECURITY (dependencies)
+
+* **14 reachable vulnerabilities are fixed**, found by adding a reachability scan
+  (`task vulncheck`, using `govulncheck`) rather than by version matching.
+
+  Seven were in the **Go standard library** — `crypto/tls`, `crypto/x509`,
+  `net/http`, `net/textproto` and `html/template` — reachable from the provider's
+  own HTTP client and from `providerserver`. Fixed by moving the `toolchain`
+  directive from `go1.26.1` to `go1.26.5`; the CI image moved with it.
+
+  The rest were module-level: `google.golang.org/grpc` (an **authorization bypass**
+  via a missing leading slash in `:path`, reachable from `providerserver.Serve`),
+  plus `golang.org/x/net` and `golang.org/x/text`.
+
+  Worth noting how this was missed: Dependabot reported 43 alerts, but against the
+  default branch's dependency set, and the *reachable* set on this branch was
+  different. `govulncheck` reports only what the code can actually call, which is
+  both narrower and more actionable. It now runs in CI alongside the linter, so a
+  provider binary cannot ship with reachable TLS or x509 vulnerabilities again
+  without someone overriding a failing build.
+
+### DEPENDENCIES
+
+* **`github.com/CircleCI-Public/circleci-sdk-go` is removed entirely.** The provider
+  now speaks to the CircleCI API through its own client (`internal/circleci`).
+
+  This is not housekeeping. **Eight bugs in this release were traced to that SDK**, and
+  they were structural rather than incidental — a wrapper could not have fixed them:
+
+  * hyphenated JSON tags against a snake_case API that ignores unrecognised keys, so
+    fields were silently never sent or permanently empty. **Three separate instances**:
+    `signing-secret`/`verify-tls` on webhooks (the security issue above),
+    `public-key`/`created-at` on checkout keys, and `created-at` on project environment
+    variables. Three of one mistake in one library is why this was a removal rather
+    than a patch
+  * untyped errors (every failure collapsed to one formatted string), which forced
+    drift detection to match on the text `"404"` — and that also matches a 5xx whose
+    body happens to contain it, **silently removing live resources from state**
+  * the API version baked into the client's base URL, making "v3 on Cloud, v2 on
+    Server" inexpressible, and a hardcoded `https://circleci.com` that made project
+    creation impossible against CircleCI Server
+  * `Configure` receiving a narrow service rather than a client, so `circleci_pipeline`
+    could not be deployment-gated *at all* — the type carried no deployment information
+  * fields simply absent from the SDK's structs, making settings such as
+    `build_prs_only` unreachable from Terraform no matter what the provider did
+
+  Wire shapes were re-derived from what the API accepts and returns rather than ported
+  from the SDK, since porting would have carried the tag bugs across intact.
+  `CircleCI-Public/circleci-cli`'s `internal/apiclient` was the main reference — MIT and
+  actively maintained — plus the API and the API the real wire format.
+
+  The SDK had zero releases, zero tags and no maintainer; this provider was effectively
+  its only consumer.
+
 ### BREAKING CHANGES
 
-* None. Every change in this release is additive or a bug fix. The renames required
-  by CircleCI's v3 API conventions (`organization_id` → `org_id`, `pipeline` →
-  `run`) are deliberately **not** in this release; they are batched into a planned
-  1.0 with a state migration and a `moved {}` guide, so that one upgrade absorbs all
-  of them instead of several releases each breaking something.
+* **`circleci_trigger` import IDs now take three segments:
+  `project_id/pipeline_id/trigger_id`** (was `project_id/trigger_id`).
+
+  This only affects `terraform import`; no state migration is needed and nothing
+  already in state changes. The reason is that the old form could not produce working
+  state: a trigger is *created* under a pipeline definition but *read* under the
+  project, and the read response carries no reference back to the definition — so
+  `pipeline_id`, a required attribute, stayed null after every import and the next plan
+  had no way to converge short of hand-editing state. Supplying the definition id is
+  the only way to import a trigger usefully.
+
+  The two-segment form now reports an error explaining this rather than silently
+  importing something broken.
+
+* **`build_fork_prs = true` now requires `forks_receive_secret_env_vars` to be set
+  explicitly**, on both `circleci_project` and `circleci_project_settings`. A
+  configuration that enables fork builds without naming it fails at validate time with
+  an error that explains the exposure.
+
+  This is breaking only in that a configuration which used to plan now does not. It is
+  deliberate: the provider no longer writes settings a configuration does not mention
+  (see BUG FIXES), so an unset `forks_receive_secret_env_vars` takes CircleCI's default
+  — which is **`true` on a private project**. Enabling fork builds without deciding that
+  question would hand the project's environment variables, secrets and build cache to
+  anyone who can open a pull request. CircleCI gates the exposure on both settings, so
+  the check fires for exactly that combination and nothing else. Set the value you want;
+  `false` keeps secrets out of fork builds.
+
+Nothing else in this release is breaking. In particular, the renames required by
+CircleCI's v3 API conventions (`organization_id` → `org_id`, `pipeline` → `run`) are
+deliberately **not** here; they are batched into a planned 1.0 with a state migration
+and a `moved {}` guide, so one upgrade absorbs all of them instead of several releases
+each breaking something.
 
 ### FEATURES
 
@@ -153,6 +235,36 @@ and returning empty lists:
 
 ### BUG FIXES
 
+* **`oss` was sent on every project create and settings update, and the API rejects
+  it.** `oss` is read-only on v2: `PATCH /api/v2/project/{slug}/settings` with
+  `{"advanced":{"oss":false}}` answers `400 Unexpected field 'advanced.oss'.` — and it
+  rejects the *whole* request, so one unwritable field failed every write. The same
+  request without `oss` succeeds. The published API reference documents `oss` as part of
+  the request body, and the `GET` returns it, which is why it looked writable.
+
+  It is now `Computed`-only on `circleci_project` and `circleci_project_settings` — read
+  from the API, never sent — and `ProjectSettings.MarshalJSON` drops it unconditionally
+  so it cannot be reintroduced by accident. The "CircleCI did not apply the oss setting"
+  diagnostic is gone with it: it blamed a repository for not being open source when the
+  real cause was that no write path exists. Set `oss` in the CircleCI web application.
+
+  Every mocked test passed throughout, because the fakes accepted `oss`. They now reject
+  it exactly as the API does.
+
+* **`circleci_project` wrote `false` for every setting a configuration left out.** Each
+  toggle in `Create` was guarded by `if !plan.X.IsNull()`, but these attributes are
+  `Optional+Computed` and Terraform plans an omitted one as **unknown**, not null — so
+  `IsNull()` was false, every guard was taken, and `ValueBoolPointer()` on an unknown
+  value yields a pointer to `false`. Every toggle was therefore written as `false` on
+  create whatever the configuration said.
+
+  Two of those defaults were actively wrong: `set_github_status` defaults to **`true`**
+  at CircleCI, so every Terraform-created project silently stopped reporting commit
+  status, and `pr_only_branch_overrides` defaults to the repository's default branch, so
+  it was cleared. An unconfigured setting is now left out of the request entirely and
+  CircleCI's own default applies; the value it chose is read back into state. The real
+  defaults are tabled in the documentation for both resources.
+
 * **`circleci_project`: `pr_only_branch_overrides` sent quoted branch names.** The
   resource used `attr.Value.String()`, which renders Terraform's *display* form, so
   `main` reached the API as `"main"` — with the quotes. Likely the cause of the
@@ -195,6 +307,32 @@ and returning empty lists:
   groups. Note the provider deliberately does *not* treat 403 as "gone" in general:
   the conflation is intentional anti-enumeration on CircleCI's side, and treating a
   permission loss as a deletion would let the provider recreate live objects.
+* **Contexts answer 403 for absence too, and nothing modelled it.** Every route that
+  addresses a context by id sits behind the API's `the context-resolution step` middleware, which
+  resolves the id and maps *every* failure — deleted, wrong organization, or no
+  permission — to **403**, before the route's own handler runs. Context drift detection
+  therefore never worked. `Read` now reports a diagnostic naming all three causes rather
+  than silently removing the context from state, because a token that merely lost
+  permission must not cause Terraform to recreate a live context and its environment
+  variables. `Delete` treats 403 and 404 alike as already-gone.
+* **`circleci_project_environment_variable.created_at` was always empty.**
+  `circleci-sdk-go` tagged it `json:"created-at"` against the API's `created_at`.
+* **`circleci_context.organization_id` produced a silent, unapplied diff.** It was
+  `Required` with no `RequiresReplace` and an empty `Update`, so changing it reported
+  success while moving nothing. There is no API route that moves a context between
+  organizations, so it now forces replacement.
+* **`circleci_pipeline` fixes enabled by dropping the SDK** (all four previously
+  characterized in tests as known-broken, [#26](../../issues/26)): `project_id` and
+  `config_source_repo_external_id` now force replacement instead of planning an in-place
+  update that silently does nothing or targets the wrong project; a definition deleted
+  outside Terraform now produces a clean recreate plan instead of a permanent refresh
+  error; and both `circleci_pipeline` and `circleci_trigger` can now be gated off
+  CircleCI Server at plan time, which was impossible while `Configure` received an SDK
+  service carrying no deployment information.
+* **`circleci_runner_resource_class` never sent `org_id`.** Note the API
+  ignores it anyway — it derives the organization from the resource class's namespace and
+  the caller's permissions — but the schema requires it, so it is now sent and
+  documented.
 
 ### NOTES
 

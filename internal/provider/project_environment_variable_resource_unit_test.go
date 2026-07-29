@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/client"
-	"github.com/CircleCI-Public/circleci-sdk-go/envproject"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -17,6 +15,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // These tests back circleci_project_environment_variable
@@ -159,7 +159,7 @@ func TestProjectEnvVarResourceUnit_ReadMaskedValuePreservesPriorValue(t *testing
 	t.Parallel()
 
 	api, envSvc := newFakeEnvVarClient(t)
-	api.seed(testEnvVarProjectSlug, testEnvVarName, "the-real-value", "2024-01-02T03:04:05Z")
+	api.seed(testEnvVarProjectSlug, testEnvVarName, "the-real-value", "2024-01-02T03:04:05.000Z")
 
 	schema := projectEnvVarResourceSchemaForTest(t)
 	priorState := projectEnvVarResourceStateForTest(t, schema, projectEnvVarModel(testEnvVarProjectSlug, testEnvVarName, "the-real-value"))
@@ -218,9 +218,9 @@ func TestProjectEnvVarResourceUnit_ReadErrorMapping(t *testing.T) {
 	// project_environment_variable_resource.go's Read special-cases a 404 as
 	// drift (see TestProjectEnvVarResourceUnit_ReadMissingRemovesFromState), so
 	// exercising the *error* diagnostic path needs a different failure: force
-	// a 400 for this variable instead. (Not a 5xx: the underlying SDK client
-	// retries those with backoff, which would make this test slow for no
-	// benefit — a 4xx is not retried.)
+	// a 400 for this variable instead. (Not a 5xx: internal/httpcl retries those
+	// with backoff, which would make this test slow for no benefit — a 4xx is
+	// not retried.)
 	api, envSvc := newFakeEnvVarClient(t)
 	api.setForceStatus(testEnvVarProjectSlug, testEnvVarName, 400)
 
@@ -267,10 +267,10 @@ func projectEnvVarResourceStateForTest(t *testing.T, schema rschema.Schema, mode
 // projectEnvVarModel builds a prior-state model for the tests that drive the
 // resource's Go methods directly.
 //
-// created_at is deliberately always empty. The API does not return it on the
-// routes this resource uses, so an empty value is the realistic prior state; a
-// test that seeded one would be asserting against a value the provider can never
-// actually observe.
+// created_at is deliberately always empty here: this builds a *prior* state for
+// tests that drive Read directly, and the tests that care what Read populates it
+// with (TestProjectEnvVarResourceUnit_ReadMaskedValuePreservesPriorValue) assert
+// on the value the fake's Get response reports, not on this placeholder.
 func projectEnvVarModel(slug, name, value string) projectEnvironmentVariableResourceModel {
 	return projectEnvironmentVariableResourceModel{
 		ProjectSlug: types.StringValue(slug),
@@ -280,15 +280,13 @@ func projectEnvVarModel(slug, name, value string) projectEnvironmentVariableReso
 	}
 }
 
-// newFakeEnvVarClient starts the fake and returns it alongside an
-// envproject.EnvService pointed at it, matching how provider.go constructs
-// the real one (a circleci-sdk-go client.Client whose base URL already
-// carries "/api/v2").
-func newFakeEnvVarClient(t *testing.T) (*fakeEnvVarAPI, *envproject.EnvService) {
+// newFakeEnvVarClient starts the fake and returns it alongside a
+// circleci.Client pointed at it, matching how provider.go constructs the real
+// one.
+func newFakeEnvVarClient(t *testing.T) (*fakeEnvVarAPI, *circleci.Client) {
 	t.Helper()
 
 	api, host := newFakeEnvVarAPI(t)
-	c := client.NewClient(host+"/api/v2", "fake")
 
-	return api, envproject.NewEnvService(c)
+	return api, circleci.New(circleci.Config{Host: host, Token: "fake"})
 }

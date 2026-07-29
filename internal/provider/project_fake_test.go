@@ -83,8 +83,17 @@ func (p *fakeProject) toJSON() map[string]any {
 	}
 }
 
-// defaultFakeProjectSettings mirrors the defaults a freshly followed project
-// has, matching fakeProjectSettingsAPI's defaults in project_settings_resource_test.go.
+// defaultFakeProjectSettings mirrors the defaults a freshly followed private
+// project has, matching fakeProjectSettingsAPI's defaults in
+// project_settings_resource_test.go.
+//
+// These are not guesses. They are the flag defaults from the CircleCI API's
+// feature registry, confirmed against a live GET of a real project's settings:
+// set_github_status and setup_workflows default to true (not false),
+// forks_receive_secret_env_vars defaults to true on a private project, and
+// pr_only_branch_overrides defaults to the project's default branch rather than an
+// empty list. The fake used to default the first two to false, which hid the fact
+// that circleci_project was forcing them off on every create.
 func defaultFakeProjectSettings() map[string]any {
 	return map[string]any{
 		"autocancel_builds":             false,
@@ -93,10 +102,10 @@ func defaultFakeProjectSettings() map[string]any {
 		"disable_ssh":                   false,
 		"forks_receive_secret_env_vars": true,
 		"oss":                           false,
-		"set_github_status":             false,
-		"setup_workflows":               false,
+		"set_github_status":             true,
+		"setup_workflows":               true,
 		"write_settings_requires_admin": false,
-		"pr_only_branch_overrides":      []any{},
+		"pr_only_branch_overrides":      []any{"main"},
 	}
 }
 
@@ -320,6 +329,21 @@ func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Requ
 
 	if len(body.Advanced) == 0 {
 		a.write(w, http.StatusBadRequest, map[string]any{"message": "No JSON fields found."})
+
+		return
+	}
+
+	// oss is read-only on v2, and the API rejects the whole request when it is
+	// present — verified against the live API:
+	//
+	//	PATCH /api/v2/project/{slug}/settings  {"advanced":{"oss":false}}
+	//	→ 400  {"message":"Unexpected field 'advanced.oss'."}
+	//
+	// The fake used to accept it, which is exactly why sending it survived a
+	// passing test suite and broke every create and update against the real API.
+	if _, ok := body.Advanced["oss"]; ok {
+		a.patches = append(a.patches, body.Advanced)
+		a.write(w, http.StatusBadRequest, map[string]any{"message": "Unexpected field 'advanced.oss'."})
 
 		return
 	}

@@ -75,9 +75,9 @@ deliberate: it is safer than a wrong `yes`.
 | ├ `set_github_status` | yes | yes | yes [^vcsstatus] | yes [^vcsstatus] | yes [^vcsstatus] | yes | yes |
 | `circleci_project_environment_variable` | yes | yes | yes | yes | yes | yes | yes |
 | `circleci_checkout_key` | **no** [^ckey] | yes | **no** [^ckey] | **no** [^ckey] | yes | **no** [^ckey] | yes |
-| `circleci_pipeline` (read) | yes | yes | yes | yes | yes | yes | **no** [^nov3] |
-| `circleci_pipeline` (create/update/delete) | yes | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | yes | **no** [^nov3] |
-| `circleci_trigger` | yes | yes [^oauthtrig] | **no** | **no** | **no** [^bbtrig] | yes | **no** [^nov3] |
+| `circleci_pipeline` (read) | yes | yes | yes | yes | yes | yes | **no** [^nopdserver] |
+| `circleci_pipeline` (create/update/delete) | yes | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | yes | **no** [^nopdserver] |
+| `circleci_trigger` | yes | yes [^oauthtrig] | **no** | **no** | **no** [^bbtrig] | yes | **no** [^nopdserver] |
 | `circleci_webhook` | yes | yes | yes | yes | yes | yes | yes |
 | `circleci_runner_resource_class`, `circleci_runner_token` | yes | yes | yes | yes | yes | yes | yes [^runnerhost] |
 | `circleci_group`, `circleci_group_membership` | yes [^standalone] | **no** [^standalone] | yes | yes | **no** [^standalone] | yes [^standalone] | **no** [^standalone] |
@@ -117,15 +117,12 @@ VCS connection setup (GitHub App install, OAuth authorize, GitLab/Bitbucket toke
 auth, a deliberate privilege boundary) · SSO/SAML configuration · audit log
 *retrieval* · cloud resource classes (config-level, not API-managed).
 
-> Earlier versions of this list included **user invitations**. That was wrong.
-> `GET`/`POST /api/v2/organizations/{org_id}/users` and
-> `GET`/`PATCH`/`DELETE .../users/{user_id}` are fully specified and support listing
-> members, inviting them with a role, changing a role, and removing a member. They
-> are served by the API on `a host reserved for internal use` rather than by
-> the API, which is why a search of the the API router found
-> nothing and the capability was recorded as absent. **It is not implemented yet** — it is
-> the largest remaining gap, and shipping it needs a decision about relying on an
-> `a host reserved for internal use` route. See `NEEDS-FROM-MAINTAINER.md`.
+> Earlier versions of this list included **user invitations**. That was wrong: routes
+> to list organization members, invite them with a role, change a role and remove a
+> member are all specified. They are **deliberately not implemented here**, because
+> they are served on a host reserved for internal use rather than through CircleCI's
+> public API. This is the largest remaining capability gap — see
+> `NEEDS-FROM-MAINTAINER.md`.
 
 The account and VCS steps are browser consent flows by design, which is the structural
 reason a CircleCI organization cannot be stood up end to end from Terraform alone.
@@ -148,6 +145,7 @@ reason a CircleCI organization cannot be stood up end to end from Terraform alon
 [^oidcserver]: CircleCI Server 4.4 and later. Not available in air-gapped installations.
 [^glorbauth]: Entries can be managed, but the `auth` value cannot be GitLab: "GitLab authentication is not currently supported. Only use public GitLab repositories with the `None` auth type."
 [^nov3]: A CircleCI Server installation does not route `/api/v3` to the public API service. Set `deployment = "server"` and these resources report an explicit error rather than a confusing HTTP 404.
+[^nopdserver]: Unavailable on Server for a *different* reason to `[^nov3]`, worth distinguishing because it changes what would fix it. `pipeline-definitions` and `triggers` are **v2** routes, not v3 — but a Server installation's gateway routes served does not forward them to the public API service at all. v3 arriving on Server would therefore not make these work; the routes served entry is what is missing. Set `deployment = "server"` and these resources fail at plan time with an explicit error.
 
 ## Acknowledgments
 This repository was created following the Terraform plugin framework defined by Hashicorp [here](https://developer.hashicorp.com/terraform/plugin/framework).

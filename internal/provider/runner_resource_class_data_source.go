@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -35,7 +36,7 @@ func NewRunnerResourceClassDataSource() datasource.DataSource {
 
 // runnerResourceClassDataSource is the data source implementation.
 type runnerResourceClassDataSource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -101,15 +102,15 @@ func (d *runnerResourceClassDataSource) Read(ctx context.Context, req datasource
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner resource classes",
-			"Could not list runner resource classes for namespace "+namespace+": "+err.Error(),
+			"Could not list runner resource classes for namespace "+namespace+": "+circleci.Detail(err),
 		)
 		return
 	}
 
-	var found *runner.ResourceClass
-	for i := range classes.Items {
-		if classes.Items[i].ResourceClass == rcName {
-			found = &classes.Items[i]
+	var found *circleci.ResourceClass
+	for i := range classes {
+		if classes[i].ResourceClass == rcName {
+			found = &classes[i]
 			break
 		}
 	}
@@ -122,7 +123,7 @@ func (d *runnerResourceClassDataSource) Read(ctx context.Context, req datasource
 		return
 	}
 
-	state.Id = types.StringValue(found.Id)
+	state.Id = types.StringValue(found.ID)
 	state.ResourceClass = types.StringValue(found.ResourceClass)
 	state.Description = types.StringValue(found.Description)
 
@@ -132,18 +133,10 @@ func (d *runnerResourceClassDataSource) Read(ctx context.Context, req datasource
 
 // Configure adds the provider configured client to the data source.
 func (d *runnerResourceClassDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
 		return
 	}
 
-	d.client = client.RunnerService
+	d.client = client
 }

@@ -20,17 +20,34 @@ Use **one or the other for a given project, never both.** Both write the same se
 | Creates and destroys the project | yes | no |
 | Manages the project's settings | yes, all of them | yes, only the ones you name |
 | Works for a project Terraform did not create | no | yes |
-| Settings left out of the configuration | written as `false` | left untouched |
+| Settings left out of the configuration | left to CircleCI's default on create | left untouched |
 
 So: manage a project Terraform creates with `circleci_project`, and manage a project that already exists with `circleci_project_settings`.
 
 ## Only what you name is written
 
-Every setting is optional and none is computed. A setting the configuration does not mention is left out of the request entirely, stays `null` in state, and keeps whatever value CircleCI holds for it. That has three consequences worth knowing:
+Every writable setting is optional and none is computed. A setting the configuration does not mention is left out of the request entirely, stays `null` in state, and keeps whatever value CircleCI holds for it. (`oss` is the one exception: it is read-only, so it is computed and simply reports what CircleCI holds.) That has three consequences worth knowing:
 
 - **Nothing is adopted silently.** Reading the project's current settings into state would make "not managed" indistinguishable from "managed as `false`", and the next apply would start writing settings you never asked for.
 - **Two configurations may manage disjoint settings** on the same project without fighting, which is what makes this usable alongside a team that manages other settings by hand.
 - **Removing a setting from the configuration stops managing it; it does not revert it.** CircleCI has no route that restores a default, so the setting keeps the value Terraform last applied. The provider warns when this happens.
+
+### The defaults a never-set setting has
+
+This resource only ever writes what you name, so what a project *starts* from matters. A setting no one has ever changed is not uniformly `false`:
+
+| Setting | Default when never set |
+| --- | --- |
+| `auto_cancel_builds` | `false` |
+| `build_fork_prs` | `false` |
+| `build_prs_only` | `false` |
+| `disable_ssh` | `false`, unless an organization-level value says otherwise |
+| `forks_receive_secret_env_vars` | **`true` on a private project**, `false` on a public one |
+| `set_github_status` | **`true`** |
+| `setup_workflows` | **`true`** for projects created after 2023-12-01 |
+| `write_settings_requires_admin` | `false`, unless an organization-level value says otherwise |
+| `pr_only_branch_overrides` | the repository's default branch, for example `["main"]` |
+| `oss` | derived from the repository, and read-only |
 
 ## Example Usage
 
@@ -85,11 +102,6 @@ Leave this unset to let CircleCI manage it; the provider only writes settings th
 - `forks_receive_secret_env_vars` (Boolean) Run forked pull requests with this project's configuration, environment variables and secrets. The build cache is also shared between the original repository and all forks, so enabling this exposes both to anyone who can open a pull request.
 
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
-- `oss` (Boolean) Mark the project as free and open source. Organizations on the free plan get an amount of free credits per month for Linux open source builds; enabling this lets the project's builds use them, and makes builds visible to everyone through both the web application and the API.
-
-CircleCI only honours `true` for a repository that is genuinely open source. It reports success while leaving the setting unchanged otherwise, so the provider compares what it asked for against what CircleCI reports and fails with an explanation rather than looping on a diff that can never converge.
-
-Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
 - `pr_only_branch_overrides` (List of String) Branches that always trigger a build, even when `build_prs_only` is enabled. The list replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches.
 - `set_github_status` (Boolean) Report the status of every pushed commit to GitHub's status API. Updates are reported per job.
 
@@ -100,6 +112,12 @@ Leave this unset to let CircleCI manage it; the provider only writes settings th
 - `write_settings_requires_admin` (Boolean) Require organization administrator permissions to change this project's settings. Enabling this can lock the provider itself out of further changes if its token does not belong to an administrator.
 
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
+
+### Read-Only
+
+- `oss` (Boolean) Whether the project is treated as free and open source, which grants additional credits and makes builds visible to everyone.
+
+~> **Read-only.** This is reported by the API but cannot be set through it. The settings endpoint rejects the field outright — `400 Unexpected field 'advanced.oss'.` — and because it rejects the whole request, including it broke every project create and settings update. CircleCI derives it from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application rather than here.
 
 ## Import
 
@@ -113,7 +131,8 @@ The import records only the slug and leaves every setting `null`, so the first p
 
 ## Notes
 
-- **`oss` is only honoured for genuinely open source repositories.** CircleCI answers successfully and leaves the setting unchanged for anything else, so the provider compares what it asked for with what CircleCI reports and fails with an explanation rather than showing a diff that can never converge.
+- **`oss` is read-only.** CircleCI reports it but the settings API does not accept it: a request carrying it answers `400 Unexpected field 'advanced.oss'.` and is rejected in full, so a single unwritable field would fail every write. CircleCI derives the value from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application. This resource reports it and never writes it.
+- **`build_fork_prs = true` requires `forks_receive_secret_env_vars` to be set explicitly.** The provider reports an error at validate time otherwise, because the unset default is **`true`** on a private project: fork pull requests would receive the project's environment variables, secrets and build cache, so anyone who can open one could read them.
 - **`pr_only_branch_overrides` replaces the whole list.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches.
 - **`write_settings_requires_admin = true` can lock the provider out** of further changes if its token does not belong to an organization administrator.
 - **`terraform destroy` writes nothing.** Settings cannot be deleted or reset, so destroying this resource only drops it from state and the project keeps its current values.

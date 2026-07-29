@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -47,7 +46,7 @@ func NewRunnerResourceClassesDataSource() datasource.DataSource {
 
 // runnerResourceClassesDataSource is the data source implementation.
 type runnerResourceClassesDataSource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -125,14 +124,12 @@ func (d *runnerResourceClassesDataSource) Read(ctx context.Context, req datasour
 
 	classes, err := d.client.ListResourceClasses(ctx, namespace, organizationId)
 	if err != nil {
-		// The SDK returns untyped errors, so a 404 cannot be told apart from any
-		// other failure here.
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner resource classes",
 			fmt.Sprintf(
 				"Could not list runner resource classes (%s): %s",
 				runnerFilterSummary(circleci.ListRunnersParams{Namespace: namespace, OrgID: organizationId}),
-				err.Error(),
+				circleci.Detail(err),
 			),
 		)
 
@@ -141,10 +138,10 @@ func (d *runnerResourceClassesDataSource) Read(ctx context.Context, req datasour
 
 	// An empty list is a valid answer, so keep the attribute an empty list rather
 	// than null: practitioners iterate over it.
-	config.ResourceClasses = make([]runnerResourceClassItemModel, 0, len(classes.Items))
-	for _, class := range classes.Items {
+	config.ResourceClasses = make([]runnerResourceClassItemModel, 0, len(classes))
+	for _, class := range classes {
 		config.ResourceClasses = append(config.ResourceClasses, runnerResourceClassItemModel{
-			Id:            types.StringValue(class.Id),
+			Id:            types.StringValue(class.ID),
 			ResourceClass: types.StringValue(class.ResourceClass),
 			Description:   types.StringValue(class.Description),
 		})
@@ -155,19 +152,10 @@ func (d *runnerResourceClassesDataSource) Read(ctx context.Context, req datasour
 
 // Configure adds the provider configured client to the data source.
 func (d *runnerResourceClassesDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.RunnerService
+	d.client = client
 }

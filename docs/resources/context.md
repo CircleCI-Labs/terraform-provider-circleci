@@ -24,7 +24,7 @@ resource "circleci_context" "example" {
 ### Required
 
 - `name` (String) The name of the CircleCI context. Changing this value forces a new resource to be created.
-- `organization_id` (String) The ID of the organization that owns this context.
+- `organization_id` (String) The ID of the organization that owns this context. There is no API route to move a context between organizations, so changing this value forces a new resource to be created.
 
 ### Read-Only
 

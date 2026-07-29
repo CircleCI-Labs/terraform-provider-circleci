@@ -35,8 +35,8 @@ Changing this value forces a new resource to be created.
 ### Read-Only
 
 - `id` (String) The unique identifier of the restriction.
-- `name` (String) The name associated with the restriction.
-- `project_id` (String) The project ID associated with the restriction.
+- `name` (String) The name associated with the restriction. The create response never carries this — CircleCI learns it (e.g. a project's slug) out of band and only reports it on a later read — so it reads back as empty immediately after create/apply and picks up its real value on the next refresh.
+- `project_id` (String) The project ID associated with the restriction. Only set for `project` restrictions.
 
 ## Import
 

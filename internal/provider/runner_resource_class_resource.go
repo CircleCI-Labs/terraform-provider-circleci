@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -19,24 +18,23 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Runner administration is served by a separate origin (https://runner.circleci.com
 // on Cloud, the Server host on CircleCI Server) and is plumbed through the
-// provider's runner_host attribute into runner.NewServiceWithBaseURL.
+// provider's runner_host attribute into circleci.Client's runnerHost.
 //
 // Canonical surface: every runner resource and data source in this provider
 // deliberately targets the established `{runner_host}/api/v3/runner/...` surface
-// (`/runner/resource`, `/runner/token`, `/runner/tasks`). A newer surface exists at
+// (`/runner/resource`, `/runner/token`, `/runner/tasks` — see
+// internal/circleci/runner.go). A newer surface exists at
 // `circleci.com/api/v3/runner/resource-classes` (plural, with an `/update` action),
-// but it is being actively reshaped (the API PRs #1115/#1137), so it is
-// intentionally NOT used here. Do not migrate until that surface is stable and the
-// SDK exposes it; the existing surface is the one CircleCI Server also serves.
-//
-// Limitation: the circleci-sdk-go runner service returns untyped errors, so
-// internal/circleci.IsNotFound cannot classify them. Runner code therefore cannot
-// distinguish a 404 from any other failure, and must not string-match error text.
-// A missing resource class is detected by its absence from a list response instead.
+// served by the API's api/v3 package and proxied through the API,
+// but it is being actively reshaped, so it is intentionally NOT used here. Do not
+// migrate until that surface is stable; the existing surface is the one CircleCI
+// Server also serves.
 
 // runnerOrgIDPattern recognises the UUID that the runner API expects for
 // organization identifiers. The runner API takes a UUID only — it does not accept
@@ -70,7 +68,7 @@ func NewRunnerResourceClassResource() resource.Resource {
 
 // runnerResourceClassResource is the resource implementation.
 type runnerResourceClassResource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -136,9 +134,11 @@ func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.C
 		return
 	}
 
-	// organization_id is Required in the schema and the API rejects a create
-	// without org_id, so it has to be sent here.
-	createReq := runner.CreateResourceClassRequest{
+	// organization_id is Required in the schema, so it is always sent here even
+	// though the production create handler (the CircleCI API)
+	// derives the owning org from resource_class's namespace and ignores it —
+	// see circleci.ResourceClassInput's doc comment.
+	createReq := circleci.ResourceClassInput{
 		OrganizationID: plan.OrganizationId.ValueString(),
 		ResourceClass:  plan.ResourceClass.ValueString(),
 		Description:    plan.Description.ValueString(),
@@ -148,12 +148,12 @@ func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.C
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI runner resource class",
-			"Could not create runner resource class, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
-	plan.Id = types.StringValue(rc.Id)
+	plan.Id = types.StringValue(rc.ID)
 	plan.ResourceClass = types.StringValue(rc.ResourceClass)
 	plan.Description = types.StringValue(rc.Description)
 
@@ -188,15 +188,15 @@ func (r *runnerResourceClassResource) Read(ctx context.Context, req resource.Rea
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner resource classes",
-			"Could not list runner resource classes for namespace "+namespace+": "+err.Error(),
+			"Could not list runner resource classes for namespace "+namespace+": "+circleci.Detail(err),
 		)
 		return
 	}
 
-	var found *runner.ResourceClass
-	for i := range classes.Items {
-		if classes.Items[i].ResourceClass == rcName {
-			found = &classes.Items[i]
+	var found *circleci.ResourceClass
+	for i := range classes {
+		if classes[i].ResourceClass == rcName {
+			found = &classes[i]
 			break
 		}
 	}
@@ -206,7 +206,7 @@ func (r *runnerResourceClassResource) Read(ctx context.Context, req resource.Rea
 		return
 	}
 
-	state.Id = types.StringValue(found.Id)
+	state.Id = types.StringValue(found.ID)
 	state.ResourceClass = types.StringValue(found.ResourceClass)
 	state.Description = types.StringValue(found.Description)
 	// ForceDelete is not returned by the API — preserve value from state.
@@ -239,30 +239,24 @@ func (r *runnerResourceClassResource) Delete(ctx context.Context, req resource.D
 	}
 
 	err := r.client.DeleteResourceClass(ctx, state.Id.ValueString(), state.ForceDelete.ValueBool())
-	if err != nil {
+	// A resource class already gone is the desired end state, so absence is not
+	// an error.
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
 			"Error deleting CircleCI runner resource class",
-			"Could not delete runner resource class "+state.Id.ValueString()+": "+err.Error(),
+			"Could not delete runner resource class "+state.Id.ValueString()+": "+circleci.Detail(err),
 		)
 	}
 }
 
 // Configure adds the provider configured client to the resource.
 func (r *runnerResourceClassResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
 		return
 	}
 
-	r.client = client.RunnerService
+	r.client = client
 }
 
 // ImportState imports an existing resource class into Terraform state.

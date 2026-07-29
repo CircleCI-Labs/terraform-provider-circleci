@@ -3,7 +3,10 @@
 
 package circleci
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // projectSettingsRoute is the v2 route for a project's advanced settings. The
 // same path serves the read (GET) and the partial update (PATCH).
@@ -41,13 +44,24 @@ type ProjectSettings struct {
 	// ForksReceiveSecretEnvVars runs forked pull requests with this project's
 	// environment variables and secrets, and shares the build cache with forks.
 	ForksReceiveSecretEnvVars *bool `json:"forks_receive_secret_env_vars,omitempty"`
-	// OSS marks the project free and open source, which grants additional
-	// credits and makes builds publicly visible.
+	// OSS reports whether the project is treated as free and open source, which
+	// grants additional credits and makes builds publicly visible.
 	//
-	// CircleCI only honours a true value for a repository that is genuinely open
-	// source. It answers 200 with the setting left as it was otherwise, so a
-	// caller that asked for true must compare the response rather than assume
-	// success.
+	// READ-ONLY on this API version. The settings PATCH does not accept it and
+	// rejects the whole request if it is present — verified against the live API:
+	//
+	//	PATCH /api/v2/project/{slug}/settings  {"advanced":{"oss":false}}
+	//	→ 400  {"message":"Unexpected field 'advanced.oss'."}
+	//
+	// The same request without oss answers 200. Because the field IS returned by
+	// the GET, it looks writable, and the published API reference documents it as
+	// part of the request body — but no write path exists here. Sending it made
+	// every project create and settings update fail against the real API while
+	// every mocked test passed, because the fake accepted the field.
+	//
+	// MarshalJSON below drops it unconditionally, so it cannot be sent by
+	// accident. Do not add it back to the write path without confirming against a
+	// live installation.
 	OSS *bool `json:"oss,omitempty"`
 	// SetGithubStatus reports the status of every pushed commit to GitHub's
 	// status API, once per job.
@@ -79,7 +93,9 @@ func (s ProjectSettings) IsEmpty() bool {
 		s.BuildPrsOnly,
 		s.DisableSSH,
 		s.ForksReceiveSecretEnvVars,
-		s.OSS,
+		// OSS is deliberately absent: it is never marshalled, so a settings object
+		// carrying only OSS has nothing to send and must count as empty. Including
+		// it here would send a body with no fields and earn a 400.
 		s.SetGithubStatus,
 		s.SetupWorkflows,
 		s.WriteSettingsRequiresAdmin,
@@ -97,6 +113,27 @@ func (s ProjectSettings) IsEmpty() bool {
 // API rejects any other root field.
 type projectSettingsEnvelope struct {
 	Advanced ProjectSettings `json:"advanced"`
+}
+
+// MarshalJSON serialises the settings for a write, always omitting oss.
+//
+// oss is read-only on this API version: the settings PATCH answers
+// 400 "Unexpected field 'advanced.oss'." when it is present, and rejects the
+// entire request, so one unwritable field would fail every write. See the comment
+// on the OSS field.
+//
+// This is done here rather than in each caller so that it cannot be forgotten.
+// The alternative — a separate write struct — would mean two types to keep in
+// step, and the read and write shapes are otherwise identical.
+func (s ProjectSettings) MarshalJSON() ([]byte, error) {
+	// A local alias avoids recursing into this method. The alias has no methods,
+	// so encoding/json falls back to struct-tag marshalling.
+	type writable ProjectSettings
+
+	out := writable(s)
+	out.OSS = nil
+
+	return json.Marshal(out)
 }
 
 // GetProjectSettings reads the advanced settings of a project, addressed by the

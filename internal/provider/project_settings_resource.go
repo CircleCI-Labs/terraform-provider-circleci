@@ -24,9 +24,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &projectSettingsResource{}
-	_ resource.ResourceWithConfigure   = &projectSettingsResource{}
-	_ resource.ResourceWithImportState = &projectSettingsResource{}
+	_ resource.Resource                     = &projectSettingsResource{}
+	_ resource.ResourceWithConfigure        = &projectSettingsResource{}
+	_ resource.ResourceWithImportState      = &projectSettingsResource{}
+	_ resource.ResourceWithConfigValidators = &projectSettingsResource{}
 )
 
 // projectSettingsTypeName is the Terraform type name, used in diagnostics.
@@ -40,8 +41,9 @@ var projectSlugPattern = regexp.MustCompile(`^[^/]+/[^/]+/[^/]+$`)
 
 // projectSettingsResourceModel maps the resource schema.
 //
-// Every toggle is types.Bool and Optional-only, never Computed. See the Schema
-// method for why that matters.
+// Every writable toggle is types.Bool and Optional-only, never Computed. See the
+// Schema method for why that matters. OSS is the one exception: it is read-only on
+// the API, so it is Computed-only and simply reports what CircleCI holds.
 type projectSettingsResourceModel struct {
 	Slug                       types.String `tfsdk:"slug"`
 	AutoCancelBuilds           types.Bool   `tfsdk:"auto_cancel_builds"`
@@ -84,12 +86,14 @@ func projectSettingRefresh(configured types.Bool, remote *bool) types.Bool {
 // manages.
 func (m projectSettingsResourceModel) payload(ctx context.Context) (circleci.ProjectSettings, diag.Diagnostics) {
 	settings := circleci.ProjectSettings{
-		AutocancelBuilds:           projectSettingRequest(m.AutoCancelBuilds),
-		BuildForkPrs:               projectSettingRequest(m.BuildForkPrs),
-		BuildPrsOnly:               projectSettingRequest(m.BuildPrsOnly),
-		DisableSSH:                 projectSettingRequest(m.DisableSSH),
-		ForksReceiveSecretEnvVars:  projectSettingRequest(m.ForksReceiveSecretEnvVars),
-		OSS:                        projectSettingRequest(m.OSS),
+		AutocancelBuilds:          projectSettingRequest(m.AutoCancelBuilds),
+		BuildForkPrs:              projectSettingRequest(m.BuildForkPrs),
+		BuildPrsOnly:              projectSettingRequest(m.BuildPrsOnly),
+		DisableSSH:                projectSettingRequest(m.DisableSSH),
+		ForksReceiveSecretEnvVars: projectSettingRequest(m.ForksReceiveSecretEnvVars),
+		// OSS is absent on purpose: the settings PATCH rejects it, and rejects the
+		// whole request with it. See the OSS field in
+		// internal/circleci/project_settings.go.
 		SetGithubStatus:            projectSettingRequest(m.SetGithubStatus),
 		SetupWorkflows:             projectSettingRequest(m.SetupWorkflows),
 		WriteSettingsRequiresAdmin: projectSettingRequest(m.WriteSettingsRequiresAdmin),
@@ -121,7 +125,10 @@ func (m *projectSettingsResourceModel) refresh(ctx context.Context, remote *circ
 	m.BuildPrsOnly = projectSettingRefresh(m.BuildPrsOnly, remote.BuildPrsOnly)
 	m.DisableSSH = projectSettingRefresh(m.DisableSSH, remote.DisableSSH)
 	m.ForksReceiveSecretEnvVars = projectSettingRefresh(m.ForksReceiveSecretEnvVars, remote.ForksReceiveSecretEnvVars)
-	m.OSS = projectSettingRefresh(m.OSS, remote.OSS)
+	// oss is always adopted, unlike every other setting: it is Computed-only and
+	// cannot be written, so reporting what CircleCI holds can never turn into a
+	// write the practitioner did not ask for.
+	m.OSS = types.BoolPointerValue(remote.OSS)
 	m.SetGithubStatus = projectSettingRefresh(m.SetGithubStatus, remote.SetGithubStatus)
 	m.SetupWorkflows = projectSettingRefresh(m.SetupWorkflows, remote.SetupWorkflows)
 	m.WriteSettingsRequiresAdmin = projectSettingRefresh(m.WriteSettingsRequiresAdmin, remote.WriteSettingsRequiresAdmin)
@@ -232,10 +239,21 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 			"forks_receive_secret_env_vars": toggle(
 				"Run forked pull requests with this project's configuration, environment variables and secrets. The build cache is also shared between the original repository and all forks, so enabling this exposes both to anyone who can open a pull request.",
 			),
-			"oss": toggle(
-				"Mark the project as free and open source. Organizations on the free plan get an amount of free credits per month for Linux open source builds; enabling this lets the project's builds use them, and makes builds visible to everyone through both the web application and the API.\n\n" +
-					"CircleCI only honours `true` for a repository that is genuinely open source. It reports success while leaving the setting unchanged otherwise, so the provider compares what it asked for against what CircleCI reports and fails with an explanation rather than looping on a diff that can never converge.",
-			),
+			"oss": schema.BoolAttribute{
+				MarkdownDescription: "Whether the project is treated as free and open source, which grants additional " +
+					"credits and makes builds visible to everyone.\n\n" +
+					"~> **Read-only.** This is reported by the API but cannot be set through it. The " +
+					"settings endpoint rejects the field outright — `400 Unexpected field 'advanced.oss'.`" +
+					" — and because it rejects the whole request, including it broke every project " +
+					"create and settings update. CircleCI derives it from whether the repository is " +
+					"public together with an organization-level flag, so set it in the CircleCI web " +
+					"application rather than here.",
+				// Computed only, deliberately not Optional: the API rejects this field on
+				// write. See internal/circleci/project_settings.go's OSS field. This is the
+				// one attribute here that is Computed, and it is safe to adopt precisely
+				// because it can never be written.
+				Computed: true,
+			},
 			"set_github_status": toggle(
 				"Report the status of every pushed commit to GitHub's status API. Updates are reported per job.",
 			),
@@ -253,6 +271,14 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 				ElementType: types.StringType,
 			},
 		},
+	}
+}
+
+// ConfigValidators returns the cross-attribute checks that run at validate and
+// plan time, before anything is written.
+func (r *projectSettingsResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		explicitForkSecretsValidator{},
 	}
 }
 
@@ -328,8 +354,6 @@ func (r *projectSettingsResource) Create(ctx context.Context, req resource.Creat
 
 		return
 	}
-
-	checkOSSApplied(plan.OSS, updated.OSS, slug, &resp.Diagnostics)
 
 	resp.Diagnostics.Append(plan.refresh(ctx, updated)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -442,8 +466,6 @@ func (r *projectSettingsResource) Update(ctx context.Context, req resource.Updat
 		return
 	}
 
-	checkOSSApplied(plan.OSS, updated.OSS, slug, &resp.Diagnostics)
-
 	resp.Diagnostics.Append(plan.refresh(ctx, updated)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -512,41 +534,66 @@ func addUnconfiguredClientError(diags *diag.Diagnostics) {
 	)
 }
 
-// checkOSSApplied reports an oss change CircleCI accepted but did not make.
+// explicitForkSecretsValidator requires forks_receive_secret_env_vars to be set
+// explicitly whenever build_fork_prs is enabled. It is shared by
+// circleci_project and circleci_project_settings, which expose the same pair of
+// settings.
 //
-// The API answers 200 to `oss: true` for a repository that is not open source and
-// simply leaves the setting alone, so the only way to detect it is to compare the
-// response with what was asked for. Reporting an error here is what stops the
-// next plan from showing the same unachievable change forever.
-func checkOSSApplied(configured types.Bool, applied *bool, slug string, diags *diag.Diagnostics) {
-	if configured.IsNull() || configured.IsUnknown() {
-		return
-	}
+// Leaving an unset setting out of the request is the right Terraform semantic and
+// is what both resources now do — but it makes CircleCI's own default apply, and
+// forks_receive_secret_env_vars defaults to *true* on a private project
+// CircleCI's own default)) in the API's feature registry).
+// So a configuration that enables fork builds without mentioning it hands the
+// project's secrets to anyone who can open a pull request, silently.
+//
+// The check is deliberately narrow: CircleCI only exposes secrets to a fork build
+// when both settings are on, so it fires only for that combination rather than
+// nagging every configuration that omits the setting.
+type explicitForkSecretsValidator struct{}
 
-	if applied != nil && *applied == configured.ValueBool() {
-		return
-	}
-
-	diags.AddError(
-		"CircleCI did not apply the oss setting for "+slug,
-		fmt.Sprintf(
-			"oss was set to %t, but CircleCI reports it as %s after the update.\n\n"+
-				"The oss setting can only be enabled for a project whose underlying repository is "+
-				"genuinely open source. CircleCI answers successfully and leaves the setting "+
-				"unchanged otherwise. Remove oss from the configuration, or set it to false, unless "+
-				"the repository is public.",
-			configured.ValueBool(), formatOptionalBool(applied),
-		),
-	)
+func (explicitForkSecretsValidator) Description(_ context.Context) string {
+	return "forks_receive_secret_env_vars must be set explicitly when build_fork_prs is true"
 }
 
-// formatOptionalBool renders a setting the API may have omitted.
-func formatOptionalBool(v *bool) string {
-	if v == nil {
-		return "unset"
+func (v explicitForkSecretsValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (explicitForkSecretsValidator) ValidateResource(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var buildForkPrs, forkSecrets types.Bool
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("build_fork_prs"), &buildForkPrs)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("forks_receive_secret_env_vars"), &forkSecrets)...)
+
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
-	return fmt.Sprintf("%t", *v)
+	// Unknown means the value comes from an expression that is not resolved yet.
+	// For build_fork_prs there is nothing to check yet; for the secrets toggle it
+	// means the practitioner did configure it, which is all this asks for.
+	if buildForkPrs.IsNull() || buildForkPrs.IsUnknown() || !buildForkPrs.ValueBool() {
+		return
+	}
+
+	if !forkSecrets.IsNull() {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		path.Root("forks_receive_secret_env_vars"),
+		"Set forks_receive_secret_env_vars explicitly when build_fork_prs is true",
+		"build_fork_prs is true, so CircleCI will run pull requests opened from forks of this "+
+			"repository. Whether those runs receive this project's environment variables, secrets "+
+			"and build cache is decided by forks_receive_secret_env_vars, which this configuration "+
+			"does not set.\n\n"+
+			"There is no safe default to fall back on: CircleCI leaves an unset "+
+			"forks_receive_secret_env_vars at true on a private project, so fork pull requests "+
+			"would receive the project's secrets and anyone who can open one could read them. On a "+
+			"public (open source) project the unset value is false.\n\n"+
+			"Set forks_receive_secret_env_vars to false to keep secrets out of fork builds, or to "+
+			"true to state that exposing them is intended.",
+	)
 }
 
 // warnAbandonedProjectSettings reports settings that state managed but the new
@@ -563,7 +610,8 @@ func warnAbandonedProjectSettings(state, plan projectSettingsResourceModel, slug
 		{"build_prs_only", !state.BuildPrsOnly.IsNull(), !plan.BuildPrsOnly.IsNull()},
 		{"disable_ssh", !state.DisableSSH.IsNull(), !plan.DisableSSH.IsNull()},
 		{"forks_receive_secret_env_vars", !state.ForksReceiveSecretEnvVars.IsNull(), !plan.ForksReceiveSecretEnvVars.IsNull()},
-		{"oss", !state.OSS.IsNull(), !plan.OSS.IsNull()},
+		// oss is absent: it is read-only, so it is never managed and can never be
+		// abandoned.
 		{"pr_only_branch_overrides", !state.PROnlyBranchOverrides.IsNull(), !plan.PROnlyBranchOverrides.IsNull()},
 		{"set_github_status", !state.SetGithubStatus.IsNull(), !plan.SetGithubStatus.IsNull()},
 		{"setup_workflows", !state.SetupWorkflows.IsNull(), !plan.SetupWorkflows.IsNull()},

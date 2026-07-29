@@ -76,3 +76,268 @@ func (c *Client) ListRunners(ctx context.Context, params ListRunnersParams) ([]R
 
 // RunnerHost reports the origin this client uses for the runner admin API.
 func (c *Client) RunnerHost() string { return c.runnerHost }
+
+// Runner resource classes, tokens and task counts.
+//
+// The runner admin API (the CircleCI API) serves two competing
+// surfaces for resource classes: the legacy, flat one this client uses
+// (the CircleCI API the CircleCI API mounted at
+// /api/v3/runner/resource and /api/v3/runner/token on the runner host) and a
+// newer JSON:API one (api/v3/the API, mounted at
+// /api/v3/runner/resource-classes on circleci.com, proxied through
+// the API to the API). DESIGN.md records the decision to stay
+// on the legacy surface: it is what CircleCI Server also serves, and the newer
+// one was being actively reshaped. The shapes below are confirmed against the
+// legacy surface's handlers directly, not against circleci-sdk-go or the OpenAPI
+// spec — see DESIGN.md's "Mocks are derived from production service source".
+//
+// circleci-cli's internal/apiclient/runner.go (MIT) covers the same legacy
+// surface and its patterns are cribbed here (route names, the {"items": [...]}
+// envelope, the resource-class/namespace/org-id query parameters), but it is
+// under internal/ upstream and so cannot be imported.
+
+// runnerResourceRoute is the collection route for runner resource classes.
+const runnerResourceRoute = "/api/v3/runner/resource"
+
+// runnerResourceItemRoute addresses one resource class by id. Appending
+// "/force" (see DeleteResourceClass) deletes it even if tokens still reference
+// it.
+const runnerResourceItemRoute = runnerResourceRoute + "/%s"
+
+// runnerTokenRoute is the collection route for runner tokens.
+const runnerTokenRoute = "/api/v3/runner/token"
+
+// runnerTokenItemRoute addresses one token by id.
+const runnerTokenItemRoute = runnerTokenRoute + "/%s"
+
+// runnerTasksRoute answers the count of tasks queued but not yet claimed by a
+// runner, for a resource class.
+const runnerTasksRoute = "/api/v3/runner/tasks"
+
+// runnerTasksRunningRoute answers the count of tasks currently running on a
+// runner, for a resource class.
+const runnerTasksRunningRoute = runnerTasksRoute + "/running"
+
+// ResourceClass is a runner resource class: a named pool of self-hosted runner
+// capacity that jobs target via `resource_class` in their config.
+type ResourceClass struct {
+	ID string `json:"id"`
+	// ResourceClass is the "namespace/name" slug, e.g. "acme/linux".
+	ResourceClass string `json:"resource_class"`
+	Description   string `json:"description"`
+}
+
+// resourceClassItems is the response envelope for a resource class listing.
+// See the runnerItems doc comment on ListRunners for why this matters: the API
+// answers `{"items": [...]}`, not a bare array.
+type resourceClassItems struct {
+	Items []ResourceClass `json:"items"`
+}
+
+// ResourceClassInput is the create body for a runner resource class.
+//
+// OrganizationID is carried here even though the API's create handler
+// (the CircleCI API the API) does not read an
+// org_id from the body at all: it derives the owning organization from
+// resource_class's namespace prefix and the caller's own admin permissions on
+// that namespace. Sending it anyway is harmless (the handler decodes into a
+// struct with only ResourceClass and Description fields, so an unrecognized
+// org_id key is simply ignored) and keeps the field consistent with
+// TokenInput and with organization_id being Required on the Terraform schema.
+type ResourceClassInput struct {
+	OrganizationID string `json:"org_id"`
+	ResourceClass  string `json:"resource_class"`
+	Description    string `json:"description,omitempty"`
+}
+
+// ListResourceClasses returns the resource classes matching namespace and/or
+// orgID. At least one should be set; the API answers HTTP 400 for neither.
+//
+// When both are set, the server checks orgID first and ignores namespace
+// entirely (the CircleCI API the API's switch),
+// so the result is every resource class the organization owns, not the
+// namespace-scoped subset — callers that need an exact "namespace/name" match
+// filter the result themselves rather than relying on the namespace parameter
+// to narrow it.
+func (c *Client) ListResourceClasses(ctx context.Context, namespace, orgID string) ([]ResourceClass, error) {
+	var envelope resourceClassItems
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodGet,
+		c.runnerHost+runnerResourceRoute,
+		httpcl.JSONDecoder(&envelope),
+		httpcl.OptionalQueryParam("namespace", namespace),
+		httpcl.OptionalQueryParam("org-id", orgID),
+	))
+	if err != nil {
+		return nil, err
+	}
+
+	return envelope.Items, nil
+}
+
+// CreateResourceClass creates a runner resource class and returns it as stored.
+func (c *Client) CreateResourceClass(ctx context.Context, input ResourceClassInput) (*ResourceClass, error) {
+	var created ResourceClass
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodPost,
+		c.runnerHost+runnerResourceRoute,
+		httpcl.Body(input),
+		httpcl.JSONDecoder(&created),
+	))
+	if err != nil {
+		return nil, err
+	}
+
+	return &created, nil
+}
+
+// DeleteResourceClass deletes a resource class by id. With force, it deletes
+// even if tokens still reference it; without force, the API answers HTTP 409
+// for a resource class that still has tokens. A missing resource class answers
+// HTTP 404, satisfying IsNotFound — the same status an unauthorized caller gets
+// (the CircleCI API the API: both cases call
+// middleware.AccessDeniedMsg), so absence and a permissions problem cannot be
+// told apart from the status code alone.
+func (c *Client) DeleteResourceClass(ctx context.Context, id string, force bool) error {
+	route := runnerResourceItemRoute
+	if force {
+		route += "/force"
+	}
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodDelete,
+		c.runnerHost+route,
+		httpcl.RouteParams(id),
+	))
+
+	return err
+}
+
+// Token is a runner authentication token: a credential a self-hosted runner
+// agent presents to claim tasks for a resource class.
+type Token struct {
+	ID            string `json:"id"`
+	ResourceClass string `json:"resource_class"`
+	Nickname      string `json:"nickname"`
+	CreatedAt     string `json:"created_at"`
+	// Token is the secret value. It is populated only in CreateToken's response;
+	// ListTokens omits the field entirely rather than sending an empty string
+	// (the CircleCI API tokenListHandler calls the API(r, "") for every
+	// list item, and the field is tagged `json:"token,omitempty"`), because the
+	// runner admin API hands out a token's secret exactly once, at creation, and
+	// never discloses it again.
+	Token string `json:"token,omitempty"`
+}
+
+// tokenItems is the response envelope for a token listing.
+type tokenItems struct {
+	Items []Token `json:"items"`
+}
+
+// TokenInput is the create body for a runner token.
+//
+// OrganizationID is carried for the same reason as on ResourceClassInput:
+// the API's create handler (the CircleCI API the API)
+// does not read an org_id from the body and instead derives the owning
+// organization from resource_class's namespace, but the extra field is
+// harmlessly ignored rather than rejected.
+type TokenInput struct {
+	OrganizationID string `json:"org_id"`
+	ResourceClass  string `json:"resource_class"`
+	Nickname       string `json:"nickname"`
+}
+
+// CreateToken creates a runner token and returns it, including the secret
+// value. This is the only response that ever carries the secret — see Token's
+// doc comment.
+func (c *Client) CreateToken(ctx context.Context, input TokenInput) (*Token, error) {
+	var created Token
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodPost,
+		c.runnerHost+runnerTokenRoute,
+		httpcl.Body(input),
+		httpcl.JSONDecoder(&created),
+	))
+	if err != nil {
+		return nil, err
+	}
+
+	return &created, nil
+}
+
+// ListTokens returns the tokens for a resource class. The API requires
+// resourceClass to be non-empty, answering HTTP 400 otherwise.
+func (c *Client) ListTokens(ctx context.Context, resourceClass string) ([]Token, error) {
+	var envelope tokenItems
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodGet,
+		c.runnerHost+runnerTokenRoute,
+		httpcl.JSONDecoder(&envelope),
+		httpcl.QueryParam("resource-class", resourceClass),
+	))
+	if err != nil {
+		return nil, err
+	}
+
+	return envelope.Items, nil
+}
+
+// DeleteToken deletes a token by id. A missing token answers HTTP 404,
+// satisfying IsNotFound — the same status an unauthorized caller gets
+// (the CircleCI API the API calls middleware.AccessDeniedMsg
+// when the token's namespace cannot be resolved).
+func (c *Client) DeleteToken(ctx context.Context, id string) error {
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodDelete,
+		c.runnerHost+runnerTokenItemRoute,
+		httpcl.RouteParams(id),
+	))
+
+	return err
+}
+
+// UnclaimedTaskCount returns the number of tasks queued for resourceClass that
+// no runner has claimed yet. A resource class the caller cannot resolve
+// answers HTTP 404, satisfying IsNotFound.
+func (c *Client) UnclaimedTaskCount(ctx context.Context, resourceClass string) (int, error) {
+	var resp struct {
+		UnclaimedTaskCount int `json:"unclaimed_task_count"`
+	}
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodGet,
+		c.runnerHost+runnerTasksRoute,
+		httpcl.JSONDecoder(&resp),
+		httpcl.QueryParam("resource-class", resourceClass),
+	))
+	if err != nil {
+		return 0, err
+	}
+
+	return resp.UnclaimedTaskCount, nil
+}
+
+// RunningTaskCount returns the number of tasks currently running on runners in
+// resourceClass. A resource class the caller cannot resolve answers HTTP 404,
+// satisfying IsNotFound.
+func (c *Client) RunningTaskCount(ctx context.Context, resourceClass string) (int, error) {
+	var resp struct {
+		RunningRunnerTasks int `json:"running_runner_tasks"`
+	}
+
+	_, err := c.raw.Call(ctx, httpcl.NewRequest(
+		http.MethodGet,
+		c.runnerHost+runnerTasksRunningRoute,
+		httpcl.JSONDecoder(&resp),
+		httpcl.QueryParam("resource-class", resourceClass),
+	))
+	if err != nil {
+		return 0, err
+	}
+
+	return resp.RunningRunnerTasks, nil
+}

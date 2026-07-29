@@ -35,7 +35,7 @@ data "circleci_project_environment_variable" "test" {
 // correct value here.
 func TestProjectEnvVarDataSourceUnit_Read(t *testing.T) {
 	api, host := newFakeEnvVarAPI(t)
-	api.seed(testEnvVarProjectSlug, testEnvVarName, "a-fairly-long-secret-value", "2024-01-02T03:04:05Z")
+	api.seed(testEnvVarProjectSlug, testEnvVarName, "a-fairly-long-secret-value", "2024-01-02T03:04:05.000Z")
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,

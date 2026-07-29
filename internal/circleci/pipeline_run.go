@@ -11,8 +11,8 @@ import (
 // Pipeline run routes.
 //
 // "Pipeline" already names a pipeline *definition* in this provider (see
-// pipeline_definition.go and the circleci_pipeline resource/data source,
-// which predate this file and wrap the legacy circleci-sdk-go client). The
+// pipeline_definition.go and the circleci_pipeline resource/data source, which
+// predate this file). The
 // v3 API renames the run concept to "run" for exactly this reason; this
 // provider follows that naming for anything new rather than overloading
 // "pipeline" further; see DESIGN.md.

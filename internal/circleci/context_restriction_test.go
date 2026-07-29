@@ -5,6 +5,7 @@ package circleci_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -113,5 +114,103 @@ func TestListContextRestrictionsEscapesRouteParams(t *testing.T) {
 	wantURI := "/api/v2/context/ctx%2F..%2Fevil/restrictions"
 	if got := (*seen)[0].rawURI; got != wantURI {
 		t.Errorf("raw request URI = %q, want %q", got, wantURI)
+	}
+}
+
+func TestCreateContextRestriction(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	client, seen := newListServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		// the API's postContextRestrictions (context_restriction_post.go)
+		// response struct has no "name" field at all.
+		writeListJSON(w, `{"context_id":"`+testRestrictionContextID+`","id":"r1",`+
+			`"restriction_type":"project","restriction_value":"proj-1","project_id":"proj-1"}`)
+	})
+
+	got, err := client.CreateContextRestriction(context.Background(), testRestrictionContextID, circleci.CreateContextRestrictionRequest{
+		RestrictionType:  circleci.ContextRestrictionTypeProject,
+		RestrictionValue: "proj-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateContextRestriction returned error: %v", err)
+	}
+	if got.ID != "r1" || got.ProjectID != "proj-1" || got.Name != "" {
+		t.Errorf("CreateContextRestriction = %+v, want id r1, project_id proj-1, and an empty name", got)
+	}
+
+	if len(*seen) != 1 {
+		t.Fatalf("request count = %d, want 1", len(*seen))
+	}
+	wantPath := "/api/v2/context/" + testRestrictionContextID + "/restrictions"
+	if got := (*seen)[0]; got.method != http.MethodPost || got.path != wantPath {
+		t.Errorf("request = %s %s, want POST %s", got.method, got.path, wantPath)
+	}
+	if gotBody["restriction_type"] != "project" || gotBody["restriction_value"] != "proj-1" {
+		t.Errorf("request body = %+v, want restriction_type=project and restriction_value=proj-1", gotBody)
+	}
+}
+
+func TestCreateContextRestrictionAPIError(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeListError(w, http.StatusConflict, "The restriction you're trying to add already exists.")
+	})
+
+	_, err := client.CreateContextRestriction(context.Background(), testRestrictionContextID, circleci.CreateContextRestrictionRequest{
+		RestrictionType:  circleci.ContextRestrictionTypeExpression,
+		RestrictionValue: "true",
+	})
+	if err == nil {
+		t.Fatal("CreateContextRestriction returned no error for a 409, want one")
+	}
+	if detail := circleci.Detail(err); detail == "" {
+		t.Error("Detail() = \"\", want the server message")
+	}
+}
+
+func TestDeleteContextRestriction(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeListJSON(w, `{"message":"Context restriction deleted."}`)
+	})
+
+	if err := client.DeleteContextRestriction(context.Background(), testRestrictionContextID, "r1"); err != nil {
+		t.Fatalf("DeleteContextRestriction returned error: %v", err)
+	}
+
+	if len(*seen) != 1 {
+		t.Fatalf("request count = %d, want 1", len(*seen))
+	}
+	wantPath := "/api/v2/context/" + testRestrictionContextID + "/restrictions/r1"
+	if got := (*seen)[0]; got.method != http.MethodDelete || got.path != wantPath {
+		t.Errorf("request = %s %s, want DELETE %s", got.method, got.path, wantPath)
+	}
+}
+
+// TestDeleteContextRestrictionMissingContextAnswers403 documents the same
+// the context-resolution step anti-enumeration behavior as context_test.go's
+// TestDeleteContextMissingAnswers403: a restriction on a context that no
+// longer exists cannot be told apart from an unauthorized request.
+func TestDeleteContextRestrictionMissingContextAnswers403(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeListError(w, http.StatusForbidden, "Forbidden")
+	})
+
+	err := client.DeleteContextRestriction(context.Background(), "does-not-exist", "r1")
+	if circleci.IsNotFound(err) {
+		t.Error("IsNotFound(err) = true for a 403, want false")
+	}
+	if !circleci.IsUnauthorized(err) {
+		t.Error("IsUnauthorized(err) = false for a 403, want true")
 	}
 }

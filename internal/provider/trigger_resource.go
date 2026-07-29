@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/common"
-	"github.com/CircleCI-Public/circleci-sdk-go/trigger"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -21,7 +19,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
+
+// triggerTypeName is the Terraform type name, used in the Cloud-only
+// diagnostic (see cloud_only.go).
+const triggerTypeName = "circleci_trigger"
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -58,7 +62,7 @@ func NewTriggerResource() resource.Resource {
 
 // triggerResource is the resource implementation.
 type triggerResource struct {
-	client *trigger.TriggerService
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -69,7 +73,9 @@ func (r *triggerResource) Metadata(_ context.Context, req resource.MetadataReque
 // Schema defines the schema for the resource.
 func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a CircleCI pipeline trigger. Triggers define when and how a pipeline runs — via GitHub events, webhooks, or a cron schedule.",
+		MarkdownDescription: "Manages a CircleCI pipeline trigger. Triggers define when and how a pipeline runs — via GitHub events, webhooks, or a cron schedule.\n\n" +
+			"!> **CircleCI Cloud only.** Triggers live under `/api/v2` but are served by the public API " +
+			"service, which CircleCI Server does not route.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the trigger.",
@@ -178,6 +184,10 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 
 // Create creates the resource and sets the initial Terraform state.
 func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	if !requireCloud(r.client, triggerTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	// Retrieve values from plan
 	var circleCiTerrformTriggerResource triggerResourceModel
 	diags := req.Plan.Get(ctx, &circleCiTerrformTriggerResource)
@@ -269,7 +279,13 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 			)
 			return
 		}
-		if circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.IsNull() {
+		// This attribute is Optional+Computed (Computed lets Read preserve the
+		// configured alias instead of the API-resolved UUID), so leaving it
+		// out of config makes it Unknown here, not Null. IsNull() alone missed
+		// that and let a schedule trigger with no attribution actor reach the
+		// API instead of failing with this diagnostic.
+		if circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.IsNull() ||
+			circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.IsUnknown() {
 			resp.Diagnostics.AddError(
 				"Error creating CircleCI trigger",
 				"CircleCI trigger with schedule provider requires event_source_schedule_attribution_actor",
@@ -284,30 +300,21 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// New Webhook
-	newWebHook := common.Webhook{
-		Url:    circleCiTerrformTriggerResource.EventSourceWebHookUrl.ValueString(),
-		Sender: circleCiTerrformTriggerResource.EventSourceWebHookSender.ValueString(),
-	}
-
-	// New Repo
-	newRepo := common.Repo{
-		FullName:   "",
-		ExternalId: circleCiTerrformTriggerResource.EventSourceRepoExternalId.ValueString(),
-	}
-
-	// New Schedule
-	newSchedule := common.Schedule{
-		CronExpression:   circleCiTerrformTriggerResource.EventSourceScheduleCronExpression.ValueString(),
-		AttributionActor: circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.ValueString(),
-	}
-
-	// New EventSource
-	newEventSource := common.EventSource{
-		Provider: circleCiTerrformTriggerResource.EventSourceProvider.ValueString(),
-		Repo:     newRepo,
-		Webhook:  newWebHook,
-		Schedule: newSchedule,
+	newEventSource := circleci.TriggerEventSourceInput{Provider: provider}
+	switch provider {
+	case "github_app", "github_server":
+		newEventSource.Repo = &circleci.RepoInput{
+			ExternalID: circleCiTerrformTriggerResource.EventSourceRepoExternalId.ValueString(),
+		}
+	case "webhook":
+		newEventSource.Webhook = &circleci.TriggerWebhookInput{
+			Sender: circleCiTerrformTriggerResource.EventSourceWebHookSender.ValueString(),
+		}
+	case "schedule":
+		newEventSource.Schedule = &circleci.TriggerScheduleInput{
+			CronExpression:   circleCiTerrformTriggerResource.EventSourceScheduleCronExpression.ValueString(),
+			AttributionActor: circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.ValueString(),
+		}
 	}
 
 	parameters, diags := triggerParametersToMap(ctx, circleCiTerrformTriggerResource.Parameters)
@@ -318,7 +325,7 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 
 	// New Trigger
 	disabled := circleCiTerrformTriggerResource.Disabled.ValueBool()
-	newTrigger := trigger.Trigger{
+	newTrigger := circleci.CreateTriggerInput{
 		EventName:   circleCiTerrformTriggerResource.EventName.ValueString(),
 		CheckoutRef: circleCiTerrformTriggerResource.CheckoutRef.ValueString(),
 		ConfigRef:   circleCiTerrformTriggerResource.ConfigRef.ValueString(),
@@ -329,16 +336,16 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	// Create new Trigger
-	newReturnedTrigger, err := r.client.Create(
+	newReturnedTrigger, err := r.client.CreateTrigger(
 		ctx,
-		newTrigger,
 		circleCiTerrformTriggerResource.ProjectId.ValueString(),
 		circleCiTerrformTriggerResource.PipelineId.ValueString(),
+		newTrigger,
 	)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI trigger",
-			"Could not create CircleCI trigger, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -359,10 +366,10 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 		circleCiTerrformTriggerResource.EventSourceRepoFullName = types.StringValue(newReturnedTrigger.EventSource.Repo.FullName)
 	}
 
-	if newReturnedTrigger.EventSource.Repo.ExternalId != "" {
-		circleCiTerrformTriggerResource.EventSourceRepoExternalId = types.StringValue(newReturnedTrigger.EventSource.Repo.ExternalId)
+	if newReturnedTrigger.EventSource.Repo.ExternalID != "" {
+		circleCiTerrformTriggerResource.EventSourceRepoExternalId = types.StringValue(newReturnedTrigger.EventSource.Repo.ExternalID)
 	}
-	circleCiTerrformTriggerResource.EventSourceWebHookUrl = types.StringValue(newReturnedTrigger.EventSource.Webhook.Url)
+	circleCiTerrformTriggerResource.EventSourceWebHookUrl = types.StringValue(newReturnedTrigger.EventSource.Webhook.URL)
 	if newReturnedTrigger.EventPreset != "" {
 		circleCiTerrformTriggerResource.EventPreset = types.StringValue(newReturnedTrigger.EventPreset)
 	}
@@ -380,18 +387,18 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 		circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor = types.StringNull()
 	}
 
-	parametersState, paramDiags := triggerParametersFromAPI(newReturnedTrigger.Parameters)
+	parametersState, paramDiags := triggerParametersFromAPI(newReturnedTrigger.ParameterStrings())
 	resp.Diagnostics.Append(paramDiags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	circleCiTerrformTriggerResource.Parameters = parametersState
 
-	circleCiTerrformTriggerResource.Disabled = types.BoolValue(*newReturnedTrigger.Disabled)
+	circleCiTerrformTriggerResource.Disabled = types.BoolValue(newReturnedTrigger.IsDisabled())
 
-	readTrigger, err := r.client.Get(ctx, circleCiTerrformTriggerResource.ProjectId.ValueString(), newReturnedTrigger.ID)
+	readTrigger, err := r.client.GetTrigger(ctx, circleCiTerrformTriggerResource.ProjectId.ValueString(), newReturnedTrigger.ID)
 	if err != nil {
-		resp.Diagnostics.AddError("Failed retrieving", err.Error())
+		resp.Diagnostics.AddError("Failed retrieving", circleci.Detail(err))
 		// Cleanup may be required here (e.g., Delete the resource if it failed to settle)
 		return
 	}
@@ -412,6 +419,10 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 
 // Read refreshes the Terraform state with the latest data.
 func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	if !requireCloud(r.client, triggerTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var triggerState triggerResourceModel
 
 	resp.Diagnostics.Append(req.State.Get(ctx, &triggerState)...)
@@ -430,16 +441,20 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	readTrigger, err := r.client.Get(ctx, triggerState.ProjectId.ValueString(), triggerState.Id.ValueString())
+	readTrigger, err := r.client.GetTrigger(ctx, triggerState.ProjectId.ValueString(), triggerState.Id.ValueString())
+	// A trigger deleted outside Terraform must drop out of state so the next
+	// plan recreates it, rather than becoming a permanent refresh error.
+	// Absence is tested with circleci.IsNotFound rather than by
+	// string-matching the error: matching "404" (or "not found") anywhere in
+	// err.Error() also matches a 5xx whose body happens to mention it, which
+	// silently removed live resources from state. This replaces the former
+	// isApiNotFoundError helper, which did exactly that string match.
+	if circleci.IsNotFound(err) {
+		resp.State.RemoveResource(ctx)
+		return
+	}
 	if err != nil {
-		if isApiNotFoundError(err) {
-			// This is the line that must be hit when the resource is gone.
-			resp.State.RemoveResource(ctx)
-			return // Successfully removed resource from state
-		}
-
-		// Standard error return path
-		resp.Diagnostics.AddError("Error Reading Trigger", fmt.Sprintf("API error during read: %s", err.Error()))
+		resp.Diagnostics.AddError("Error Reading Trigger", fmt.Sprintf("API error during read: %s", circleci.Detail(err)))
 		return
 	}
 
@@ -470,7 +485,7 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 	} else {
 		triggerState.EventSourceRepoFullName = types.StringValue(readTrigger.EventSource.Repo.FullName)
 	}
-	triggerState.EventSourceWebHookUrl = types.StringValue(readTrigger.EventSource.Webhook.Url)
+	triggerState.EventSourceWebHookUrl = types.StringValue(readTrigger.EventSource.Webhook.URL)
 	switch triggerState.EventSourceProvider.ValueString() {
 	case "webhook":
 		triggerState.EventSourceWebHookSender = types.StringValue(readTrigger.EventSource.Webhook.Sender)
@@ -489,10 +504,10 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 		triggerState.EventPreset = types.StringValue(readTrigger.EventPreset)
 	}
 
-	if readTrigger.EventSource.Repo.ExternalId == "" {
+	if readTrigger.EventSource.Repo.ExternalID == "" {
 		triggerState.EventSourceRepoExternalId = types.StringNull()
 	} else {
-		triggerState.EventSourceRepoExternalId = types.StringValue(readTrigger.EventSource.Repo.ExternalId)
+		triggerState.EventSourceRepoExternalId = types.StringValue(readTrigger.EventSource.Repo.ExternalID)
 	}
 
 	if readTrigger.EventSource.Schedule.CronExpression == "" {
@@ -504,20 +519,16 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 	// Preserve the prior state value for attribution_actor so aliases like "system" don't drift
 	// to their resolved UUID. Only set from the API when the state has no value (e.g. import).
 	if triggerState.EventSourceScheduleAttributionActor.IsNull() || triggerState.EventSourceScheduleAttributionActor.IsUnknown() {
-		if readTrigger.EventSource.Schedule.AttributionActor.Id == "" {
+		if readTrigger.EventSource.Schedule.AttributionActor.ID == "" {
 			triggerState.EventSourceScheduleAttributionActor = types.StringNull()
 		} else {
-			triggerState.EventSourceScheduleAttributionActor = types.StringValue(readTrigger.EventSource.Schedule.AttributionActor.Id)
+			triggerState.EventSourceScheduleAttributionActor = types.StringValue(readTrigger.EventSource.Schedule.AttributionActor.ID)
 		}
 	}
 
-	if readTrigger.Disabled == nil || !*readTrigger.Disabled {
-		triggerState.Disabled = types.BoolValue(false)
-	} else {
-		triggerState.Disabled = types.BoolValue(true)
-	}
+	triggerState.Disabled = types.BoolValue(readTrigger.IsDisabled())
 
-	parametersState, paramDiags := triggerParametersFromAPI(readTrigger.Parameters)
+	parametersState, paramDiags := triggerParametersFromAPI(readTrigger.ParameterStrings())
 	resp.Diagnostics.Append(paramDiags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -534,6 +545,10 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 
 // Update updates the resource and sets the updated Terraform state on success.
 func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	if !requireCloud(r.client, triggerTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var state triggerResourceModel
 
 	// Read Terraform plan data into the model
@@ -568,48 +583,41 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// Prepare the new trigger
-	newWebHook := common.Webhook{
-		Url:    state.EventSourceWebHookUrl.ValueString(),
-		Sender: state.EventSourceWebHookSender.ValueString(),
-	}
-	// New Repo
-	newRepo := common.Repo{
-		FullName:   "",
-		ExternalId: state.EventSourceRepoExternalId.ValueString(),
-	}
-	// New Schedule
-	newSchedule := common.Schedule{
-		CronExpression:   state.EventSourceScheduleCronExpression.ValueString(),
-		AttributionActor: state.EventSourceScheduleAttributionActor.ValueString(),
-	}
-
-	// New EventSource
-	newEventSource := common.EventSource{
-		Provider: state.EventSourceProvider.ValueString(),
-		Repo:     newRepo,
-		Webhook:  newWebHook,
-		Schedule: newSchedule,
+	// Prepare the new event source. Unlike create, there is no repo field at
+	// all here: the API's handler_update.go's
+	// updateRequestEventSource has none, so a trigger's event source
+	// repository is immutable after creation regardless of provider.
+	newEventSource := circleci.UpdateTriggerEventSourceInput{Provider: provider}
+	switch provider {
+	case "webhook":
+		newEventSource.Webhook = &circleci.TriggerWebhookInput{
+			Sender: state.EventSourceWebHookSender.ValueString(),
+		}
+	case "schedule":
+		newEventSource.Schedule = &circleci.TriggerScheduleInput{
+			CronExpression:   state.EventSourceScheduleCronExpression.ValueString(),
+			AttributionActor: state.EventSourceScheduleAttributionActor.ValueString(),
+		}
 	}
 
 	// New Trigger
 	disabled := state.Disabled.ValueBool()
-	updates := trigger.Trigger{
+	updates := circleci.UpdateTriggerInput{
 		EventName:   state.EventName.ValueString(),
 		CheckoutRef: state.CheckoutRef.ValueString(),
 		ConfigRef:   state.ConfigRef.ValueString(),
-		EventSource: newEventSource,
+		EventSource: &newEventSource,
 		EventPreset: state.EventPreset.ValueString(),
 		Disabled:    &disabled,
 		Parameters:  parameters,
 	}
 
 	// update the trigger
-	updatedTrigger, err := r.client.Update(ctx, updates, state.ProjectId.ValueString(), state.Id.ValueString())
+	updatedTrigger, err := r.client.UpdateTrigger(ctx, state.ProjectId.ValueString(), state.Id.ValueString(), updates)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Update CircleCI trigger with id "+state.Id.ValueString()+" and project id "+state.ProjectId.ValueString(),
-			err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -624,12 +632,12 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 	} else {
 		state.EventSourceRepoFullName = types.StringValue(updatedTrigger.EventSource.Repo.FullName)
 	}
-	if updatedTrigger.EventSource.Repo.ExternalId == "" {
+	if updatedTrigger.EventSource.Repo.ExternalID == "" {
 		state.EventSourceRepoExternalId = types.StringNull()
 	} else {
-		state.EventSourceRepoExternalId = types.StringValue(updatedTrigger.EventSource.Repo.ExternalId)
+		state.EventSourceRepoExternalId = types.StringValue(updatedTrigger.EventSource.Repo.ExternalID)
 	}
-	state.EventSourceWebHookUrl = types.StringValue(updatedTrigger.EventSource.Webhook.Url)
+	state.EventSourceWebHookUrl = types.StringValue(updatedTrigger.EventSource.Webhook.URL)
 	if updatedTrigger.EventSource.Schedule.CronExpression != "" {
 		state.EventSourceScheduleCronExpression = types.StringValue(updatedTrigger.EventSource.Schedule.CronExpression)
 	} else {
@@ -637,8 +645,8 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	// Preserve plan value for schedule triggers; API may transform aliases like "system" → UUID.
 	if state.EventSourceProvider.ValueString() != "schedule" {
-		if updatedTrigger.EventSource.Schedule.AttributionActor.Id != "" {
-			state.EventSourceScheduleAttributionActor = types.StringValue(updatedTrigger.EventSource.Schedule.AttributionActor.Id)
+		if updatedTrigger.EventSource.Schedule.AttributionActor.ID != "" {
+			state.EventSourceScheduleAttributionActor = types.StringValue(updatedTrigger.EventSource.Schedule.AttributionActor.ID)
 		} else {
 			state.EventSourceScheduleAttributionActor = types.StringNull()
 		}
@@ -655,7 +663,7 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	state.CreatedAt = types.StringValue(updatedTrigger.CreatedAt)
 
-	parametersState, paramDiags := triggerParametersFromAPI(updatedTrigger.Parameters)
+	parametersState, paramDiags := triggerParametersFromAPI(updatedTrigger.ParameterStrings())
 	resp.Diagnostics.Append(paramDiags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -676,12 +684,13 @@ func (r *triggerResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	// Delete existing order
-	err := r.client.Delete(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
-	if err != nil {
+	// A trigger already gone is the desired end state, so absence is not an
+	// error.
+	err := r.client.DeleteTrigger(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
-			"Error Deleting CircleCi trigger",
-			"Could not delete trigger, unexpected error: "+err.Error(),
+			"Error Deleting CircleCI trigger",
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -689,51 +698,54 @@ func (r *triggerResource) Delete(ctx context.Context, req resource.DeleteRequest
 
 // Configure adds the provider configured client to the resource.
 func (r *triggerResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *circleciClient, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	r.client = client.TriggerService
+	r.client = client
 }
 
+// ImportState imports a trigger from a "project_id/pipeline_id/trigger_id" address.
+//
+// The pipeline definition id has to be part of the import address because **the API
+// never returns it.** A trigger is *created* under a definition
+// (POST .../pipeline-definitions/{pipeline_definition_id}/triggers) but *read* under
+// the project (GET /projects/{project_id}/triggers/{trigger_id}), and the response
+// body carries no reference back to the definition — see circleci.Trigger.
+//
+// The import id used to be just "project_id/trigger_id", which meant `pipeline_id`
+// (a Required attribute) stayed null in state after every import. The next plan then
+// saw a Required attribute missing and there was nothing the practitioner could do
+// short of editing state by hand. Asking for the third segment is the only way to
+// make import produce usable state.
 func (r *triggerResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	// Expected format: "PROJECT_ID/TRIGGER_ID"
-	parts := strings.SplitN(req.ID, "/", 2)
+	const wantSegments = 3
 
-	if len(parts) != 2 {
-		resp.Diagnostics.AddError(
-			"Invalid Import ID Format",
-			fmt.Sprintf("Expected import ID format: 'project_id/trigger_id'. Got: %s", req.ID),
+	parts := strings.Split(req.ID, "/")
+
+	if len(parts) != wantSegments || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		detail := fmt.Sprintf(
+			"Expected import ID format: 'project_id/pipeline_id/trigger_id'. Got: %s", req.ID,
 		)
+		if len(parts) == 2 {
+			// The old two-segment form. Say so explicitly: it used to be accepted, and
+			// silently producing state with a null pipeline_id is what this replaced.
+			detail += "\n\nEarlier provider versions accepted 'project_id/trigger_id', but that " +
+				"left pipeline_id unset because the API does not return the pipeline definition " +
+				"a trigger belongs to. Add the pipeline definition id as the middle segment."
+		}
+
+		resp.Diagnostics.AddError("Invalid Import ID Format", detail)
+
 		return
 	}
 
-	projectId := parts[0]
-	triggerId := parts[1]
+	projectID, pipelineID, triggerID := parts[0], parts[1], parts[2]
 
-	resp.Diagnostics.Append(resp.State.SetAttribute(
-		ctx, path.Root("id"), triggerId,
-	)...)
-
-	resp.Diagnostics.Append(resp.State.SetAttribute(
-		ctx, path.Root("project_id"), projectId,
-	)...)
-
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), triggerID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_id"), projectID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("pipeline_id"), pipelineID)...)
 }
 
 func isValidEventPreset(eventPreset string) bool {
@@ -745,15 +757,6 @@ func isValidEventPreset(eventPreset string) bool {
 	}
 }
 
-func isApiNotFoundError(err error) bool {
-	// This is pseudo-code; replace with your actual API client's error inspection
-	if apiErr, ok := err.(interface{ HTTPStatusCode() int }); ok {
-		return apiErr.HTTPStatusCode() == 404
-	}
-	// Alternatively, check the error message string if the status is not exposed
-	return strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found")
-}
-
 func triggerParametersToMap(ctx context.Context, parameters types.Map) (map[string]string, diag.Diagnostics) {
 	if parameters.IsNull() || parameters.IsUnknown() {
 		return nil, nil
@@ -763,7 +766,7 @@ func triggerParametersToMap(ctx context.Context, parameters types.Map) (map[stri
 	return out, diags
 }
 
-// Forces replacement when parameters are cleared; PATCH can't unset them (SDK strips empty maps via omitempty).
+// Forces replacement when parameters are cleared; PATCH can't unset them (the API's settings blob is only ever replaced wholesale when non-nil, so an empty map cannot clear a previously-set one).
 type triggerParametersRequiresReplaceIfCleared struct{}
 
 func (m triggerParametersRequiresReplaceIfCleared) Description(_ context.Context) string {

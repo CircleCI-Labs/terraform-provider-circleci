@@ -149,7 +149,10 @@ func TestProjectSettingsIsEmpty(t *testing.T) {
 		want     bool
 	}{
 		{name: "nothing set", settings: circleci.ProjectSettings{}, want: true},
-		{name: "a false toggle counts as set", settings: circleci.ProjectSettings{OSS: &value}},
+		// OSS deliberately cannot be the example here: it is never marshalled, so a
+		// settings object holding only OSS genuinely has nothing to send. See
+		// TestProjectSettingsIsEmptyIgnoresOSS.
+		{name: "a false toggle counts as set", settings: circleci.ProjectSettings{BuildForkPrs: &value}},
 		{name: "build_prs_only counts as set", settings: circleci.ProjectSettings{BuildPrsOnly: &value}},
 		{name: "an empty override list counts as set", settings: circleci.ProjectSettings{PROnlyBranchOverrides: &none}},
 	}
@@ -197,4 +200,68 @@ func newProjectSettingsServer(t *testing.T, status int, body string) (*httptest.
 	t.Cleanup(srv.Close)
 
 	return srv, calls
+}
+
+// TestProjectSettingsNeverSendsOSS is the regression test for a bug that every
+// mocked test in this repository passed while the real API rejected every write.
+//
+// oss is returned by GET /project/{slug}/settings, and CircleCI's published API
+// reference lists it in the PATCH request body, so it looks writable. It is not.
+// Verified against the live API:
+//
+//	PATCH .../settings  {"advanced":{"oss":false}}
+//	→ 400 {"message":"Unexpected field 'advanced.oss'."}
+//
+// and the identical request without oss answers 200. Because the field is
+// rejected at the envelope level the whole request fails, so one unwritable field
+// broke project creation and every settings update.
+//
+// The fake accepted oss, which is exactly why 894 passing tests could not see it.
+// This test asserts on the marshalled bytes instead of on a fake's behaviour.
+func TestProjectSettingsNeverSendsOSS(t *testing.T) {
+	t.Parallel()
+
+	yes := true
+
+	settings := circleci.ProjectSettings{
+		OSS:             &yes,
+		SetGithubStatus: &yes,
+	}
+
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshalling settings: %v", err)
+	}
+
+	if strings.Contains(string(body), "oss") {
+		t.Errorf("marshalled settings contain oss: %s\n\n"+
+			"The API answers 400 \"Unexpected field 'advanced.oss'.\" and rejects the whole "+
+			"request, so this breaks every project create and settings update. oss is "+
+			"read-only on v2.", body)
+	}
+
+	// The rest of the object must still be sent, or dropping oss would have broken
+	// writes a different way.
+	if !strings.Contains(string(body), `"set_github_status":true`) {
+		t.Errorf("marshalled settings lost set_github_status: %s", body)
+	}
+}
+
+// TestProjectSettingsIsEmptyIgnoresOSS covers the consequence of the above: a
+// settings object holding only oss has nothing to send, so it must report empty.
+// Reporting non-empty would send {"advanced":{}} and earn a different 400
+// ("No JSON fields found.").
+func TestProjectSettingsIsEmptyIgnoresOSS(t *testing.T) {
+	t.Parallel()
+
+	yes := true
+
+	if !(circleci.ProjectSettings{OSS: &yes}).IsEmpty() {
+		t.Error("settings holding only OSS report non-empty; OSS is never sent, so the " +
+			"request body would be {\"advanced\":{}} and the API would reject it")
+	}
+
+	if (circleci.ProjectSettings{OSS: &yes, SetGithubStatus: &yes}).IsEmpty() {
+		t.Error("settings with a sendable field report empty")
+	}
 }

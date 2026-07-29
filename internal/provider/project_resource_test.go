@@ -341,12 +341,18 @@ func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
 }
 
 func testAccProjectResourceConfig(name, organization_id string, auto_cancel_builds bool, build_forked_prs bool) string {
+	// forks_receive_secret_env_vars is named explicitly because the provider now
+	// requires it whenever build_fork_prs is true: an unset value defaults to true
+	// on a private project, which would give fork pull requests this project's
+	// secrets. false is the choice a test fixture wants.
 	return fmt.Sprintf(`
 resource "circleci_project" "test_project" {
   name 				 = %[1]q
   organization_id 	 = %[2]q
-  auto_cancel_builds = %[3]t 
+  auto_cancel_builds = %[3]t
   build_fork_prs     = %[4]t
+
+  forks_receive_secret_env_vars = false
 }
 `, name, organization_id, auto_cancel_builds, build_forked_prs)
 }

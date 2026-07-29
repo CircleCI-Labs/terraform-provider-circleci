@@ -7,12 +7,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // The runner API serves the two task counts from two endpoints
@@ -43,7 +44,7 @@ func NewRunnerTaskCountsDataSource() datasource.DataSource {
 
 // runnerTaskCountsDataSource is the data source implementation.
 type runnerTaskCountsDataSource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -95,49 +96,38 @@ func (d *runnerTaskCountsDataSource) Read(ctx context.Context, req datasource.Re
 
 	resourceClass := config.ResourceClass.ValueString()
 
-	// The SDK returns untyped errors, so a 404 for an unknown resource class
-	// cannot be told apart from any other failure on either call.
-	unclaimed, err := d.client.GetUnclaimedTaskCount(ctx, resourceClass)
+	unclaimed, err := d.client.UnclaimedTaskCount(ctx, resourceClass)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner unclaimed task count",
-			fmt.Sprintf("Could not read the unclaimed task count for resource class %s: %s", resourceClass, err.Error()),
+			fmt.Sprintf("Could not read the unclaimed task count for resource class %s: %s", resourceClass, circleci.Detail(err)),
 		)
 
 		return
 	}
 
-	running, err := d.client.GetRunningTaskCount(ctx, resourceClass)
+	running, err := d.client.RunningTaskCount(ctx, resourceClass)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner running task count",
-			fmt.Sprintf("Could not read the running task count for resource class %s: %s", resourceClass, err.Error()),
+			fmt.Sprintf("Could not read the running task count for resource class %s: %s", resourceClass, circleci.Detail(err)),
 		)
 
 		return
 	}
 
-	config.UnclaimedTaskCount = types.Int64Value(int64(unclaimed.UnclaimedTaskCount))
-	config.RunningTaskCount = types.Int64Value(int64(running.RunningRunnerTasks))
+	config.UnclaimedTaskCount = types.Int64Value(int64(unclaimed))
+	config.RunningTaskCount = types.Int64Value(int64(running))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &config)...)
 }
 
 // Configure adds the provider configured client to the data source.
 func (d *runnerTaskCountsDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.RunnerService
+	d.client = client
 }

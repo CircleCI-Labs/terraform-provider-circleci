@@ -9,40 +9,36 @@ asserted: if a route is missing here, nobody has looked at it.
 
 ## How this inventory was built, and what it does not cover
 
-Routes were taken from the **routes served in the API**, not
-from the published OpenAPI spec. The spec omits routes that exist (group membership
-and the GitHub App repository routes are both absent from it) and describes some
-that are never routed (`DeleteGroupsProjectGrant` is defined in the spec and
-implemented in CIAM, but the API never routes it, so it 404s).
+Routes were taken from **what the API actually serves**, not only from the published
+OpenAPI spec, because the two do not match in either direction:
 
-Sources:
+- The spec **omits routes that exist** — group membership and the GitHub App repository
+ routes are both absent from it, which is why earlier research wrongly concluded group
+ membership could not be managed as code.
+- The spec **describes routes that are never served** — `.../projects/{project_id}/groups/{group_id}`
+ is specified, and implemented, but not reachable. That is why
+ `circleci_project_group`'s Delete drops state with a warning instead of erroring.
 
-| Surface | Source of truth |
-|---|---|
-| v2 routes served by the API | the CircleCI API → `the CircleCI API`, the `r.GET`/`r.POST`/… table |
-| All v3 routes | the CircleCI API → `v3/api.go`, `Add()` plus `Config.simple()` and the two named route helpers |
+Coverage was therefore checked against the routes CircleCI's API services actually
+register, cross-checked against the published v2 spec (79 unique paths, 114
+method+path combinations, none marked deprecated) and against each API's own
+behaviour for status codes and field names.
 
-| The published v2 spec | the CircleCI API → an internal routes served: **79 unique paths, 114 method+path combinations, zero marked deprecated** |
-| Routes that bypass the API | an internal routes served and `stream-3`'s "in spec but NOT in code routes" table |
+Note that the service fronting the public API is a *proxy* and does not own the whole v2
+surface: contexts, checkout keys, project environment variables, insights, policies,
+OIDC claims, OpenTelemetry exporters, the URL orb allow list and schedules are served
+elsewhere. Those were checked separately.
 
-the API is a *proxy* and does not own the whole v2 surface: contexts,
-checkout keys, project environment variables, insights, policies, OIDC claims,
-OpenTelemetry exporters, the URL orb allow list and schedules are served by the
-v2 API and other services. Those come from the 79-path spec inventory above.
-
-**So both inventories are now complete rather than best-effort** — v3 from the route
-registration table, v2 from the spec inventory cross-checked against the router. The
-one caveat is that "documented in the spec" and "routed in production" are not the same
-set in either direction, which is itself a finding: `.../projects/{project_id}/groups/{group_id}`
-is specified and implemented but never routed, and the audit-log and org-member
-families are routed but never specified.
+**Both the v2 and v3 inventories below are complete rather than best-effort.** The
+caveat worth carrying is the one above — "in the spec" and "served in production" are
+different sets, so neither alone is sufficient.
 
 Legend: **yes** implemented · **read-only** data source only · **no** deliberate
 omission, reason given · **gap** known, not yet built
 
 ---
 
-## v2 — the API
+## v2 — served through the public API
 
 ### Groups and access
 
@@ -101,7 +97,7 @@ slug-based route above cannot address a standalone (`circleci/<uuid>`) organizat
 | `GET`/`POST /owner/{id}/context/{ctx}/decision`, `/decision/{id}`, `/decision/{id}/policy-bundle` | **no** — decision audit logs and ad-hoc policy evaluation. `circleci_config_policy_settings` covers `/decision/settings`, which is the part that is configuration |
 
 Pipeline definitions and triggers are **not available on CircleCI Server**: its gateway
-routes served does not forward them to the API.
+routes served does not forward them.
 
 ### GitHub App
 
@@ -230,7 +226,53 @@ maintainer, and the documentation says so on the page.
 
 ---
 
-## Beyond the API
+## Deploys and releases — the read API is public, the management API is not
+
+This deserves its own section because "we cover deploys" is true and misleading at the
+same time.
+
+**The provider implements every public deploy route.** There are six, and they are all
+`GET`:
+
+| Route | Provider |
+|---|---|
+| `GET /deploy/components` | `circleci_deploy_components` |
+| `GET /deploy/components/{id}` | `circleci_deploy_component` |
+| `GET /deploy/components/{id}/versions` | `circleci_deploy_component` (`versions`) |
+| `GET /deploy/environments` | `circleci_deploy_environments` |
+| `GET /deploy/environments/{id}` | `circleci_deploy_environment` |
+| `GET /deploy/projects/{id}/settings` | `circleci_deploy_settings` |
+
+A management surface does exist, but it is served only to the CircleCI web
+application, authenticated with a browser session rather than an API token — so **a
+Terraform provider cannot call any of it.** This is a missing public API, not an
+unimplemented provider feature.
+
+What sits behind that boundary and would be worth building the moment it is reachable
+with a token:
+
+| Capability | Would become |
+|---|---|
+| Release integrations, create/read/update | `circleci_release_integration` — the connection to a deployment target |
+| Integration tokens, create/list/revoke | analogous to `circleci_runner_token` |
+| Environment hierarchies and their assignments | pure configuration, a natural resource |
+| Component update and archive | write access to components the provider can only read |
+| Deploy settings at project and organization scope | writable `circleci_deploy_settings` |
+
+Correctly out of scope even if they were reachable: deploy, rollback, cancel, retry,
+promote, restart, scale and version-restore are runtime actions; release, status,
+insights and failed-release listings are reporting; and the agent and in-job APIs
+authenticate as something other than a user.
+
+`circleci_deploy_settings` being read-only follows directly from this: no public write
+route exists. It is also why a customer request for centrally managed rollback
+configuration cannot be satisfied today — the provider already reads
+`rollback_pipeline_definition_id` and needs only a public write route to manage it. See
+`NEEDS-FROM-MAINTAINER.md`.
+
+---
+
+## Beyond the public API service
 
 These are served by the v2 API and other services, so they are absent from the
 route tables above. Each was confirmed against its own handler.
@@ -257,27 +299,26 @@ route tables above. Each was confirmed against its own handler.
 with unbounded row counts that would churn state on every refresh, and two are marked
 deprecated in the v2 API routes served.
 
-### Served by the API, not the API
+### Served directly, bypassing the public API service
 
-an internal routes served lists routes that are in the v2
-spec but **absent from the API's router** — gateway sends them straight to
-their API. They are easy to miss precisely because searching the service
-that fronts most of v2 finds nothing.
+Some routes are in the v2 spec but are not served by the service that fronts the public
+API — the gateway sends them straight to their API. They are easy to miss for
+exactly that reason: looking only at what fronts the public API finds nothing.
 
 | Route | Provider |
 |---|---|
-| `GET`/`POST /organizations/{org_id}/users` | **gap** — list members, and invite them with a role. See below |
-| `GET`/`PATCH`/`DELETE /organizations/{org_id}/users/{user_id}` | **gap** — read a member, change their role, remove them. See below |
-| `GET`/`POST /organizations/{org_id}/audit-log/configs` and the five other audit-log routes | `circleci_audit_log_config` |
-| `GET`/`POST`/`DELETE /organizations/{org_id}/projects/{project_id}/groups/{group_id}` | **not routed** — the spec defines it and CIAM implements it, but nothing routes it, so it 404s. This is why `circleci_project_group`'s Delete drops state with a warning instead of erroring |
+| `GET`/`POST /organizations/{org_id}/users` | **no** — see below |
+| `GET`/`PATCH`/`DELETE /organizations/{org_id}/users/{user_id}` | **no** — see below |
+| The audit-log config routes | `circleci_audit_log_config` |
+| `GET`/`POST`/`DELETE /organizations/{org_id}/projects/{project_id}/groups/{group_id}` | **not served** — specified and implemented, but not reachable. This is why `circleci_project_group`'s Delete drops state with a warning rather than erroring |
 | `POST /api/v3/triggers/{trigger_id}/events` | **no** — experimental, and triggering a pipeline is a runtime action |
-| `/organizations/{org_id}/signing-configs/ios/…` | superseded by the v3 `/signing/*` routes the provider uses |
+| The v2 org-scoped iOS signing routes | superseded by the v3 `/signing/*` routes the provider uses |
 
-Both member-management and audit-log families carry a `servers:` override pointing at
-`a host reserved for internal use`, whose own spec description reads *"A publicly
-accessible subdomain for internal use. An internal-only host."* That is the same
-unpublished-but-reachable category as the GitHub App repository routes, and it needs
-the same explicit maintainer sign-off — see `NEEDS-FROM-MAINTAINER.md`.
+**Organization member management is deliberately not implemented.** The routes support
+listing members, inviting them with a role, changing a role and removing a member — but
+they are served on a host reserved for internal use rather than through CircleCI's public
+API, so the provider does not depend on them. Revisit if they are ever exposed publicly
+with token auth. See `NEEDS-FROM-MAINTAINER.md`.
 
 ### No API exists
 
@@ -289,8 +330,8 @@ manageable; the log contents are not). The account and VCS steps are browser con
 flows by design.
 
 **Correction:** user invitations were previously listed here. They are not out of
-scope — see the the API table above. The error came from searching
-the API's router, which does not carry those routes.
+scope — see the table above. The error came from looking only at what fronts the
+public API, which does not carry those routes.
 
 ## v1.1 exposure
 

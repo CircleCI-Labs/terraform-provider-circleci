@@ -7,12 +7,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/runner"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -47,7 +48,7 @@ func NewRunnerTokensDataSource() datasource.DataSource {
 
 // runnerTokensDataSource is the data source implementation.
 type runnerTokensDataSource struct {
-	client *runner.Service
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -117,11 +118,9 @@ func (d *runnerTokensDataSource) Read(ctx context.Context, req datasource.ReadRe
 
 	tokens, err := d.client.ListTokens(ctx, resourceClass)
 	if err != nil {
-		// The SDK returns untyped errors, so a 404 for an unknown resource class
-		// cannot be told apart from any other failure here.
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner tokens",
-			fmt.Sprintf("Could not list runner tokens for resource class %s: %s", resourceClass, err.Error()),
+			fmt.Sprintf("Could not list runner tokens for resource class %s: %s", resourceClass, circleci.Detail(err)),
 		)
 
 		return
@@ -129,10 +128,10 @@ func (d *runnerTokensDataSource) Read(ctx context.Context, req datasource.ReadRe
 
 	// An empty list is a valid answer, so keep the attribute an empty list rather
 	// than null: practitioners iterate over it.
-	config.Tokens = make([]runnerTokenItemModel, 0, len(tokens.Items))
-	for _, token := range tokens.Items {
+	config.Tokens = make([]runnerTokenItemModel, 0, len(tokens))
+	for _, token := range tokens {
 		config.Tokens = append(config.Tokens, runnerTokenItemModel{
-			Id:            types.StringValue(token.Id),
+			Id:            types.StringValue(token.ID),
 			Nickname:      types.StringValue(token.Nickname),
 			ResourceClass: types.StringValue(token.ResourceClass),
 			CreatedAt:     types.StringValue(token.CreatedAt),
@@ -144,19 +143,10 @@ func (d *runnerTokensDataSource) Read(ctx context.Context, req datasource.ReadRe
 
 // Configure adds the provider configured client to the data source.
 func (d *runnerTokensDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.RunnerService
+	d.client = client
 }

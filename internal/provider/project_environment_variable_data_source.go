@@ -5,12 +5,12 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/envproject"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -34,7 +34,7 @@ func NewProjectEnvironmentVariableDataSource() datasource.DataSource {
 
 // ProjectEnvironmentVariableDataSource is the data source implementation.
 type ProjectEnvironmentVariableDataSource struct {
-	client *envproject.EnvService
+	client *circleci.Client
 }
 
 // Metadata returns the data source type name.
@@ -77,22 +77,21 @@ func (d *ProjectEnvironmentVariableDataSource) Read(ctx context.Context, req dat
 		return
 	}
 
-	envVar, err := d.client.Get(ctx, state.ProjectSlug.ValueString(), state.Name.ValueString())
+	envVar, err := d.client.GetProjectEnvironmentVariable(ctx, state.ProjectSlug.ValueString(), state.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Read CircleCI project environment variable "+state.Name.ValueString(),
-			err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
+	// Value is always the API's masked form (e.g. "xxxx1234"), never the literal
+	// configured value: no route ever discloses that. See
+	// ProjectEnvironmentVariable's doc comment in internal/circleci.
 	state.Name = types.StringValue(envVar.Name)
 	state.Value = types.StringValue(envVar.Value)
-	if !envVar.CreatedAt.IsZero() {
-		state.CreatedAt = types.StringValue(envVar.CreatedAt.Format("2006-01-02T15:04:05.000Z"))
-	} else {
-		state.CreatedAt = types.StringValue("")
-	}
+	state.CreatedAt = types.StringValue(envVar.CreatedAt)
 
 	// Set state
 	diags = resp.State.Set(ctx, &state)
@@ -104,21 +103,10 @@ func (d *ProjectEnvironmentVariableDataSource) Read(ctx context.Context, req dat
 
 // Configure adds the provider configured client to the data source.
 func (d *ProjectEnvironmentVariableDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	// Add a nil check when handling ProviderData because Terraform
-	// sets that data after it calls the ConfigureProvider RPC.
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *client.Client, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
-
 		return
 	}
 
-	d.client = client.ProjectEnvironmentVariableService
+	d.client = client
 }

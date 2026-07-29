@@ -25,15 +25,24 @@ import (
 // data source (pipeline_data_source.go) with an in-process stand-in for the
 // public API service, so their CRUD paths run without TF_ACC or credentials.
 //
-// Both go through github.com/CircleCI-Public/circleci-sdk-go's pipeline
-// package, whose wire shapes were cross-checked against
-// the CircleCI API:
+// Both go through internal/circleci's pipeline definition methods
+// (internal/circleci/pipeline_definition.go), whose wire shapes were
+// cross-checked against the CircleCI API:
 //   - the CircleCI API for the create body
 //     (config_source{provider,repo{external_id},file_path},
 //     checkout_source{provider,repo{external_id}})
 //   - the CircleCI API for the update body
 //     (config_source{file_path} ONLY — provider/repo are not updatable at all;
 //     checkout_source{provider,repo{external_id}}, same as create)
+//
+// Before the SDK migration (issue #26), circleci_pipeline had
+// three characterized bugs, all fixed by that migration: project_id had no
+// RequiresReplace (an in-place update sent the new project_id with the old
+// pipeline id, 404ing); Read() treated a 404 as a permanent error rather than
+// drift; and the resource could not be gated off CircleCI Server at all,
+// because Configure only received *pipeline.PipelineService, which carried no
+// deployment information. See the tests below with "ForcesReplacement",
+// "Recreates" and "Gated" in their names.
 
 // fakePipelineDefAPI is an in-memory stand-in for the pipeline-definitions
 // routes, keyed by "projectID/pipelineID" so that a request against the wrong
@@ -486,25 +495,24 @@ func importStateIDFor(resourceAddr, scopeAttr string) func(s *terraform.State) (
 	}
 }
 
-// TestPipelineResourceUnit_ConfigRepoChangeIsSilentlyIgnored documents a fourth
-// bug in this resource, of the same family as the project_id one.
+// TestPipelineResourceUnit_ConfigRepoChangeForcesReplacement documents the fix
+// to a fourth bug in this resource, of the same family as project_id's.
 //
 // The API's update handler accepts only `file_path` inside `config_source` — the
 // provider and repo are not updatable at all (verified against
 // the API's the CircleCI API and
-// pinned by the CRUD test above). But `config_source_repo_external_id` is a plain
-// Required attribute with no RequiresReplace modifier, so changing it plans an
-// in-place update, the PATCH omits it, and the apply reports success.
+// pinned by the CRUD test above). Before the SDK migration (issue
+// #26), `config_source_repo_external_id` was a plain Required attribute with no
+// RequiresReplace modifier: changing it planned an in-place update, the PATCH
+// omitted it, and the apply reported success — the worst of the three outcomes
+// available, since state recorded the new external id while the API kept the
+// old one, and the next plan showed no drift either (Read populates the field
+// from the same API that never received it).
 //
-// The result is the worst of the three outcomes available: state records the new
-// external id, the API still has the old one, and nothing errors. Terraform will
-// report no drift on the next plan either, because Read populates the field from
-// the same API that never received it.
-//
-// The fix is RequiresReplace, which needs the circleci-sdk-go migration to be worth
-// doing alongside the other three (issue #26). Until then this asserts the buggy
-// behaviour deliberately — see "Characterization tests" in DESIGN.md.
-func TestPipelineResourceUnit_ConfigRepoChangeIsSilentlyIgnored(t *testing.T) {
+// Now config_source_repo_external_id carries RequiresReplace, so a change plans
+// a destroy/create instead: the old definition is deleted and a new one created
+// with the new external id, which actually reaches the server.
+func TestPipelineResourceUnit_ConfigRepoChangeForcesReplacement(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
@@ -515,36 +523,38 @@ func TestPipelineResourceUnit_ConfigRepoChangeIsSilentlyIgnored(t *testing.T) {
 				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-99", "ext-2"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
-						// A correct schema would plan a replacement here.
-						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionUpdate),
+						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionDestroyBeforeCreate),
 					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_external_id"), knownvalue.StringExact("ext-99")),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_full_name"), knownvalue.StringExact(resolveFullName("ext-99"))),
 				},
 			},
 		},
 	})
 
-	// The PATCH carries no repo under config_source, so the change never happened
-	// on the server even though the apply succeeded.
-	update := api.lastRequest(t, "PATCH",
-		"/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions/11111111-2222-3333-4444-000000000001")
-
-	configSource, _ := update.Body["config_source"].(map[string]any)
-	if _, present := configSource["repo"]; present {
-		t.Errorf("update config_source now carries a repo (%v) — the API gained support for updating it, "+
-			"or the provider started sending a field the API ignores. Re-derive this test from "+
-			"handler_update.go; if the field is now updatable, this bug may simply be fixable.", configSource["repo"])
+	// A new definition was created carrying the new external id — no PATCH with
+	// a missing repo is involved at all.
+	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
+	configSource, _ := create.Body["config_source"].(map[string]any)
+	repo, _ := configSource["repo"].(map[string]any)
+	if repo["external_id"] != "ext-99" {
+		t.Errorf("create config_source.repo.external_id = %v, want ext-99", repo["external_id"])
 	}
 }
 
-// TestPipelineResourceUnit_RenameSendsTheNewName covers `name` on the update
-// path, which nothing else exercised.
-//
-// It matters because Update on this resource has a history of silently dropping
-// fields: config_source_provider and config_source_repo_external_id were both
-// omitted from the PATCH at one point. A rename that plans an update but sends the
-// old name would look completely successful — state would show the new name while
-// the API kept the old one — and only a later refresh would reveal it.
-func TestPipelineResourceUnit_RenameSendsTheNewName(t *testing.T) {
+// TestPipelineResourceUnit_RenameForcesReplacement covers `name`, which the
+// schema deliberately marks RequiresReplace ("Changing this value forces a new
+// resource to be created" in its own MarkdownDescription) — unlike this test's
+// predecessor assumed. That assumption was wrong independent of the SDK
+// migration: the RequiresReplace modifier on `name` predates
+// this migration (it is not one of the four characterized bugs), so a rename
+// has always planned a destroy/create, never an in-place update. This test
+// used to assert ResourceActionUpdate and a PATCH carrying the new name,
+// neither of which ever happened; it now asserts what the schema actually
+// does.
+func TestPipelineResourceUnit_RenameForcesReplacement(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
@@ -555,7 +565,7 @@ func TestPipelineResourceUnit_RenameSendsTheNewName(t *testing.T) {
 				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-renamed", "original", "ext-1", "ext-2"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
-						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionUpdate),
+						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionDestroyBeforeCreate),
 					},
 				},
 				ConfigStateChecks: []statecheck.StateCheck{
@@ -569,13 +579,11 @@ func TestPipelineResourceUnit_RenameSendsTheNewName(t *testing.T) {
 		},
 	})
 
-	// State agreeing is not enough — the PATCH itself has to carry the new name,
-	// otherwise state and the API have silently diverged.
-	update := api.lastRequest(t, "PATCH",
-		"/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions/11111111-2222-3333-4444-000000000001")
-	if update.Body["name"] != "pipe-renamed" {
-		t.Errorf("update body name = %v, want pipe-renamed (a rename that does not reach the wire "+
-			"leaves state and the API disagreeing)", update.Body["name"])
+	// The new definition is created with the new name — there is no PATCH to
+	// inspect, because a rename never reaches Update at all.
+	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
+	if create.Body["name"] != "pipe-renamed" {
+		t.Errorf("create body name = %v, want pipe-renamed", create.Body["name"])
 	}
 }
 
@@ -627,17 +635,21 @@ func TestPipelineResourceUnit_ServerErrorMentioning404DoesNotDropState(t *testin
 	})
 }
 
-// TestPipelineResourceUnit_ProjectIDChangeIsNotForcedReplacement documents a
-// real bug: project_id has no RequiresReplace plan modifier
-// (pipeline_resource.go's "project_id" schema attribute, and the Update method
-// uses the NEW project_id together with the OLD pipeline id as path
-// parameters). Terraform therefore plans an in-place update instead of a
-// destroy/create, and the PATCH lands on the wrong project — which this fake
-// reproduces faithfully: the definition was created under
+// TestPipelineResourceUnit_ProjectIDChangeForcesReplacement documents the fix
+// to a real bug: project_id used to have no RequiresReplace plan modifier
+// (pipeline_resource.go's "project_id" schema attribute), and Update used the
+// NEW project_id together with the OLD pipeline id as path parameters.
+// Terraform therefore used to plan an in-place update instead of a
+// destroy/create, and the PATCH landed on the wrong project — this fake
+// reproduces that faithfully: the definition is created under
 // fakePipelineProjectID, so a PATCH against fakePipelineOtherProjectID with the
-// same id 404s, exactly as the real API would.
-func TestPipelineResourceUnit_ProjectIDChangeIsNotForcedReplacement(t *testing.T) {
-	_, host := newFakePipelineDefAPI(t)
+// same id would 404, exactly as the real API would.
+//
+// Now project_id carries RequiresReplace, so changing it plans a destroy/create
+// instead, and the new definition is created under the new project — no PATCH
+// against the wrong project is ever attempted.
+func TestPipelineResourceUnit_ProjectIDChangeForcesReplacement(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -649,29 +661,40 @@ func TestPipelineResourceUnit_ProjectIDChangeIsNotForcedReplacement(t *testing.T
 				Config: pipelineFakeResourceConfig(host, fakePipelineOtherProjectID, "pipe-1", "original", "ext-1", "ext-2"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
-						// This is the bug: changing project_id plans an in-place
-						// update. A correct schema would plan
-						// ResourceActionDestroyBeforeCreate (or CreateThenDelete).
-						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionUpdate),
+						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionDestroyBeforeCreate),
 					},
 				},
-				// The apply then fails with a bare "not found", not a message
-				// about project_id requiring replacement.
-				ExpectError: regexp.MustCompile(`(?s)Unable to Update.*Pipeline definition not found`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("project_id"), knownvalue.StringExact(fakePipelineOtherProjectID)),
+				},
 			},
 		},
 	})
+
+	// The new definition was created under the new project, and the old one
+	// under the original project was deleted — never a PATCH against the wrong
+	// project.
+	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineOtherProjectID+"/pipeline-definitions")
+	if create.Method == "" {
+		t.Fatal("expected a create against the new project")
+	}
+	del := api.lastRequest(t, "DELETE", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions/11111111-2222-3333-4444-000000000001")
+	if del.Method == "" {
+		t.Fatal("expected the old definition under the original project to be deleted")
+	}
 }
 
-// TestPipelineResourceUnit_DriftIsAHardErrorNotARecreate documents a second
-// bug: pipeline_resource.go's Read() treats every error from the API,
-// including a 404 for a definition deleted outside Terraform, as a hard
-// diagnostic. Unlike circleci_trigger (which has explicit, if buggy, 404
-// handling) or the checkout key resource (the established good pattern in
-// checkout_key_resource_test.go), circleci_pipeline never calls
-// resp.State.RemoveResource, so drift never leads to a clean "will be
-// recreated" plan — it leads to a permanent refresh error.
-func TestPipelineResourceUnit_DriftIsAHardErrorNotARecreate(t *testing.T) {
+// TestPipelineResourceUnit_DriftRecreatesRatherThanHardError documents the fix
+// to a second bug: pipeline_resource.go's Read() used to treat every error from
+// the API, including a 404 for a definition deleted outside Terraform, as a
+// hard diagnostic. Unlike the checkout key resource (the established good
+// pattern in checkout_key_resource_test.go), circleci_pipeline never called
+// resp.State.RemoveResource, so drift never led to a clean "will be recreated"
+// plan — it led to a permanent refresh error.
+//
+// Now a 404 on Read calls resp.State.RemoveResource, so the next plan proposes
+// a create rather than erroring, exactly like TestAccCheckoutKeyResource_RemovedOutsideTerraform.
+func TestPipelineResourceUnit_DriftRecreatesRatherThanHardError(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
@@ -681,10 +704,10 @@ func TestPipelineResourceUnit_DriftIsAHardErrorNotARecreate(t *testing.T) {
 				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
 			},
 			{
-				PreConfig:   func() { api.setMissing(fakePipelineProjectID, "11111111-2222-3333-4444-000000000001", true) },
-				Config:      pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
-				PlanOnly:    true,
-				ExpectError: regexp.MustCompile(`(?s)Unable to Read.*Pipeline definition not found`),
+				PreConfig:          func() { api.setMissing(fakePipelineProjectID, "11111111-2222-3333-4444-000000000001", true) },
+				Config:             pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
 			},
 			{
 				// Restore the definition so the framework's own destroy step
@@ -696,19 +719,25 @@ func TestPipelineResourceUnit_DriftIsAHardErrorNotARecreate(t *testing.T) {
 	})
 }
 
-// TestPipelineResourceUnit_NoServerDeploymentGate documents a third bug:
-// unlike circleci_pipelines (the plural data source, gated via requireCloud in
-// pipelines_data_source.go) and the v3-only resources gated in cloud_only.go,
-// circleci_pipeline implements neither ResourceWithModifyPlan nor any
-// requireCloud check — it cannot, because its Configure only receives
-// *pipeline.PipelineService, which carries no deployment information at all.
-// Setting deployment = "server" therefore does not fail at plan time with a
-// clear diagnostic; it plans a normal create, and apply fails with whatever
-// raw error the wire happens to produce.
-func TestPipelineResourceUnit_NoServerDeploymentGate(t *testing.T) {
+// TestPipelineResourceUnit_ServerDeploymentIsGated documents the fix to a
+// third bug: unlike circleci_pipelines (the plural data source, gated via
+// requireCloud in pipelines_data_source.go) and the v3-only resources gated in
+// cloud_only.go, circleci_pipeline used to implement neither
+// ResourceWithModifyPlan nor any requireCloud check — it could not, because its
+// Configure only received *pipeline.PipelineService, which carried no
+// deployment information at all. Setting deployment = "server" therefore did
+// not fail at plan time with a clear diagnostic; it planned a normal create,
+// and apply failed with whatever raw error the wire happened to produce.
+//
+// Now Configure receives *circleci.Client, which knows its own deployment, so
+// ModifyPlan (see cloud_only.go) rejects CircleCI Server before any request is
+// ever sent — the create never reaches the wire at all.
+func TestPipelineResourceUnit_ServerDeploymentIsGated(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 	// CircleCI Server does not route this endpoint at all; simulate that with
-	// a bare 404 rather than a stored definition.
+	// a bare 404 rather than a stored definition, so a regression back to the
+	// old behaviour would still be caught as an error rather than a false
+	// success.
 	api.setFail(http.StatusNotFound, `{"message":"404 page not found"}`)
 
 	cfg := pipelineFakeProviderConfig(host, "server") + fmt.Sprintf(`
@@ -728,24 +757,15 @@ resource "circleci_pipeline" "test" {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: cfg,
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					// No plan-time diagnostic: the plan happily proposes a create.
-					PreApply: []plancheck.PlanCheck{
-						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionCreate),
-					},
-				},
-				// The failure surfaces at apply, as a raw wire error rather than
-				// the "requires CircleCI Cloud" diagnostic requireCloud produces
-				// for the sibling data sources.
-				ExpectError: regexp.MustCompile(`(?s)Error creating CircleCI pipeline.*404`),
+				Config:      cfg,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?s)requires CircleCI Cloud`),
 			},
 		},
 	})
 
-	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
-	if create.Method == "" {
-		t.Fatal("expected the provider to still attempt the create against the Server host")
+	if requests := api.recorded(); len(requests) != 0 {
+		t.Errorf("recorded requests = %+v, want none — the plan-time gate must block before any request is sent", requests)
 	}
 }
 

@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/CircleCI-Public/circleci-sdk-go/organization"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
@@ -39,7 +40,7 @@ func NewOrganizationResource() resource.Resource {
 
 // organizationResource is the resource implementation.
 type organizationResource struct {
-	client *organization.OrganizationService
+	client *circleci.Client
 }
 
 // Metadata returns the resource type name.
@@ -93,17 +94,20 @@ func (r *organizationResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	org, err := r.client.Create(ctx, plan.Name.ValueString(), plan.VcsType.ValueString())
+	org, err := r.client.CreateOrganization(ctx, circleci.OrganizationInput{
+		Name:    plan.Name.ValueString(),
+		VCSType: plan.VcsType.ValueString(),
+	})
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI organization",
-			"Could not create CircleCI organization, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
 
 	// Map response body to schema and populate Computed attribute values
-	plan.Id = types.StringValue(org.Id)
+	plan.Id = types.StringValue(org.ID)
 	plan.Slug = types.StringValue(org.Slug)
 
 	// Set state to fully populated data
@@ -128,21 +132,8 @@ func (r *organizationResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
-	org, err := r.client.Get(ctx, state.Id.ValueString())
-	if err != nil {
-		orgID := "unknown ID"
-		if !state.Id.IsNull() {
-			orgID = state.Id.ValueString()
-		}
-
-		resp.Diagnostics.AddError(
-			"Unable to Read CircleCI organization with id "+orgID,
-			err.Error(),
-		)
-		return
-	}
-
-	if org == nil {
+	org, err := r.client.GetOrganization(ctx, state.Id.ValueString())
+	if circleci.IsNotFound(err) {
 		resp.Diagnostics.AddWarning(
 			"Organization not found during Read",
 			fmt.Sprintf("Organization ID %s could not be retrieved from CircleCI. Removing from state.", state.Id.ValueString()),
@@ -150,13 +141,20 @@ func (r *organizationResource) Read(ctx context.Context, req resource.ReadReques
 		resp.State.RemoveResource(ctx)
 		return
 	}
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to Read CircleCI organization with id "+state.Id.ValueString(),
+			circleci.Detail(err),
+		)
+		return
+	}
 
 	// Map response body to model
 	state = organizationResourceModel{
-		Id:      types.StringValue(org.Id),
+		Id:      types.StringValue(org.ID),
 		Name:    types.StringValue(org.Name),
 		Slug:    types.StringValue(org.Slug),
-		VcsType: types.StringValue(org.VcsType),
+		VcsType: types.StringValue(org.VCSType),
 	}
 
 	// Set state
@@ -213,11 +211,13 @@ func (r *organizationResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 
 	// A standalone organization really was created by Create, so destroying it here
-	// is symmetric.
-	if err := r.client.Delete(ctx, state.Id.ValueString()); err != nil {
+	// is symmetric. An organization already gone is the desired end state, so
+	// absence is not an error.
+	err := r.client.DeleteOrganization(ctx, state.Id.ValueString())
+	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(
 			"Error Deleting CircleCI Organization",
-			"Could not delete organization, unexpected error: "+err.Error(),
+			circleci.Detail(err),
 		)
 
 		return
@@ -236,20 +236,12 @@ func organizationIsStandalone(vcsType string) bool {
 
 // Configure adds the provider configured client to the resource.
 func (r *organizationResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-
-	client, ok := req.ProviderData.(*CircleCiClientWrapper)
+	client, ok := apiClient(req.ProviderData, &resp.Diagnostics)
 	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *CircleCiClientWrapper, got: %T. Please report this issue to the provider developers.", req.ProviderData),
-		)
 		return
 	}
 
-	r.client = client.OrganizationService
+	r.client = client
 }
 
 // ImportState imports an existing resource into Terraform state.

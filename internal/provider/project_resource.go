@@ -22,9 +22,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &projectResource{}
-	_ resource.ResourceWithConfigure   = &projectResource{}
-	_ resource.ResourceWithImportState = &projectResource{}
+	_ resource.Resource                     = &projectResource{}
+	_ resource.ResourceWithConfigure        = &projectResource{}
+	_ resource.ResourceWithImportState      = &projectResource{}
+	_ resource.ResourceWithConfigValidators = &projectResource{}
 )
 
 // projectResourceModel maps the output schema.
@@ -141,11 +142,16 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:            true,
 			},
 			"oss": schema.BoolAttribute{
-				MarkdownDescription: "Whether the project is free and open source, which grants additional " +
-					"credits and makes builds visible to everyone. CircleCI only honours `true` for a " +
-					"repository that is genuinely open source; it reports success and leaves the setting " +
-					"unchanged otherwise, which this resource surfaces as an error.",
-				Optional: true,
+				MarkdownDescription: "Whether the project is treated as free and open source, which grants additional " +
+					"credits and makes builds visible to everyone.\n\n" +
+					"~> **Read-only.** This is reported by the API but cannot be set through it. The " +
+					"settings endpoint rejects the field outright — `400 Unexpected field 'advanced.oss'.`" +
+					" — and because it rejects the whole request, including it broke every project " +
+					"create and settings update. CircleCI derives it from whether the repository is " +
+					"public together with an organization-level flag, so set it in the CircleCI web " +
+					"application rather than here.",
+				// Computed only, deliberately not Optional: the API rejects this field on
+				// write. See internal/circleci/project_settings.go's OSS field.
 				Computed: true,
 			},
 			"set_github_status": schema.BoolAttribute{
@@ -173,6 +179,14 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
+// ConfigValidators returns the cross-attribute checks that run at validate and
+// plan time, before anything is written.
+func (r *projectResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		explicitForkSecretsValidator{},
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	// Retrieve values from plan
@@ -193,58 +207,34 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// Create project advanced settings with the new settings when they were defined
-	newAdvancedSettings := circleci.ProjectSettings{}
-	if !plan.AutoCancelBuilds.IsNull() {
-		newAdvancedSettings.AutocancelBuilds = plan.AutoCancelBuilds.ValueBoolPointer()
+	// Only the settings this configuration actually sets are sent; every other one
+	// is left out so that CircleCI applies its own default. The defaults are
+	// listed in templates/resources/project.md.tmpl.
+	//
+	// projectSettingRequest is what makes that work, and it checks IsUnknown as
+	// well as IsNull for a reason. These attributes are Optional+Computed, and
+	// Terraform plans an omitted Optional+Computed attribute as *unknown* at create
+	// time, not null — so a guard that only asks IsNull is taken for every toggle,
+	// and ValueBoolPointer on an unknown value yields a pointer to false. That is
+	// how every toggle came to be written as false on create whatever the
+	// configuration said, which forced set_github_status off (CircleCI defaults it
+	// to true) and cleared pr_only_branch_overrides.
+	//
+	// oss is deliberately absent: it is read-only on this API version, and the
+	// PATCH rejects the whole request when it is present. See the OSS field in
+	// internal/circleci/project_settings.go.
+	newAdvancedSettings := circleci.ProjectSettings{
+		AutocancelBuilds:           projectSettingRequest(plan.AutoCancelBuilds),
+		BuildForkPrs:               projectSettingRequest(plan.BuildForkPrs),
+		BuildPrsOnly:               projectSettingRequest(plan.BuildPrsOnly),
+		DisableSSH:                 projectSettingRequest(plan.DisableSSH),
+		ForksReceiveSecretEnvVars:  projectSettingRequest(plan.ForksReceiveSecretEnvVars),
+		SetGithubStatus:            projectSettingRequest(plan.SetGithubStatus),
+		SetupWorkflows:             projectSettingRequest(plan.SetupWorkflows),
+		WriteSettingsRequiresAdmin: projectSettingRequest(plan.WriteSettingsRequiresAdmin),
 	}
 
-	if !plan.BuildPrsOnly.IsNull() {
-		newAdvancedSettings.BuildPrsOnly = plan.BuildPrsOnly.ValueBoolPointer()
-	}
-
-	if !plan.BuildForkPrs.IsNull() {
-		newAdvancedSettings.BuildForkPrs = plan.BuildForkPrs.ValueBoolPointer()
-	} else {
-		newAdvancedSettings.BuildForkPrs = boolPtr(false)
-	}
-
-	if !plan.DisableSSH.IsNull() {
-		newAdvancedSettings.DisableSSH = plan.DisableSSH.ValueBoolPointer()
-	} else {
-		newAdvancedSettings.DisableSSH = boolPtr(false)
-	}
-
-	// Kept before the API response overwrites plan.OSS, so that what was asked
-	// for can be compared with what CircleCI actually applied.
-	planOSS := plan.OSS
-	if !plan.OSS.IsNull() {
-		newAdvancedSettings.OSS = plan.OSS.ValueBoolPointer()
-	} else {
-		newAdvancedSettings.OSS = boolPtr(false)
-	}
-
-	if !plan.ForksReceiveSecretEnvVars.IsNull() {
-		newAdvancedSettings.ForksReceiveSecretEnvVars = plan.ForksReceiveSecretEnvVars.ValueBoolPointer()
-	} else {
-		newAdvancedSettings.ForksReceiveSecretEnvVars = boolPtr(true)
-	}
-
-	if !plan.SetGithubStatus.IsNull() {
-		newAdvancedSettings.SetGithubStatus = plan.SetGithubStatus.ValueBoolPointer()
-	} else {
-		newAdvancedSettings.SetGithubStatus = boolPtr(false)
-	}
-
-	if !plan.SetupWorkflows.IsNull() {
-		newAdvancedSettings.SetupWorkflows = plan.SetupWorkflows.ValueBoolPointer()
-	}
-
-	if !plan.WriteSettingsRequiresAdmin.IsNull() {
-		newAdvancedSettings.WriteSettingsRequiresAdmin = plan.WriteSettingsRequiresAdmin.ValueBoolPointer()
-	}
-
-	if !plan.PROnlyBranchOverrides.IsNull() {
+	if !plan.PROnlyBranchOverrides.IsNull() && !plan.PROnlyBranchOverrides.IsUnknown() {
 		branches, diags := branchOverrides(ctx, plan.PROnlyBranchOverrides)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
@@ -270,14 +260,32 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	newProjectSettings, err := r.client.UpdateProjectSettings(ctx, vcsType, orgName, projectName, newAdvancedSettings)
+	// A configuration that sets no setting has nothing to write, and the API
+	// rejects a body with no fields ("No JSON fields found."), so the settings the
+	// new project already has are read instead. They are needed either way: every
+	// toggle is Computed, so it must hold a known value in state.
+	var newProjectSettings *circleci.ProjectSettings
 
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error updating CircleCI project settings",
-			fmt.Sprintf("Could not update recently created CircleCI project settings:\n\nsettings: %+v\norg: %s\nproject_id: %s\nproject_name: %s\nslug: %s\n\nUnexpected error: %s\n", newAdvancedSettings, plan.OrganizationId.ValueString(), newCreatedProject.ID, newCreatedProject.Name, newCreatedProject.Slug, err.Error()),
-		)
-		return
+	if newAdvancedSettings.IsEmpty() {
+		newProjectSettings, err = r.client.GetProjectSettings(ctx, vcsType, orgName, projectName)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error reading CircleCI project settings",
+				fmt.Sprintf("Could not read the settings of the recently created CircleCI project %s: %s", newCreatedProject.Slug, err.Error()),
+			)
+
+			return
+		}
+	} else {
+		newProjectSettings, err = r.client.UpdateProjectSettings(ctx, vcsType, orgName, projectName, newAdvancedSettings)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error updating CircleCI project settings",
+				fmt.Sprintf("Could not update recently created CircleCI project settings:\n\nsettings: %+v\norg: %s\nproject_id: %s\nproject_name: %s\nslug: %s\n\nUnexpected error: %s\n", newAdvancedSettings, plan.OrganizationId.ValueString(), newCreatedProject.ID, newCreatedProject.Name, newCreatedProject.Slug, err.Error()),
+			)
+
+			return
+		}
 	}
 
 	plan.AutoCancelBuilds = types.BoolPointerValue(newProjectSettings.AutocancelBuilds)
@@ -311,10 +319,6 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-
-	// Reported only after the state is saved: the project exists by now, so
-	// returning early here would leave it behind with nothing tracking it.
-	checkOSSApplied(planOSS, newProjectSettings.OSS, newCreatedProject.Slug, &resp.Diagnostics)
 }
 
 // Read refreshes the Terraform state with the latest data.
@@ -418,16 +422,30 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	// projectSettingRequest rather than ValueBoolPointer for the same reason as in
+	// Create: it turns a null or unknown value into nil, which omits the field,
+	// instead of sending false for a value Terraform has not decided on yet. oss is
+	// absent because the API rejects it on write.
 	advanceSettings := circleci.ProjectSettings{
-		AutocancelBuilds:           plan.AutoCancelBuilds.ValueBoolPointer(),
-		BuildForkPrs:               plan.BuildForkPrs.ValueBoolPointer(),
-		DisableSSH:                 plan.DisableSSH.ValueBoolPointer(),
-		ForksReceiveSecretEnvVars:  plan.ForksReceiveSecretEnvVars.ValueBoolPointer(),
-		OSS:                        plan.OSS.ValueBoolPointer(),
-		SetGithubStatus:            plan.SetGithubStatus.ValueBoolPointer(),
-		SetupWorkflows:             plan.SetupWorkflows.ValueBoolPointer(),
-		WriteSettingsRequiresAdmin: plan.WriteSettingsRequiresAdmin.ValueBoolPointer(),
-		PROnlyBranchOverrides:      &prOnlybranchOverrides,
+		AutocancelBuilds: projectSettingRequest(plan.AutoCancelBuilds),
+		BuildForkPrs:     projectSettingRequest(plan.BuildForkPrs),
+		// BuildPrsOnly was absent from this payload entirely while every other
+		// toggle was present, so changing build_prs_only on an existing project was
+		// silently never sent. Update then wrote state from what the API reported —
+		// still the old value — so the saved state contradicted the plan and
+		// Terraform failed with "provider produced inconsistent result after apply".
+		BuildPrsOnly:               projectSettingRequest(plan.BuildPrsOnly),
+		DisableSSH:                 projectSettingRequest(plan.DisableSSH),
+		ForksReceiveSecretEnvVars:  projectSettingRequest(plan.ForksReceiveSecretEnvVars),
+		SetGithubStatus:            projectSettingRequest(plan.SetGithubStatus),
+		SetupWorkflows:             projectSettingRequest(plan.SetupWorkflows),
+		WriteSettingsRequiresAdmin: projectSettingRequest(plan.WriteSettingsRequiresAdmin),
+	}
+
+	// A nil pointer omits the list; a pointer to a nil slice would send JSON null.
+	if prOnlybranchOverrides != nil {
+		advanceSettings.PROnlyBranchOverrides = &prOnlybranchOverrides
 	}
 	vcsType, orgName, projectName, slugDiags := parseProjectSlug(state.Slug.ValueString())
 	resp.Diagnostics.Append(slugDiags...)
@@ -436,7 +454,20 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	projectSettings := advanceSettings
-	updatedProject, err := r.client.UpdateProjectSettings(ctx, vcsType, orgName, projectName, projectSettings)
+
+	// Nothing to write, as in Create: read the current settings so that state still
+	// holds a known value for every Computed attribute.
+	var (
+		updatedProject *circleci.ProjectSettings
+		err            error
+	)
+
+	if projectSettings.IsEmpty() {
+		updatedProject, err = r.client.GetProjectSettings(ctx, vcsType, orgName, projectName)
+	} else {
+		updatedProject, err = r.client.UpdateProjectSettings(ctx, vcsType, orgName, projectName, projectSettings)
+	}
+
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Unable to Update CircleCI project settings for project: "+state.Slug.String(),
@@ -465,10 +496,6 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-
-	// Reported after the state is saved, for the same reason as in Create: the
-	// other settings were applied and must not be lost with the error.
-	checkOSSApplied(plan.OSS, updatedProject.OSS, state.Slug.ValueString(), &resp.Diagnostics)
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
@@ -558,10 +585,6 @@ func parseProjectSlug(slug string) (vcsType, orgName, projectName string, diags 
 
 	return parts[0], parts[1], parts[2], diags
 }
-
-// boolPtr returns a pointer to b, for the settings fields whose absence is
-// meaningful: a nil pointer omits the field so the current value is kept.
-func boolPtr(b bool) *bool { return &b }
 
 // derefBranches reads a branch-override list the API may have omitted. A nil
 // pointer means the API reported no list, which is equivalent to an empty one for

@@ -6,52 +6,38 @@
 Everything here has been driven as far as judgement allows. Each item says what was
 assumed in the meantime, so nothing is blocked waiting for an answer.
 
-Ordered by how much it unblocks, except for the first item, which is ordered by
-urgency because it affects users of the currently released provider.
+Ordered by how much it unblocks.
 
 ---
 
-## 0. Two things to raise with internal teams
+## 0. Decisions, not work
 
-Both are **decisions, not work**. Everything else in this file has been driven as far
-as judgement allows; these two cannot be.
+Everything else in this file has been driven as far as judgement allows. These cannot be.
 
-### 0a. Organization member management sits on an internal-only host
+Note on scope: this file documents *what the provider does and why*. Where a decision
+turned on CircleCI-internal detail, that detail lives in the internal notes given to the
+maintainer directly, not here — this repository should be readable by anyone who can see
+the provider.
+
+### 0a. Organization member management — DECIDED: not building it
 
 `GET`/`POST /api/v2/organizations/{org_id}/users` and
-`GET`/`PATCH`/`DELETE .../users/{user_id}` support listing members, inviting them with
-a role, changing a role and removing a member. Fully specified in
-the API's `openapi_definitions/v2_endpoints/user_groups/`.
+`GET`/`PATCH`/`DELETE .../users/{user_id}` support listing members, inviting them with a
+role, changing a role and removing a member.
 
-**Not implemented, pending your internal conversation.** The blocker is that both spec
-files carry a `servers:` override:
+**Decision taken: the provider will not use these**, because they are served on a host
+reserved for internal use rather than through CircleCI's public API. Depending on that
+from a published provider is not something to do on an assumption.
 
-```yaml
-servers:
-  - url: a host reserved for internal use
-    description: reserved for internal use
-```
+Revisit if they are ever exposed through the public API with personal-API-token auth and
+a stability commitment. The implementation notes — the bulk invite semantics, the
+pending-until-accepted state, the identity question — are recorded outside this
+repository, in the internal notes handed to the maintainer.
 
-They are also absent from the API's router entirely — the API serves
-them directly through gateway. That is the same unpublished-but-reachable category as the
-GitHub App repository routes, which you approved explicitly, so this needs the same
-call rather than an assumption.
-
-Worth knowing before that conversation:
-
-- This is the **largest remaining capability gap** in the provider. It is also the one
-  most likely to be asked for by the enterprise customers who wanted RBAC groups,
-  since groups without member management is half a feature.
-- Invite is a **bulk** endpoint returning **202** with a per-email `errors` array, so a
-  single-member resource has to inspect `errors` — otherwise a failed invitation
-  reports success.
-- `status` is `pending` until the invitee accepts, which is a real persistent state a
-  resource has to tolerate rather than treat as drift.
-- Destroy revokes a real person's access to the organization.
-
-Questions for the internal team: is depending on `a host reserved for internal use` acceptable for
-a published provider; is there a plan to route these through the API; and is
-the shape stable enough to build against.
+This remains the **largest capability gap** in the provider, and it is the one most
+likely to be asked for by enterprise customers who want RBAC groups, since groups
+without member management is half a feature. Worth raising with the owning team as a
+public-API request rather than treating it as provider work.
 
 ### 0b. The 1.0 renames need a decision on timing
 
@@ -64,24 +50,125 @@ several releases each breaking something.
 What needs deciding:
 
 - **Is 1.0 real, and when?** The batching only makes sense if it actually happens.
-  Right now every rename is deferred against a release that has no owner or date.
+ Right now every rename is deferred against a release that has no owner or date.
 - **Does the 0.5.0 work in this branch ship first**, or wait and go out as 1.0 with the
-  renames included? Shipping 0.5.0 first gets the bug fixes to users sooner — including
-  the webhook one — at the cost of a second breaking upgrade later.
+ renames included? Shipping 0.5.0 first gets the bug fixes to users sooner — including
+ the webhook one — at the cost of a second breaking upgrade later.
 - **`circleci_trigger`'s attribute names diverge from its own data source** (`repo` vs
-  `repository`, `web_hook` vs `webhook`). That is a bug, but fixing it is breaking, so
-  it is queued for the same batch.
+ `repository`, `web_hook` vs `webhook`). That is a bug, but fixing it is breaking, so
+ it is queued for the same batch.
 - **`circleci_webhook.signing_secret`** is misleading — the API only ever returns a
-  mask, so the attribute can never round-trip. Deprecating it is breaking
-  ([#21](../../issues/21)).
-- **`circleci_project`'s settings toggles are `Optional+Computed`**, which is the cause
-  of issue #26's first bug. Making them `Optional`-only is the correct fix and needs a
-  state migration, so it belongs in the same batch.
+ mask, so the attribute can never round-trip. Deprecating it is breaking
+ ([#21](../../issues/21)).
+- **`circleci_project`'s settings toggles are `Optional+Computed`**, which is what made
+ issue #26's first bug possible. The bug itself is fixed (see 0f); making the attributes
+ `Optional`-only, per this repo's own rule for settings resources, is still the cleaner
+ shape and needs a state migration, so it belongs in the same batch.
 
 There is a full list in `DESIGN.md` under "Schema naming"; this is the summary for
 taking to a team.
 
 ---
+
+### 0f. `circleci_project`'s settings toggles: fixed, one product question left
+
+This is the bug from issue #26 I had deliberately **not** fixed, because I thought it
+needed a product decision. It is now fixed, and the decision turned out to be
+answerable from CircleCI's own flag registry rather than from taste.
+
+Every toggle in `circleci_project`'s Create was guarded by `if !plan.X.IsNull`. Those
+attributes are `Optional+Computed`, and Terraform plans an omitted `Optional+Computed`
+attribute as **unknown**, not null, when there is no prior state — so `IsNull` was
+false, every guard was taken, and `ValueBoolPointer` on an unknown yields a pointer to
+`false`. **Every toggle was therefore sent as `false` on create, whatever the
+practitioner configured or omitted.**
+
+The fix applied is the `IsUnknown` check: an unconfigured toggle is not sent, and
+CircleCI applies its own default. What made that safe to choose was reading the
+defaults out of the API's `the CircleCI API` rather than guessing at "the org
+default":
+
+| Toggle | Default when never set |
+|---|---|
+| `autocancel_builds`, `build_fork_prs`, `build_prs_only` | `false` |
+| `disable_ssh`, `write_settings_requires_admin` | `false`, unless an org-level value says otherwise |
+| `set_github_status` | **`true`** (CircleCI's own default) — forcing `false` was a live regression |
+| `setup_workflows` | **`true`** for projects created after 2023-12-01 |
+| `forks_receive_secret_env_vars` | **`true` on a private project** (`:compute CircleCI's own default`) |
+| `pr_only_branch_overrides` | the project's default branch, e.g. `["main"]` |
+| `oss` | derived from the repository — and **read-only**, see below |
+
+Only `forks_receive_secret_env_vars` is genuinely dangerous to leave to the default, and
+only in combination: CircleCI exposes secrets to a fork build when it *and*
+`build_fork_prs` are on. So rather than pick a default, the provider now **fails
+validation** when `build_fork_prs = true` and `forks_receive_secret_env_vars` is not
+set explicitly, on both `circleci_project` and `circleci_project_settings`, with a
+message that explains the private-project default. Nothing is decided silently in
+either direction.
+
+Two things came out of the same investigation and are worth knowing:
+
+- **`oss` is read-only on v2.** `PATCH .../settings {"advanced":{"oss":false}}` answers
+ `400 Unexpected field 'advanced.oss'.` and rejects the *whole* request, so sending it
+ broke every project create and every settings update against the real API. It is now
+ `Computed`-only on both resources and never marshalled. The published API reference
+ documents it as part of the request body, which is wrong — worth reporting.
+- **The fakes were wrong in the same direction as the bug.** They accepted `oss` and
+ defaulted `set_github_status`/`setup_workflows` to `false`, which is precisely why this
+ survived a passing suite. They now reject `oss` and carry the real defaults.
+
+**What I still need:** confirmation that `oss` is intended to be read-only on v2 (versus
+an API bug worth fixing), and whether `write_settings_requires_admin` / `disable_ssh`
+have org-level defaults a provider can read anywhere.
+
+### 0d. Deploys and releases: the read API is public, the management API is not
+
+The provider implements **every public deploy route** — `circleci_deploy_component(s)`,
+`circleci_deploy_environment(s)`, `circleci_deploy_settings`. There are six, and they
+are all `GET`.
+
+A management surface does exist, but it is served only to the CircleCI web application,
+authenticated with a browser session rather than an API token. **A Terraform provider
+cannot call it at all.** This is a missing public API, not a provider gap.
+
+What sits behind that boundary and is genuinely Terraform-shaped:
+
+- **Release integrations** and their tokens — the connection to a deployment target.
+ Would be a resource plus a token resource, directly analogous to
+ `circleci_runner_token`.
+- **Environment hierarchies** and their assignments — pure configuration.
+- **Writable components** — the provider can read them but not update or archive them.
+- **Writable deploy settings** at project and organization scope.
+
+Correctly out of scope regardless: deploy, rollback, cancel, retry, promote, restart and
+scale are runtime actions; release and status listings are reporting; and the agent and
+in-job APIs authenticate as something other than a user.
+
+`circleci_deploy_settings` being read-only follows directly from this: no public write
+route exists. That is also why a customer request for centrally managed rollback
+configuration cannot be satisfied today — the provider already **reads**
+`rollback_pipeline_definition_id` and needs only a public write route to manage it.
+
+**Ask:** is there a plan to expose any of the deploy/release management surface through
+the public API with token auth? Integrations and environment hierarchies would be the
+highest-value slice.
+
+### 0e. No org-scoped API token means the provider runs as a person
+
+The provider authenticates with a **personal** API token. For an infrastructure-as-code
+tool that is structural rather than cosmetic:
+
+- the CI pipeline that runs `terraform apply` holds one specific human's credential, so
+ it breaks when that person leaves
+- everything Terraform does is attributed to them in the audit log
+- the workaround is a machine user with a real VCS account, which means managing
+ credentials and SSO for an account that does not correspond to a person
+
+There is a standing customer request for organization-scoped API tokens or service
+accounts that names this provider directly as a motivation. The provider cannot fix it:
+`POST /user/token` is session-only auth, deliberately, so there is no endpoint to call.
+
+Worth carrying into the same conversation as 0a, since both are about machine identity.
 
 ## 0c. Resolved: the webhook signing secret bug needs no disclosure
 
@@ -166,18 +253,18 @@ Tracked as issue #7. Each is a `?` in the README compatibility matrix, deliberat
 because a wrong `yes` in a compatibility chart is worse than an admitted gap.
 
 - **`build_fork_prs` on GitLab.com** — the VCS overview says supported; the pipelines
-  and OSS pages say unsupported for GitLab and GitHub App pipelines.
+ and OSS pages say unsupported for GitLab and GitHub App pipelines.
 - **Legacy scheduled pipelines on CircleCI Server** — the API scopes them to
-  `github`/`bitbucket` org types and Server *is* a `github` org, but the VCS overview
-  marks schedule triggers unsupported on the Server column.
+ `github`/`bitbucket` org types and Server *is* a `github` org, but the VCS overview
+ marks schedule triggers unsupported on the Server column.
 - **Rollback on GHES** — the VCS overview says supported; the GHES page lists it
-  under "not yet available".
+ under "not yet available".
 - **`restriction_type = "group"`** — CircleCI has two unrelated concepts called
-  "group" with mutually exclusive requirements, and the API does not say which one
-  this field takes.
+ "group" with mutually exclusive requirements, and the API does not say which one
+ this field takes.
 - **`oss`, `pr_only_branch_overrides`** per VCS — never documented outside GitHub.
 - **Organization settings, URL orb allow list, OTel exporters, usage export on
-  Server** — no statement exists either way.
+ Server** — no statement exists either way.
 
 Also: CircleCI's only Cloud-vs-Server parity document is a Support Center article
 that returns HTTP 403 to automated fetching, so it cannot be cited programmatically.
@@ -219,21 +306,21 @@ webhooks and runner still use it — and it has no owner, no releases and no tag
 Proceeding on these; say so if any is wrong.
 
 - **`circleci_schedule` not implemented.** Superseded by `circleci_trigger` with
-  `event_source_provider = "schedule"`. A migration guide exists. Reversible if
-  GitHub-OAuth customers need it.
+ `event_source_provider = "schedule"`. A migration guide exists. Reversible if
+ GitHub-OAuth customers need it.
 - **7 of 10 insights endpoints skipped** as runtime reporting rather than desired
-  state.
+ state.
 - **Orb promotion not a resource** — it creates a new version, so it has no
-  idempotent shape.
+ idempotent shape.
 - **`circleci_webhook`'s masked `signing_secret`** is misleading and deprecating it
-  is breaking, so it is queued for 1.0 (issue #21).
+ is breaking, so it is queued for 1.0 (issue #21).
 - **Runner uses the older `runner.circleci.com` surface**, not
-  `circleci.com/api/v3/runner/resource-classes`, because the newer one is being
-  actively reshaped and is not what Server serves.
+ `circleci.com/api/v3/runner/resource-classes`, because the newer one is being
+ actively reshaped and is not what Server serves.
 - **Docker layer cache purge not implemented.** `DELETE /api/v3/projects/{id}/dlc`
-  exists, but it is a one-shot side effect with nothing to read back, so it has no
-  resource shape. (An earlier version of `DESIGN.md` claimed no API existed at all;
-  that was wrong and is corrected.)
+ exists, but it is a one-shot side effect with nothing to read back, so it has no
+ resource shape. (An earlier version of `DESIGN.md` claimed no API existed at all;
+ that was wrong and is corrected.)
 
 ## 8. Decisions I would rather you made than me
 
