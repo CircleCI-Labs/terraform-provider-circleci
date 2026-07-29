@@ -21,15 +21,17 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &groupMembershipResource{}
-	_ resource.ResourceWithConfigure   = &groupMembershipResource{}
-	_ resource.ResourceWithImportState = &groupMembershipResource{}
+	_ resource.Resource                     = &groupMembershipResource{}
+	_ resource.ResourceWithConfigure        = &groupMembershipResource{}
+	_ resource.ResourceWithImportState      = &groupMembershipResource{}
+	_ resource.ResourceWithConfigValidators = &groupMembershipResource{}
 )
 
 // groupMembershipResourceModel maps the resource schema.
 type groupMembershipResourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	GroupId        types.String `tfsdk:"group_id"`
 	UserIds        types.Set    `tfsdk:"user_ids"`
 }
@@ -78,14 +80,10 @@ func (r *groupMembershipResource) Schema(_ context.Context, _ resource.SchemaReq
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the group belongs to. " +
-					"Changing this value forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("the group whose membership this manages", true),
+			"org_id":          orgIDAttribute("the group whose membership this manages", true),
 			"group_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the group whose membership is managed. " +
 					"Changing this value forces a new resource to be created.",
@@ -103,6 +101,13 @@ func (r *groupMembershipResource) Schema(_ context.Context, _ resource.SchemaReq
 				ElementType: types.StringType,
 			},
 		},
+	}
+}
+
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *groupMembershipResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
 	}
 }
 
@@ -129,7 +134,7 @@ func (r *groupMembershipResource) Create(ctx context.Context, req resource.Creat
 		return
 	}
 
-	organizationID, groupID := plan.OrganizationId.ValueString(), plan.GroupId.ValueString()
+	organizationID, groupID := effectiveOrgID(plan.OrganizationId, plan.OrgId), plan.GroupId.ValueString()
 
 	actual, err := r.client.GroupMembership().List(ctx, organizationID, groupID)
 	if err != nil {
@@ -146,6 +151,7 @@ func (r *groupMembershipResource) Create(ctx context.Context, req resource.Creat
 	}
 
 	plan.Id = types.StringValue(membershipID(organizationID, groupID))
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -161,7 +167,7 @@ func (r *groupMembershipResource) Read(ctx context.Context, req resource.ReadReq
 		return
 	}
 
-	organizationID, groupID := state.OrganizationId.ValueString(), state.GroupId.ValueString()
+	organizationID, groupID := effectiveOrgID(state.OrganizationId, state.OrgId), state.GroupId.ValueString()
 
 	members, err := r.client.GroupMembership().List(ctx, organizationID, groupID)
 	if err != nil {
@@ -189,6 +195,7 @@ func (r *groupMembershipResource) Read(ctx context.Context, req resource.ReadReq
 
 	state.Id = types.StringValue(membershipID(organizationID, groupID))
 	state.UserIds = userIDs
+	setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -214,7 +221,7 @@ func (r *groupMembershipResource) Update(ctx context.Context, req resource.Updat
 		return
 	}
 
-	organizationID, groupID := plan.OrganizationId.ValueString(), plan.GroupId.ValueString()
+	organizationID, groupID := effectiveOrgID(plan.OrganizationId, plan.OrgId), plan.GroupId.ValueString()
 
 	actual, err := r.client.GroupMembership().List(ctx, organizationID, groupID)
 	if err != nil {
@@ -231,6 +238,7 @@ func (r *groupMembershipResource) Update(ctx context.Context, req resource.Updat
 	}
 
 	plan.Id = types.StringValue(membershipID(organizationID, groupID))
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -258,7 +266,7 @@ func (r *groupMembershipResource) Delete(ctx context.Context, req resource.Delet
 
 	groupID := state.GroupId.ValueString()
 
-	err := r.client.GroupMembership().Remove(ctx, state.OrganizationId.ValueString(), groupID, userIDs)
+	err := r.client.GroupMembership().Remove(ctx, effectiveOrgID(state.OrganizationId, state.OrgId), groupID, userIDs)
 	if err != nil {
 		// A group that is already gone has no membership to clear, which is the
 		// desired end state.
@@ -350,7 +358,10 @@ func (r *groupMembershipResource) ImportState(ctx context.Context, req resource.
 		return
 	}
 
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("group_id"), groupID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), membershipID(organizationID, groupID))...)
 }

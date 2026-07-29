@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &githubAppRepositoriesDataSource{}
-	_ datasource.DataSourceWithConfigure = &githubAppRepositoriesDataSource{}
+	_ datasource.DataSource                     = &githubAppRepositoriesDataSource{}
+	_ datasource.DataSourceWithConfigure        = &githubAppRepositoriesDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &githubAppRepositoriesDataSource{}
 )
 
 // githubAppRepositoriesDataSourceModel maps the data source schema.
@@ -26,6 +27,7 @@ var (
 // single list-nested attribute named after the entity.
 type githubAppRepositoriesDataSourceModel struct {
 	OrganizationID types.String                   `tfsdk:"organization_id"`
+	OrgID          types.String                   `tfsdk:"org_id"`
 	Repositories   []githubAppRepositoryItemModel `tfsdk:"repositories"`
 }
 
@@ -69,11 +71,10 @@ func (d *githubAppRepositoriesDataSource) Schema(_ context.Context, _ datasource
 			"the only fix is to widen the installation on GitHub.\n\n" +
 			githubAppRepositoryUnpublishedAPINote,
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the CircleCI organization whose GitHub App " +
-					"repositories are listed.",
-				Required: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("GitHub App repositories"),
+			"org_id":          orgIDDataSourceAttribute("GitHub App repositories"),
 			"repositories": schema.ListNestedAttribute{
 				MarkdownDescription: "The repositories the GitHub App can access, in the order the API returns " +
 					"them.",
@@ -116,6 +117,13 @@ func (d *githubAppRepositoriesDataSource) Schema(_ context.Context, _ datasource
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *githubAppRepositoriesDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the organization's GitHub App repositories.
 func (d *githubAppRepositoriesDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	// See the note on the singular data source: a GitHub App installation requires a
@@ -130,7 +138,7 @@ func (d *githubAppRepositoriesDataSource) Read(ctx context.Context, req datasour
 		return
 	}
 
-	organizationID := state.OrganizationID.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationID, state.OrgID)
 
 	repositories, err := d.client.GitHubApp().ListRepositories(ctx, organizationID)
 	if err != nil {

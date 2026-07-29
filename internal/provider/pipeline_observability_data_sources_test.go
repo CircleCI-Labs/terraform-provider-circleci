@@ -44,7 +44,7 @@ func (p *observabilityProvider) Resources(_ context.Context) []func() fwresource
 func (p *observabilityProvider) DataSources(_ context.Context) []func() fwdatasource.DataSource {
 	return []func() fwdatasource.DataSource{
 		NewPipelineRunDataSource,
-		NewPipelineConfigDataSource,
+		NewPipelineRunConfigDataSource,
 		NewWorkflowDataSource,
 		NewWorkflowJobsDataSource,
 		NewJobDataSource,

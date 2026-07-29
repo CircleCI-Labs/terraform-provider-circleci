@@ -76,9 +76,15 @@ func TestGitHubAppInstallationDataSourceSchema(t *testing.T) {
 		t.Fatalf("schema validation returned diagnostics: %v", diags)
 	}
 
-	orgID, ok := resp.Schema.Attributes["organization_id"]
-	if !ok || !orgID.IsRequired() {
-		t.Error("organization_id must be present and required")
+	// The organization is required to look the installation up, but it is accepted
+	// under two names while `organization_id` is deprecated, so both are Optional
+	// and orgIDDataSourceConfigValidator requires exactly one. See
+	// org_id_deprecation.go.
+	for _, name := range []string{"organization_id", "org_id"} {
+		attribute, ok := resp.Schema.Attributes[name]
+		if !ok || !attribute.IsOptional() {
+			t.Errorf("attribute %q must be present and optional", name)
+		}
 	}
 
 	for _, name := range []string{"id", "target_type", "login", "repository_selection"} {

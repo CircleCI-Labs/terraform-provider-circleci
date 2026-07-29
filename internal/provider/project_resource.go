@@ -36,6 +36,7 @@ type projectResourceModel struct {
 	OrganizationName           types.String `tfsdk:"organization_name"`
 	OrganizationSlug           types.String `tfsdk:"organization_slug"`
 	OrganizationId             types.String `tfsdk:"organization_id"`
+	OrgId                      types.String `tfsdk:"org_id"`
 	VcsInfoUrl                 types.String `tfsdk:"vcs_info_url"`
 	VcsInfoProvider            types.String `tfsdk:"vcs_info_provider"`
 	VcsInfoDefaultBranch       types.String `tfsdk:"vcs_info_default_branch"`
@@ -94,13 +95,11 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "The slug of the owning organization.",
 				Computed:            true,
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the organization that owns this project. Changing this value forces a new resource to be created.",
-				Required:            true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured. Getting that wrong
+			// destroys the project, and its build history, on migration.
+			"organization_id": deprecatedOrgIDAttribute("this project", true),
+			"org_id":          orgIDAttribute("this project", true),
 			"vcs_info_url": schema.StringAttribute{
 				MarkdownDescription: "The VCS URL of the project repository.",
 				Computed:            true,
@@ -184,6 +183,7 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 func (r *projectResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		explicitForkSecretsValidator{},
+		orgIDConfigValidator(),
 	}
 }
 
@@ -198,7 +198,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	// Create new context
-	newCreatedProject, err := r.client.CreateProject(ctx, plan.OrganizationId.ValueString(), plan.Name.ValueString())
+	newCreatedProject, err := r.client.CreateProject(ctx, effectiveOrgID(plan.OrganizationId, plan.OrgId), plan.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI project",
@@ -249,7 +249,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.Slug = types.StringValue(newCreatedProject.Slug)
 	plan.OrganizationName = types.StringValue(newCreatedProject.OrganizationName)
 	plan.OrganizationSlug = types.StringValue(newCreatedProject.OrganizationSlug)
-	plan.OrganizationId = types.StringValue(newCreatedProject.OrganizationID)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, newCreatedProject.OrganizationID)
 	plan.VcsInfoUrl = types.StringValue(newCreatedProject.VCSInfo.VCSURL)
 	plan.VcsInfoProvider = types.StringValue(newCreatedProject.VCSInfo.Provider)
 	plan.VcsInfoDefaultBranch = types.StringValue(newCreatedProject.VCSInfo.DefaultBranch)
@@ -281,7 +281,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		if err != nil {
 			resp.Diagnostics.AddError(
 				"Error updating CircleCI project settings",
-				fmt.Sprintf("Could not update recently created CircleCI project settings:\n\nsettings: %+v\norg: %s\nproject_id: %s\nproject_name: %s\nslug: %s\n\nUnexpected error: %s\n", newAdvancedSettings, plan.OrganizationId.ValueString(), newCreatedProject.ID, newCreatedProject.Name, newCreatedProject.Slug, err.Error()),
+				fmt.Sprintf("Could not update recently created CircleCI project settings:\n\nsettings: %+v\norg: %s\nproject_id: %s\nproject_name: %s\nslug: %s\n\nUnexpected error: %s\n", newAdvancedSettings, effectiveOrgID(plan.OrganizationId, plan.OrgId), newCreatedProject.ID, newCreatedProject.Name, newCreatedProject.Slug, err.Error()),
 			)
 
 			return
@@ -352,7 +352,7 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	projectState.Id = types.StringValue(apiProject.ID)
 	projectState.Name = types.StringValue(apiProject.Name)
 	projectState.Slug = types.StringValue(apiProject.Slug)
-	projectState.OrganizationId = types.StringValue(apiProject.OrganizationID)
+	setOrgIDs(&projectState.OrganizationId, &projectState.OrgId, apiProject.OrganizationID)
 	projectState.OrganizationName = types.StringValue(apiProject.OrganizationName)
 	projectState.OrganizationSlug = types.StringValue(apiProject.OrganizationSlug)
 	projectState.VcsInfoDefaultBranch = types.StringValue(apiProject.VCSInfo.DefaultBranch)

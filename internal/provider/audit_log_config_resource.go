@@ -23,10 +23,11 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &auditLogConfigResource{}
-	_ resource.ResourceWithConfigure   = &auditLogConfigResource{}
-	_ resource.ResourceWithImportState = &auditLogConfigResource{}
-	_ resource.ResourceWithModifyPlan  = &auditLogConfigResource{}
+	_ resource.Resource                     = &auditLogConfigResource{}
+	_ resource.ResourceWithConfigure        = &auditLogConfigResource{}
+	_ resource.ResourceWithImportState      = &auditLogConfigResource{}
+	_ resource.ResourceWithModifyPlan       = &auditLogConfigResource{}
+	_ resource.ResourceWithConfigValidators = &auditLogConfigResource{}
 )
 
 // auditLogConfigTypeName is the Terraform type name, used both for Metadata
@@ -55,6 +56,7 @@ var auditLogBucketPrefixPattern = regexp.MustCompile(`^[^/].*[^/]$|^[^/]$|^$`)
 type auditLogConfigResourceModel struct {
 	ID               types.String `tfsdk:"id"`
 	OrganizationID   types.String `tfsdk:"organization_id"`
+	OrgID            types.String `tfsdk:"org_id"`
 	TargetType       types.String `tfsdk:"target_type"`
 	IsDisabled       types.Bool   `tfsdk:"is_disabled"`
 	ARN              types.String `tfsdk:"arn"`
@@ -111,14 +113,10 @@ func (r *auditLogConfigResource) Schema(_ context.Context, _ resource.SchemaRequ
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the config belongs to. " +
-					"Changing this value forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this audit log streaming config", true),
+			"org_id":          orgIDAttribute("this audit log streaming config", true),
 			"target_type": schema.StringAttribute{
 				MarkdownDescription: "The destination type: `" + circleci.AuditLogTargetTypeS3 + "` (AWS S3; " +
 					"`region` is required and `endpoint` must be omitted) or `" +
@@ -222,6 +220,13 @@ func (r *auditLogConfigResource) Schema(_ context.Context, _ resource.SchemaRequ
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *auditLogConfigResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *auditLogConfigResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if r.client == nil || !requireCloud(r.client, auditLogConfigTypeName, &resp.Diagnostics) {
@@ -234,8 +239,10 @@ func (r *auditLogConfigResource) Create(ctx context.Context, req resource.Create
 		return
 	}
 
+	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
+
 	config, err := r.client.CreateAuditLogConfig(ctx, circleci.CreateAuditLogConfigRequest{
-		OrgID:      plan.OrganizationID.ValueString(),
+		OrgID:      orgID,
 		TargetType: plan.TargetType.ValueString(),
 		IsDisabled: plan.IsDisabled.ValueBool(),
 		Config:     auditLogS3ConfigFromModel(plan),
@@ -248,7 +255,7 @@ func (r *auditLogConfigResource) Create(ctx context.Context, req resource.Create
 					"This requires the organization to be on a CircleCI Cloud Scale plan, requires a "+
 					"connectable destination (create verifies connectivity even when is_disabled is set), "+
 					"and allows at most one config per target_type.",
-				plan.OrganizationID.ValueString(), circleci.Detail(err),
+				orgID, circleci.Detail(err),
 			),
 		)
 
@@ -307,7 +314,7 @@ func (r *auditLogConfigResource) Update(ctx context.Context, req resource.Update
 
 	config, err := r.client.UpdateAuditLogConfig(ctx, circleci.UpdateAuditLogConfigRequest{
 		ID:         state.ID.ValueString(),
-		OrgID:      plan.OrganizationID.ValueString(),
+		OrgID:      effectiveOrgID(plan.OrganizationID, plan.OrgID),
 		TargetType: plan.TargetType.ValueString(),
 		IsDisabled: plan.IsDisabled.ValueBool(),
 		Config:     auditLogS3ConfigFromModel(plan),
@@ -394,7 +401,9 @@ func auditLogS3ConfigFromModel(model auditLogConfigResourceModel) circleci.Audit
 // applyAuditLogConfig copies an API config into the model.
 func applyAuditLogConfig(model *auditLogConfigResourceModel, config *circleci.AuditLogConfig) {
 	model.ID = types.StringValue(config.ID)
-	model.OrganizationID = types.StringValue(config.OrgID)
+	// Both organization attribute names are written from the one value the API
+	// reports. See org_id_deprecation.go.
+	setOrgIDs(&model.OrganizationID, &model.OrgID, config.OrgID)
 	model.TargetType = types.StringValue(config.TargetType)
 	model.IsDisabled = types.BoolValue(config.IsDisabled)
 	model.ARN = types.StringValue(config.Config.ARN)

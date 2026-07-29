@@ -12,8 +12,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -21,9 +19,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &organizationSettingsResource{}
-	_ resource.ResourceWithConfigure   = &organizationSettingsResource{}
-	_ resource.ResourceWithImportState = &organizationSettingsResource{}
+	_ resource.Resource                     = &organizationSettingsResource{}
+	_ resource.ResourceWithConfigure        = &organizationSettingsResource{}
+	_ resource.ResourceWithImportState      = &organizationSettingsResource{}
+	_ resource.ResourceWithConfigValidators = &organizationSettingsResource{}
 )
 
 // organizationSettingsTypeName is the Terraform type name, used both for
@@ -36,6 +35,7 @@ const organizationSettingsTypeName = "circleci_organization_settings"
 // method for why that matters.
 type organizationSettingsResourceModel struct {
 	OrganizationID                      types.String `tfsdk:"organization_id"`
+	OrgID                               types.String `tfsdk:"org_id"`
 	EnableAIAgents                      types.Bool   `tfsdk:"enable_ai_agents"`
 	EnableAIErrorSummarization          types.Bool   `tfsdk:"enable_ai_error_summarization"`
 	EnableCertifiedPublicOrbs           types.Bool   `tfsdk:"enable_certified_public_orbs"`
@@ -169,13 +169,10 @@ func (r *organizationSettingsResource) Schema(_ context.Context, _ resource.Sche
 			"configuration sets it, so several configurations may safely manage disjoint toggles " +
 			"on the same organization.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The UUID of the CircleCI organization whose settings these are. Changing this value forces a new resource to be created.",
-				Required:            true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id":  deprecatedOrgIDAttribute("these settings", true),
+			"org_id":           orgIDAttribute("these settings", true),
 			"enable_ai_agents": toggle("Allow CircleCI AI agents to run for this organization."),
 			"enable_ai_error_summarization": toggle(
 				"Allow CircleCI to generate AI summaries of build and test failures.",
@@ -223,6 +220,13 @@ func (r *organizationSettingsResource) Schema(_ context.Context, _ resource.Sche
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *organizationSettingsResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create applies the configured toggles to the organization's existing settings.
 //
 // Nothing is created: the settings record already exists. The current settings
@@ -240,7 +244,8 @@ func (r *organizationSettingsResource) Create(ctx context.Context, req resource.
 		return
 	}
 
-	orgID := plan.OrganizationID.ValueString()
+	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
+	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
 
 	current, err := r.client.GetOrganizationSettings(ctx, orgID)
 	if err != nil {
@@ -299,7 +304,8 @@ func (r *organizationSettingsResource) Read(ctx context.Context, req resource.Re
 		return
 	}
 
-	orgID := state.OrganizationID.ValueString()
+	orgID := effectiveOrgID(state.OrganizationID, state.OrgID)
+	setOrgIDs(&state.OrganizationID, &state.OrgID, orgID)
 
 	settings, err := r.client.GetOrganizationSettings(ctx, orgID)
 	if err != nil {
@@ -337,7 +343,8 @@ func (r *organizationSettingsResource) Update(ctx context.Context, req resource.
 		return
 	}
 
-	orgID := plan.OrganizationID.ValueString()
+	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
+	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
 
 	// Removing a toggle from the configuration stops managing it; it does not
 	// revert it. There is no route that restores a CircleCI default, so say so
@@ -416,11 +423,14 @@ func (r *organizationSettingsResource) Configure(_ context.Context, req resource
 
 // ImportState imports the settings of an existing organization by its id.
 //
-// Only organization_id is set: the toggles are left null on purpose, so the
+// Only the organization is set: the toggles are left null on purpose, so the
 // first plan after an import shows exactly the toggles the configuration asks
 // to manage instead of every setting the organization happens to have.
 func (r *organizationSettingsResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), req.ID)...)
 }
 
 // warnAbandonedOrgSettings reports toggles that state managed but the new plan

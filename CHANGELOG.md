@@ -75,7 +75,7 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   * the API version baked into the client's base URL, making "v3 on Cloud, v2 on
     Server" inexpressible, and a hardcoded `https://circleci.com` that made project
     creation impossible against CircleCI Server
-  * `Configure` receiving a narrow service rather than a client, so `circleci_pipeline`
+  * `Configure` receiving a narrow service rather than a client, so `circleci_pipeline_definition`
     could not be deployment-gated *at all* — the type carried no deployment information
   * fields simply absent from the SDK's structs, making settings such as
     `build_prs_only` unreachable from Terraform no matter what the provider did
@@ -87,6 +87,115 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
 
   The SDK had zero releases, zero tags and no maintainer; this provider was effectively
   its only consumer.
+
+### DEPRECATIONS
+
+* **"Pipeline" now always says which pipeline it means.** CircleCI identifies two
+  different things with a UUID, and this provider used one word for both:
+
+  | Concept | Route | What it is |
+  |---|---|---|
+  | Pipeline **definition** | `/projects/{project_id}/pipeline-definitions` | Where to check out, where to find configuration, which config file |
+  | Pipeline **run** | `/pipeline/{id}` | One execution of a definition, which spawns workflows and jobs |
+
+  Colloquially "pipeline" means the *run*, so naming the definition resource
+  `circleci_pipeline` aimed the familiar word at the unfamiliar concept. It made this
+  read correctly while being wrong, with both values being UUIDs so nothing rejected it:
+
+  ```terraform
+  data "circleci_pipeline_run_workflows" "w" {
+    run_id = circleci_pipeline.nightly.id # a definition id, not a run id
+  }
+  ```
+
+  Three names shipped in v0.4.0 and are therefore **deprecated, not removed** — they
+  still work and emit a warning:
+
+  | Old | New | How to migrate |
+  |---|---|---|
+  | `circleci_pipeline` (resource) | `circleci_pipeline_definition` | Add a `moved {}` block |
+  | `circleci_pipeline` (data source) | `circleci_pipeline_definition` | Edit the type name |
+  | `circleci_trigger.pipeline_id` | `pipeline_definition_id` | Edit the attribute name |
+
+  The resource is the only one holding state, so it is the only one needing `moved {}`.
+  The provider implements `ResourceWithMoveState`, so the state entry is **re-addressed
+  rather than destroyed** — the definition keeps its id and its triggers stay attached.
+  `TestPipelineResourceRename_MovedBlockDoesNotDestroyTheDefinition` asserts an empty
+  plan, an unchanged id, and zero `DELETE` requests reaching the API. Requires Terraform
+  1.8 or later for cross-type `moved` blocks; on older versions keep the old name.
+
+  Switching `circleci_trigger` from `pipeline_id` to `pipeline_definition_id` also plans
+  as no change — both attributes are `Optional+Computed` and mirrored, so the trigger is
+  not replaced. Set exactly one.
+
+  See the [Renaming pipeline resources and data sources](docs/guides/renaming-pipeline-types.md)
+  guide.
+
+* **Renamed without deprecation, because they never shipped.** These existed only in
+  unreleased builds, so there is no compatibility shim. If you were tracking an
+  unreleased version, update them directly.
+
+  | Unreleased name | Current name |
+  |---|---|
+  | `circleci_pipelines` | `circleci_pipeline_definitions` |
+  | `circleci_pipeline_config` | `circleci_pipeline_run_config` |
+  | `circleci_pipeline_values` | `circleci_pipeline_run_values` |
+  | `circleci_pipeline_workflows` | `circleci_pipeline_run_workflows` |
+  | `pipeline_id` on the two data sources above | `run_id` (now `Required`) |
+  | `pipelines` on `circleci_pipeline_definitions` | `pipeline_definitions` |
+  | `pipeline_id` on `circleci_triggers` | `pipeline_definition_id` |
+  | nested `pipeline_id` on `circleci_deploy_component` | `run_id` |
+
+  Recorded because the first implementation got this wrong in an instructive way: it gave
+  *every* rename the full deprecation treatment, which would have shipped brand-new data
+  sources with already-deprecated attributes — telling practitioners not to use something
+  they had never seen, and creating removal work for nobody's benefit. Two of them could
+  not have worked at all: `pipelines` and the nested `pipeline_id` are `Computed`, and the
+  framework only raises `DeprecationMessage` for a value present in *configuration*, so
+  the warning could never fire. See `DESIGN.md`, "Deprecate only what shipped".
+
+* **`organization_id` is deprecated in favour of `org_id`**, which matches CircleCI's
+  own naming. This is **not a breaking change**:
+
+  * Existing configurations keep working, unchanged and indefinitely. They gain a
+    deprecation warning on plan, nothing more.
+  * **Switching to `org_id` does not replace anything, and does not touch state.** No
+    `moved {}` blocks, no `terraform state` commands, no schema upgrade.
+  * Set exactly one of the two. Both together is an error, since they would be
+    ambiguous if they disagreed.
+  * `organization_id` will be removed in a future major release.
+
+  Both names are accepted on **37 resources and data sources**, and on the two
+  data sources where the organization is a read-only *output*
+  (`circleci_project`, `circleci_ios_signing_certificate`) both are reported.
+
+  Worth recording why this took care rather than being a one-line schema addition.
+  `organization_id` carries `RequiresReplace` on twelve resources, because CircleCI
+  has no route that moves an object between organizations. Implemented the obvious
+  way — `org_id` as a second `Optional` attribute — a practitioner who followed the
+  deprecation notice would remove `organization_id`, Terraform would plan it as
+  `null`, see a change, and **destroy and recreate the resource**. On
+  `circleci_project` that deletes the project and its build history. The
+  "non-breaking" migration would have been more destructive than the breaking rename
+  it was meant to avoid.
+
+  That failure is reproducible: reverting to the naive shape fails the migration test
+  with `expected NoOp, got action(s): [delete create]`. Two things prevent it, and
+  both are needed — `Computed`, so the departing attribute retains its prior value
+  rather than planning `null`, and `RequiresReplaceIfConfigured` rather than
+  `RequiresReplace`, so a null configuration value never forces replacement while a
+  genuine organization change still does.
+
+  A third piece was needed for `circleci_runner_resource_class`, the one resource
+  where changing the organization does *not* replace: without plan-time
+  reconciliation, changing it produced a plan no `Update` could satisfy
+  (`organization_id = B` alongside `org_id = A`). It reconciles both names from
+  configuration in `ModifyPlan`.
+
+  Every migrated type has a test asserting the switch is a **no-op plan**, and all of
+  it — attributes, validators, resolution and reconciliation — lives in
+  `internal/provider/org_id_deprecation.go`, so removing the old name later is one
+  file and a compiler error list rather than an audit of forty schemas.
 
 ### BREAKING CHANGES
 
@@ -184,17 +293,18 @@ Discovery, deploys and observability:
   `circleci_github_app_repository`, `circleci_github_app_repositories`,
   `circleci_user`, `circleci_user_collaborations`, `circleci_catalog_offerings`,
   `circleci_job`, `circleci_workflow`, `circleci_workflow_jobs`,
-  `circleci_pipeline_run`, `circleci_pipeline_config`, `circleci_pipeline_values`,
-  `circleci_pipeline_workflows`, `circleci_deploy_component`,
+  `circleci_pipeline_run`, `circleci_pipeline_run_config`,
+  `circleci_pipeline_run_values`, `circleci_pipeline_run_workflows`,
+  `circleci_deploy_component`,
   `circleci_deploy_components`, `circleci_deploy_environment`,
   `circleci_deploy_environments`, `circleci_deploy_settings`,
   `circleci_insights_summary`, `circleci_insights_workflows`,
   `circleci_insights_flaky_tests`
 
-  `circleci_pipeline_workflows` closes a chain that was previously unusable:
+  `circleci_pipeline_run_workflows` closes a chain that was previously unusable:
   `circleci_workflow` and `circleci_workflow_jobs` both need a workflow ID, and
   nothing in the provider could produce one. It is now
-  `circleci_pipeline_run` → `circleci_pipeline_workflows` → `circleci_workflow_jobs`.
+  `circleci_pipeline_run` → `circleci_pipeline_run_workflows` → `circleci_workflow_jobs`.
 
 Plural list data sources — there was not a single one before this release, despite
 every API entity having a `List`:
@@ -321,12 +431,12 @@ and returning empty lists:
   `Required` with no `RequiresReplace` and an empty `Update`, so changing it reported
   success while moving nothing. There is no API route that moves a context between
   organizations, so it now forces replacement.
-* **`circleci_pipeline` fixes enabled by dropping the SDK** (all four previously
+* **`circleci_pipeline_definition` fixes enabled by dropping the SDK** (all four previously
   characterized in tests as known-broken, [#26](../../issues/26)): `project_id` and
   `config_source_repo_external_id` now force replacement instead of planning an in-place
   update that silently does nothing or targets the wrong project; a definition deleted
   outside Terraform now produces a clean recreate plan instead of a permanent refresh
-  error; and both `circleci_pipeline` and `circleci_trigger` can now be gated off
+  error; and both `circleci_pipeline_definition` and `circleci_trigger` can now be gated off
   CircleCI Server at plan time, which was impossible while `Configure` received an SDK
   service carrying no deployment information.
 * **`circleci_runner_resource_class` never sent `org_id`.** Note the API
@@ -350,7 +460,7 @@ and returning empty lists:
   `circleci_audit_log_config` sit on routes CircleCI does not publish in its OpenAPI
   spec. They are documented as unpublished and subject to change. The GitHub App
   routes are the only way to resolve `owner/repo` to the numeric `external_id` that
-  `circleci_pipeline` and `circleci_trigger` require.
+  `circleci_pipeline_definition` and `circleci_trigger` require.
 * `API-COVERAGE.md` is a route-by-route inventory of the CircleCI API and what this
   provider does with each route, built from the API' own route
   registration tables. `DESIGN.md` records why the provider is shaped the way it is.

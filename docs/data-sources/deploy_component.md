@@ -21,7 +21,7 @@ up by name.
 | **Organization type** | Any. |
 | **Token** | Any valid API token. |
 
-~> **`pipeline_id`, `workflow_id` and `job_id` on a version can be null.** The API represents "no
+~> **`run_id`, `workflow_id` and `job_id` on a version can be null.** The API represents "no
 association recorded" as the all-zero UUID (`00000000-0000-0000-0000-000000000000`) rather than omitting
 the field; this provider converts that sentinel to `null` so it cannot be mistaken for a real identifier.
 
@@ -73,5 +73,7 @@ Read-Only:
 - `last_deployed_at` (String) When this version was last deployed, as an RFC 3339 timestamp.
 - `name` (String) Name of the version, e.g. `1.2.3`.
 - `namespace` (String) Namespace the version was deployed into.
-- `pipeline_id` (String) Unique identifier (UUID) of the pipeline run that deployed this version. Null when no pipeline run was recorded.
+- `run_id` (String) Unique identifier (UUID) of the pipeline run that deployed this version, as returned by [`circleci_pipeline_run`](pipeline_run). Null when no pipeline run was recorded.
+
+This is a pipeline **run**, not a [`circleci_pipeline_definition`](../resources/pipeline_definition).
 - `workflow_id` (String) Unique identifier (UUID) of the workflow that deployed this version. Null when no workflow was recorded.

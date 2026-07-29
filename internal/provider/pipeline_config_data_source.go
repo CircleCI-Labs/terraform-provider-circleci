@@ -28,9 +28,9 @@ type pipelineConfigDataSourceModel struct {
 	CompiledSetupConfig types.String `tfsdk:"compiled_setup_config"`
 }
 
-// NewPipelineConfigDataSource is a helper function to simplify the provider
+// NewPipelineRunConfigDataSource is a helper function to simplify the provider
 // implementation.
-func NewPipelineConfigDataSource() datasource.DataSource {
+func NewPipelineRunConfigDataSource() datasource.DataSource {
 	return &pipelineConfigDataSource{}
 }
 
@@ -42,7 +42,7 @@ type pipelineConfigDataSource struct {
 
 // Metadata returns the data source type name.
 func (d *pipelineConfigDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_pipeline_config"
+	resp.TypeName = req.ProviderTypeName + "_pipeline_run_config"
 }
 
 // Schema defines the schema for the data source.

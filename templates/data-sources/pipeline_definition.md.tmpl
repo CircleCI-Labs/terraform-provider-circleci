@@ -1,0 +1,31 @@
+---
+page_title: "circleci_pipeline_definition Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches information about a CircleCI pipeline definition.
+---
+
+# circleci_pipeline_definition (Data Source)
+
+Fetches information about a CircleCI pipeline definition. Use
+[`circleci_pipeline_definitions`](pipeline_definitions) to list every definition on
+a project, and [`circleci_pipeline_definition`](../resources/pipeline_definition)
+to manage one.
+
+-> **A definition is not a run.** This data source reads the declared pairing of a
+config source and a checkout source. To read one execution of it, use
+[`circleci_pipeline_run`](pipeline_run) — the two are different objects with
+different identifiers. This data source was named `circleci_pipeline` until it was
+renamed for exactly that reason; the old name still works, and
+[Renaming pipeline resources and data sources](../guides/renaming-pipeline-types)
+covers the move.
+
+~> **Not available on CircleCI Server** This data source uses the
+`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
+Server installation does not expose.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_pipeline_definition/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

@@ -815,3 +815,136 @@ func TestProjectResourceUnit_Schema(t *testing.T) {
 		t.Fatalf("Schema validation diagnostics: %+v", diags)
 	}
 }
+
+// projectResourceConfigWithOrgAttr renders a project using whichever of the two
+// organization attribute names is asked for.
+func projectResourceConfigWithOrgAttr(host, attr string) string {
+	return projectResourceProviderConfig(host) + fmt.Sprintf(`
+resource "circleci_project" "test" {
+  name = "my-repo"
+  %s   = %q
+}
+`, attr, testProjectResourceOrgID)
+}
+
+// TestProjectResourceUnit_SwitchingOrgAttributeDoesNotReplace is the test the
+// organization_id -> org_id deprecation lives or dies by.
+//
+// organization_id carried RequiresReplace, because there is no API route that moves
+// a project between organizations. Introducing org_id naively — as a second
+// Optional attribute — would mean that a practitioner following our own deprecation
+// advice removes organization_id from their configuration, Terraform plans it as
+// null, sees a change, and destroys and recreates the project. Deleting a project
+// takes its build history with it. The "non-breaking" migration would have been more
+// destructive than the breaking rename it was meant to avoid.
+//
+// Two things prevent that, and this test is what proves they work together:
+// Computed retains the prior value instead of planning null, and
+// RequiresReplaceIfConfigured skips replacement when the configuration value is
+// null while still replacing on a genuine organization change.
+//
+// The assertion is a no-op plan, not merely "not a replacement". Anything else —
+// an in-place update, a drift diff — would mean the two names are not truly
+// interchangeable and practitioners would see churn on upgrade.
+func TestProjectResourceUnit_SwitchingOrgAttributeDoesNotReplace(t *testing.T) {
+	_, host := newFakeProjectAPI(t, "classic")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// The state a practitioner already has today.
+				Config: projectResourceConfigWithOrgAttr(host, "organization_id"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("organization_id"), knownvalue.StringExact(testProjectResourceOrgID)),
+					// Both are populated, so the value is available under either name
+					// before any migration happens.
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("org_id"), knownvalue.StringExact(testProjectResourceOrgID)),
+				},
+			},
+			{
+				// The migration: same organization, new attribute name.
+				Config: projectResourceConfigWithOrgAttr(host, "org_id"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_project.test", plancheck.ResourceActionNoop),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("org_id"), knownvalue.StringExact(testProjectResourceOrgID)),
+					statecheck.ExpectKnownValue("circleci_project.test", tfjsonpath.New("organization_id"), knownvalue.StringExact(testProjectResourceOrgID)),
+				},
+			},
+			{
+				// And back again, so the deprecation is not a one-way door.
+				Config: projectResourceConfigWithOrgAttr(host, "organization_id"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_project.test", plancheck.ResourceActionNoop),
+					},
+				},
+			},
+		},
+	})
+}
+
+// TestProjectResourceUnit_ChangingOrgStillReplaces is the other half: the safety
+// above must not have disabled replacement for a real organization change. There is
+// no route that moves a project, so this has to be a destroy and create.
+func TestProjectResourceUnit_ChangingOrgStillReplaces(t *testing.T) {
+	_, host := newFakeProjectAPI(t, "classic")
+
+	other := projectResourceProviderConfig(host) + `
+resource "circleci_project" "test" {
+  name   = "my-repo"
+  org_id = "org-99999999"
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: projectResourceConfigWithOrgAttr(host, "org_id")},
+			{
+				Config: other,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_project.test", plancheck.ResourceActionDestroyBeforeCreate),
+					},
+				},
+			},
+		},
+	})
+}
+
+// TestProjectResourceUnit_RequiresExactlyOneOrgAttribute covers the two ways of
+// getting it wrong: both names, or neither.
+func TestProjectResourceUnit_RequiresExactlyOneOrgAttribute(t *testing.T) {
+	_, host := newFakeProjectAPI(t, "classic")
+
+	both := projectResourceProviderConfig(host) + fmt.Sprintf(`
+resource "circleci_project" "test" {
+  name            = "my-repo"
+  organization_id = %[1]q
+  org_id          = %[1]q
+}
+`, testProjectResourceOrgID)
+
+	neither := projectResourceProviderConfig(host) + `
+resource "circleci_project" "test" {
+  name = "my-repo"
+}
+`
+
+	for name, config := range map[string]string{"both set": both, "neither set": neither} {
+		t.Run(name, func(t *testing.T) {
+			resource.UnitTest(t, resource.TestCase{
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				Steps: []resource.TestStep{{
+					Config:      config,
+					ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Combination|Missing Attribute Configuration`),
+				}},
+			})
+		})
+	}
+}

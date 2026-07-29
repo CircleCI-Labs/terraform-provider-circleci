@@ -20,15 +20,17 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &runnerTokenResource{}
-	_ resource.ResourceWithConfigure   = &runnerTokenResource{}
-	_ resource.ResourceWithImportState = &runnerTokenResource{}
+	_ resource.Resource                     = &runnerTokenResource{}
+	_ resource.ResourceWithConfigure        = &runnerTokenResource{}
+	_ resource.ResourceWithImportState      = &runnerTokenResource{}
+	_ resource.ResourceWithConfigValidators = &runnerTokenResource{}
 )
 
 // runnerTokenResourceModel maps the resource schema.
 type runnerTokenResourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	ResourceClass  types.String `tfsdk:"resource_class"`
 	Nickname       types.String `tfsdk:"nickname"`
 	Token          types.String `tfsdk:"token"`
@@ -62,14 +64,10 @@ func (r *runnerTokenResource) Schema(_ context.Context, _ resource.SchemaRequest
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the organization that owns the resource class. Changing this value forces a new resource to be created.",
-				Required:            true,
-				Computed:            false,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this runner token", true),
+			"org_id":          orgIDAttribute("this runner token", true),
 			"resource_class": schema.StringAttribute{
 				MarkdownDescription: "The resource class this token grants access to, in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.",
 				Required:            true,
@@ -103,6 +101,13 @@ func (r *runnerTokenResource) Schema(_ context.Context, _ resource.SchemaRequest
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *runnerTokenResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *runnerTokenResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan runnerTokenResourceModel
@@ -112,8 +117,10 @@ func (r *runnerTokenResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
+
 	createReq := circleci.TokenInput{
-		OrganizationID: plan.OrganizationId.ValueString(),
+		OrganizationID: organizationID,
 		ResourceClass:  plan.ResourceClass.ValueString(),
 		Nickname:       plan.Nickname.ValueString(),
 	}
@@ -128,6 +135,7 @@ func (r *runnerTokenResource) Create(ctx context.Context, req resource.CreateReq
 	}
 
 	plan.Id = types.StringValue(t.ID)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 	plan.ResourceClass = types.StringValue(t.ResourceClass)
 	plan.Nickname = types.StringValue(t.Nickname)
 	plan.Token = types.StringValue(t.Token)
@@ -173,6 +181,15 @@ func (r *runnerTokenResource) Read(ctx context.Context, req resource.ReadRequest
 	state.Nickname = types.StringValue(found.Nickname)
 	state.CreatedAt = types.StringValue(found.CreatedAt)
 	// Token is write-once and not returned by the API — preserve value from state.
+
+	// The token representation carries no organization, so whichever attribute
+	// name state holds is mirrored onto the other. The guard matters for an
+	// imported token: the import ID is "resource_class/token_id", so neither name
+	// is known, and writing "" over two null values would be a spurious change.
+	// See org_id_deprecation.go.
+	if organizationID := effectiveOrgID(state.OrganizationId, state.OrgId); organizationID != "" {
+		setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
+	}
 
 	diags = resp.State.Set(ctx, &state)
 	resp.Diagnostics.Append(diags...)

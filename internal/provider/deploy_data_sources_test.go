@@ -79,6 +79,10 @@ const (
 	testDeployComponentID = "1e2d3c4b-5a69-7887-9a0b-1c2d3e4f5061"
 	// testDeployProjectID is the CircleCI project id deploy settings are keyed by.
 	testDeployProjectID = "6f5e4d3c-2b1a-4988-9c8d-7e6f5a4b3c2d"
+	// testDeployVersionRunID is the pipeline run recorded against the second seeded
+	// component version. The first version records none, so the two together cover
+	// both a real id and the all-zero sentinel.
+	testDeployVersionRunID = "3c4d5e6f-7a8b-49c0-91d2-e3f4a5b6c7d8"
 )
 
 // mockDeployAPI is an in-memory stand-in for the routes the deploy/release
@@ -160,7 +164,7 @@ func (m *mockDeployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}`, testDeployComponentID, testDeployProjectID))
 
 	case r.URL.Path == "/api/v2/deploy/components/"+testDeployComponentID+"/versions" && r.Method == http.MethodGet:
-		m.writeJSON(w, http.StatusOK, `{
+		m.writeJSON(w, http.StatusOK, fmt.Sprintf(`{
 			"items": [{
 				"name": "1.2.3",
 				"namespace": "default",
@@ -170,9 +174,19 @@ func (m *mockDeployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"workflow_id": "00000000-0000-0000-0000-000000000000",
 				"job_id": "00000000-0000-0000-0000-000000000000",
 				"last_deployed_at": "2024-04-24T15:10:21.123Z"
+			}, {
+				"name": "1.2.4",
+				"namespace": "default",
+				"environment_id": "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+				"is_live": false,
+				"pipeline_id": %[1]q,
+				"workflow_id": "5e6f7a8b-9c0d-41e2-a3f4-b5c6d7e8f901",
+				"job_id": "7a8b9c0d-1e2f-43a4-b5c6-d7e8f9012345",
+				"job_number": 17,
+				"last_deployed_at": "2024-04-25T15:10:21.123Z"
 			}],
 			"next_page_token": null
-		}`)
+		}`, testDeployVersionRunID))
 
 	case r.URL.Path == "/api/v2/deploy/components/"+testDeployComponentID && r.Method == http.MethodGet:
 		m.writeJSON(w, http.StatusOK, fmt.Sprintf(`{

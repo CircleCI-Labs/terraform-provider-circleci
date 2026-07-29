@@ -104,9 +104,19 @@ resource "circleci_project_group" "security_admin" {
 ### Required
 
 - `group_id` (String) Unique identifier (UUID) of the group being granted access. Changing this value forces a new resource to be created.
-- `organization_id` (String) Unique identifier (UUID) of the organization the project and group belong to. Changing this value forces a new resource to be created.
 - `project_id` (String) Unique identifier (UUID) of the project the group is granted access to. Changing this value forces a new resource to be created.
 - `role` (String) Role the group holds on the project. One of `project-admin`, `project-contributor` or `project-viewer`. This can be changed in place. The organization-level roles (`org-admin`, `org-contributor`, `org-viewer`) are not valid for a project grant.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns the project and group in this grant.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns the project and group in this grant.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

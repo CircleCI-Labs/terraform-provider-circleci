@@ -17,13 +17,15 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &runnerResourceClassDataSource{}
-	_ datasource.DataSourceWithConfigure = &runnerResourceClassDataSource{}
+	_ datasource.DataSource                     = &runnerResourceClassDataSource{}
+	_ datasource.DataSourceWithConfigure        = &runnerResourceClassDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &runnerResourceClassDataSource{}
 )
 
 // runnerResourceClassDataSourceModel maps the data source schema.
 type runnerResourceClassDataSourceModel struct {
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	ResourceClass  types.String `tfsdk:"resource_class"`
 	Id             types.String `tfsdk:"id"`
 	Description    types.String `tfsdk:"description"`
@@ -49,10 +51,15 @@ func (d *runnerResourceClassDataSource) Schema(_ context.Context, _ datasource.S
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Reads a CircleCI runner resource class.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The organization id.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names. The UUID check used to live in Read, which meant a slug was
+			// only rejected once the plan was being applied.
+			"organization_id": runnerOrgIDDataSourceAttribute(
+				deprecatedOrgIDDataSourceAttribute("runner resource classes"),
+			),
+			"org_id": runnerOrgIDDataSourceAttribute(
+				orgIDDataSourceAttribute("runner resource classes"),
+			),
 			"resource_class": schema.StringAttribute{
 				MarkdownDescription: "The resource class name in `namespace/name` format (e.g. `myorg/myrunner`).",
 				Required:            true,
@@ -69,6 +76,13 @@ func (d *runnerResourceClassDataSource) Schema(_ context.Context, _ datasource.S
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *runnerResourceClassDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read fetches the resource class from the API.
 func (d *runnerResourceClassDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var state runnerResourceClassDataSourceModel
@@ -78,14 +92,9 @@ func (d *runnerResourceClassDataSource) Read(ctx context.Context, req datasource
 		return
 	}
 
-	organizationId := state.OrganizationId.ValueString()
-	if !runnerOrgIDPattern.MatchString(organizationId) {
-		resp.Diagnostics.AddError(
-			"Invalid organization_id format",
-			fmt.Sprintf("Expected UUID format, got: %s", organizationId),
-		)
-		return
-	}
+	// The organization's UUID format is enforced by the attribute validators, so
+	// by here it is either well-formed or the plan already failed.
+	organizationId := effectiveOrgID(state.OrganizationId, state.OrgId)
 
 	rcName := state.ResourceClass.ValueString()
 	slashIdx := strings.Index(rcName, "/")

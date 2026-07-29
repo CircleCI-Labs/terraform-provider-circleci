@@ -75,20 +75,20 @@ slug-based route above cannot address a standalone (`circleci/<uuid>`) organizat
 
 | Route | Provider |
 |---|---|
-| `GET /projects/:project_id/pipeline-definitions` | `circleci_pipelines` |
-| `POST /projects/:project_id/pipeline-definitions` | `circleci_pipeline` |
-| `GET /projects/:project_id/pipeline-definitions/:id` | `circleci_pipeline` |
-| `PATCH /projects/:project_id/pipeline-definitions/:id` | `circleci_pipeline` |
-| `DELETE /projects/:project_id/pipeline-definitions/:id` | `circleci_pipeline` |
+| `GET /projects/:project_id/pipeline-definitions` | `circleci_pipeline_definitions` |
+| `POST /projects/:project_id/pipeline-definitions` | `circleci_pipeline_definition` |
+| `GET /projects/:project_id/pipeline-definitions/:id` | `circleci_pipeline_definition` |
+| `PATCH /projects/:project_id/pipeline-definitions/:id` | `circleci_pipeline_definition` |
+| `DELETE /projects/:project_id/pipeline-definitions/:id` | `circleci_pipeline_definition` |
 | `GET /projects/:project_id/pipeline-definitions/:id/triggers` | `circleci_triggers` |
 | `POST /projects/:project_id/pipeline-definitions/:id/triggers` | `circleci_trigger` |
 | `GET /projects/:project_id/triggers/:trigger_id` | `circleci_trigger` |
 | `PATCH /projects/:project_id/triggers/:trigger_id` | `circleci_trigger` |
 | `DELETE /projects/:project_id/triggers/:trigger_id` | `circleci_trigger` |
 | `POST /project/:provider/:org/:project/pipeline/run` | **no** — triggering a run is a runtime action, not desired state |
-| `POST /pipeline/search` | **gap** — would enrich `circleci_pipelines` with server-side filtering |
-| `GET /pipeline/:pipeline_id/values` | `circleci_pipeline_values` |
-| `GET /pipeline/{pipeline-id}/workflow` | `circleci_pipeline_workflows` — this was the missing middle of a chain exposed at both ends. `circleci_workflow` and `circleci_workflow_jobs` both need a workflow ID that nothing else could produce, so the only way in was to already know one. The chain is now `circleci_pipeline_run` → `circleci_pipeline_workflows` → `circleci_workflow_jobs` |
+| `POST /pipeline/search` | **no** — searches pipeline *runs*, not definitions, so it would not help `circleci_pipeline_definitions`. Selecting runs by criteria is a query, not desired state |
+| `GET /pipeline/:pipeline_id/values` | `circleci_pipeline_run_values` |
+| `GET /pipeline/{pipeline-id}/workflow` | `circleci_pipeline_run_workflows` — this was the missing middle of a chain exposed at both ends. `circleci_workflow` and `circleci_workflow_jobs` both need a workflow ID that nothing else could produce, so the only way in was to already know one. The chain is now `circleci_pipeline_run` → `circleci_pipeline_run_workflows` → `circleci_workflow_jobs` |
 | `POST /pipeline/continue` | **no** — dynamic-config continuation, called from inside a running job |
 | `GET /project/{project-slug}/pipeline/mine` | **no** — scoped to the calling token's own pipelines, which is not a declarable property |
 | `POST /projects/{project_id}/rollback` | **no** — performs a rollback. `circleci_deploy_settings` manages `rollback_pipeline_definition_id`, which *is* desired state; triggering the rollback is a runtime action |

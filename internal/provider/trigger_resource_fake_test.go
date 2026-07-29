@@ -444,7 +444,7 @@ func TestTriggerResourceUnit_GithubAppCRUD(t *testing.T) {
 				// no reference back. pipeline_id therefore round-trips only because
 				// the practitioner supplies it here.
 				ImportStateVerify: true,
-				ImportStateIdFunc: triggerImportID("circleci_trigger.test"),
+				ImportStateIdFunc: triggerImportID(),
 			},
 		},
 	})
@@ -568,7 +568,7 @@ func TestTriggerResourceUnit_WebhookCRUD(t *testing.T) {
 				// pre-existing gap noted in TestTriggerResourceUnit_GithubAppCRUD
 				// above.
 				ImportStateVerifyIgnore: []string{"event_source_web_hook_url"},
-				ImportStateIdFunc:       triggerImportID("circleci_trigger.test"),
+				ImportStateIdFunc:       triggerImportID(),
 			},
 		},
 	})
@@ -699,7 +699,7 @@ func TestTriggerResourceUnit_ScheduleCRUD(t *testing.T) {
 				ImportStateVerifyIgnore: []string{
 					"event_source_schedule_attribution_actor",
 				},
-				ImportStateIdFunc: triggerImportID("circleci_trigger.test"),
+				ImportStateIdFunc: triggerImportID(),
 			},
 		},
 	})
@@ -863,23 +863,26 @@ func TestTriggerResourceUnit_ServerErrorMentioning404DoesNotRemoveFromState(t *t
 }
 
 // triggerImportID builds the three-segment import id a trigger needs:
-// "project_id/pipeline_id/trigger_id". The middle segment cannot be recovered from
-// the API, which is why it is part of the address rather than something Read fills in.
-func triggerImportID(resourceAddr string) func(s *terraform.State) (string, error) {
+// "project_id/pipeline_definition_id/trigger_id". The middle segment cannot be
+// recovered from the API, which is why it is part of the address rather than something
+// Read fills in.
+func triggerImportID() func(s *terraform.State) (string, error) {
+	const resourceAddr = "circleci_trigger.test"
+
 	return func(s *terraform.State) (string, error) {
 		res := s.RootModule().Resources[resourceAddr]
 		if res == nil {
 			return "", fmt.Errorf("resource %s not found in state", resourceAddr)
 		}
 
-		for _, attr := range []string{"project_id", "pipeline_id", "id"} {
+		for _, attr := range []string{"project_id", "pipeline_definition_id", "id"} {
 			if _, ok := res.Primary.Attributes[attr]; !ok {
 				return "", fmt.Errorf("attribute %s.%s not found", resourceAddr, attr)
 			}
 		}
 
 		return res.Primary.Attributes["project_id"] + "/" +
-			res.Primary.Attributes["pipeline_id"] + "/" +
+			res.Primary.Attributes["pipeline_definition_id"] + "/" +
 			res.Primary.Attributes["id"], nil
 	}
 }

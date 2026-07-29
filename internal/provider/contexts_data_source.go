@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &contextsDataSource{}
-	_ datasource.DataSourceWithConfigure = &contextsDataSource{}
+	_ datasource.DataSource                     = &contextsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &contextsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &contextsDataSource{}
 )
 
 // contextsDataSourceModel maps the data source schema.
@@ -26,6 +27,7 @@ var (
 // single list-nested attribute named after the entity.
 type contextsDataSourceModel struct {
 	OrganizationID types.String       `tfsdk:"organization_id"`
+	OrgID          types.String       `tfsdk:"org_id"`
 	Contexts       []contextItemModel `tfsdk:"contexts"`
 }
 
@@ -61,10 +63,10 @@ func (d *contextsDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 			"environment variables. Use [`circleci_context_environment_variable`](./context_environment_variable) " +
 			"to read one variable, whose value the API masks in any case.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose contexts are listed.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("contexts"),
+			"org_id":          orgIDDataSourceAttribute("contexts"),
 			"contexts": schema.ListNestedAttribute{
 				MarkdownDescription: "The contexts in the organization, in the order the API returns them.",
 				Computed:            true,
@@ -89,6 +91,13 @@ func (d *contextsDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *contextsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the organization's contexts.
 func (d *contextsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var state contextsDataSourceModel
@@ -97,7 +106,7 @@ func (d *contextsDataSource) Read(ctx context.Context, req datasource.ReadReques
 		return
 	}
 
-	organizationID := state.OrganizationID.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationID, state.OrgID)
 
 	contexts, err := d.client.ListContexts(ctx, organizationID)
 	if err != nil {

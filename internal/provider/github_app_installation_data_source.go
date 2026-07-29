@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &githubAppInstallationDataSource{}
-	_ datasource.DataSourceWithConfigure = &githubAppInstallationDataSource{}
+	_ datasource.DataSource                     = &githubAppInstallationDataSource{}
+	_ datasource.DataSourceWithConfigure        = &githubAppInstallationDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &githubAppInstallationDataSource{}
 )
 
 // githubAppInstallationTypeName is used in diagnostics.
@@ -25,6 +26,7 @@ const githubAppInstallationTypeName = "circleci_github_app_installation"
 // githubAppInstallationDataSourceModel maps the data source schema.
 type githubAppInstallationDataSourceModel struct {
 	OrganizationID      types.String `tfsdk:"organization_id"`
+	OrgID               types.String `tfsdk:"org_id"`
 	ID                  types.Int64  `tfsdk:"id"`
 	TargetType          types.String `tfsdk:"target_type"`
 	Login               types.String `tfsdk:"login"`
@@ -63,11 +65,10 @@ func (d *githubAppInstallationDataSource) Schema(_ context.Context, _ datasource
 			"install route only hands back a redirect URL for a human to open.\n\n" +
 			githubAppRepositoryUnpublishedAPINote,
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the CircleCI organization whose GitHub App " +
-					"installation is looked up.",
-				Required: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("the GitHub App installation"),
+			"org_id":          orgIDDataSourceAttribute("the GitHub App installation"),
 			"id": schema.Int64Attribute{
 				MarkdownDescription: "The GitHub App installation's own numeric id. This identifies the " +
 					"installation itself, not any repository it can reach.",
@@ -91,6 +92,13 @@ func (d *githubAppInstallationDataSource) Schema(_ context.Context, _ datasource
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *githubAppInstallationDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read resolves the installation.
 func (d *githubAppInstallationDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	// The GitHub App integration only exists for `circleci` type (standalone)
@@ -106,7 +114,7 @@ func (d *githubAppInstallationDataSource) Read(ctx context.Context, req datasour
 		return
 	}
 
-	organizationID := state.OrganizationID.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationID, state.OrgID)
 
 	installation, err := d.client.GitHubApp().GetInstallation(ctx, organizationID)
 	if err != nil {

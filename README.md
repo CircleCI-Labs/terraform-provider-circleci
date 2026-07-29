@@ -75,8 +75,8 @@ deliberate: it is safer than a wrong `yes`.
 | ├ `set_github_status` | yes | yes | yes [^vcsstatus] | yes [^vcsstatus] | yes [^vcsstatus] | yes | yes |
 | `circleci_project_environment_variable` | yes | yes | yes | yes | yes | yes | yes |
 | `circleci_checkout_key` | **no** [^ckey] | yes | **no** [^ckey] | **no** [^ckey] | yes | **no** [^ckey] | yes |
-| `circleci_pipeline` (read) | yes | yes | yes | yes | yes | yes | **no** [^nopdserver] |
-| `circleci_pipeline` (create/update/delete) | yes | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | yes | **no** [^nopdserver] |
+| `circleci_pipeline_definition` (read) | yes | yes | yes | yes | yes | yes | **no** [^nopdserver] |
+| `circleci_pipeline_definition` (create/update/delete) | yes | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | yes | **no** [^nopdserver] |
 | `circleci_trigger` | yes | yes [^oauthtrig] | **no** | **no** | **no** [^bbtrig] | yes | **no** [^nopdserver] |
 | `circleci_webhook` | yes | yes | yes | yes | yes | yes | yes |
 | `circleci_runner_resource_class`, `circleci_runner_token` | yes | yes | yes | yes | yes | yes | yes [^runnerhost] |

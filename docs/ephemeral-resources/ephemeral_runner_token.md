@@ -41,8 +41,16 @@ resource "null_resource" "runner_agent" {
 ### Required
 
 - `nickname` (String) A human-readable label for the token.
-- `organization_id` (String) The UUID of the organization that owns the resource class.
 - `resource_class` (String) The resource class this token grants access to, in `namespace/name` format (e.g. `myorg/myrunner`).
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns the resource class this token is for.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns the resource class this token is for.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 
 ### Read-Only
 

@@ -49,8 +49,8 @@ org). To test what we ship, we need one of each.
 | 3 | **GitLab Cloud** | `circleci/<uuid>` | Standalone. Checkout keys are documented as unavailable — we need to prove our resources fail cleanly rather than confusingly. |
 | 4 | **GitLab self-managed** | `circleci/<uuid>` | Separate connection type from GitLab Cloud; worth confirming it is not silently different. |
 | 5 | **Bitbucket Cloud** | `bitbucket/<org>` (`bb/<org>`) | Different feature set again; `set_github_status` is meaningless here. |
-| 6 | **GitHub Enterprise Server** | `circleci/<uuid>` | The `github_server` provider value in `circleci_pipeline` / `circleci_trigger` exists solely for this and is currently untested. |
-| 7 | **CircleCI Server** | n/a — separate installation | The `deployment = "server"` path. Orthogonal to the above: Server does not route `/api/v3`, and `circleci_pipeline` / `circleci_trigger` do not exist there at all. |
+| 6 | **GitHub Enterprise Server** | `circleci/<uuid>` | The `github_server` provider value in `circleci_pipeline_definition` / `circleci_trigger` exists solely for this and is currently untested. |
+| 7 | **CircleCI Server** | n/a — separate installation | The `deployment = "server"` path. Orthogonal to the above: Server does not route `/api/v3`, and `circleci_pipeline_definition` / `circleci_trigger` do not exist there at all. |
 
 Numbers 1–6 are organizations on CircleCI Cloud. Number 7 is a whole
 installation, and is the one that needs the most lead time.

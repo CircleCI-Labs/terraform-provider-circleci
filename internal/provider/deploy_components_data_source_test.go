@@ -37,8 +37,14 @@ func TestDeployComponentsDataSourceSchema(t *testing.T) {
 		t.Fatalf("schema validation returned diagnostics: %v", diags)
 	}
 
-	if !resp.Schema.Attributes["organization_id"].IsRequired() {
-		t.Error("organization_id is not required, but it is the scope of the listing")
+	// The organization is the scope of the listing, but it is accepted as either
+	// `organization_id` or `org_id` while the former is deprecated, so both are
+	// Optional and the config validator requires exactly one. See
+	// org_id_deprecation.go.
+	for _, name := range []string{"organization_id", "org_id"} {
+		if !resp.Schema.Attributes[name].IsOptional() {
+			t.Errorf("attribute %q is not optional, but one of the pair must be settable", name)
+		}
 	}
 	if !resp.Schema.Attributes["project_id"].IsOptional() {
 		t.Error("project_id is not optional, but it is a filter")

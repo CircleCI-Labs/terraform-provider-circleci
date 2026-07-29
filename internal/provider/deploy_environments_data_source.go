@@ -17,8 +17,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &deployEnvironmentsDataSource{}
-	_ datasource.DataSourceWithConfigure = &deployEnvironmentsDataSource{}
+	_ datasource.DataSource                     = &deployEnvironmentsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &deployEnvironmentsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &deployEnvironmentsDataSource{}
 )
 
 // deployEnvironmentsTypeName is the data source's type name, used in diagnostics.
@@ -27,6 +28,7 @@ const deployEnvironmentsTypeName = "circleci_deploy_environments"
 // deployEnvironmentsDataSourceModel maps the data source schema.
 type deployEnvironmentsDataSourceModel struct {
 	OrganizationId types.String             `tfsdk:"organization_id"`
+	OrgId          types.String             `tfsdk:"org_id"`
 	Environments   []deployEnvironmentModel `tfsdk:"environments"`
 }
 
@@ -98,10 +100,10 @@ func (d *deployEnvironmentsDataSource) Schema(_ context.Context, _ datasource.Sc
 			"Pagination is followed internally, so the result covers every environment rather than one page.\n\n" +
 			"~> **CircleCI Cloud only.** Deploy/release tracking is not part of CircleCI Server.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose environments are listed.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("deploy environments"),
+			"org_id":          orgIDDataSourceAttribute("deploy environments"),
 			"environments": schema.ListNestedAttribute{
 				MarkdownDescription: "The environments in the organization, sorted by name.",
 				Computed:            true,
@@ -113,6 +115,13 @@ func (d *deployEnvironmentsDataSource) Schema(_ context.Context, _ datasource.Sc
 				},
 			},
 		},
+	}
+}
+
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *deployEnvironmentsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
 	}
 }
 
@@ -128,7 +137,7 @@ func (d *deployEnvironmentsDataSource) Read(ctx context.Context, req datasource.
 		return
 	}
 
-	orgID := state.OrganizationId.ValueString()
+	orgID := effectiveOrgID(state.OrganizationId, state.OrgId)
 
 	envs, err := d.client.DeployEnvironments().List(ctx, orgID)
 	if err != nil {

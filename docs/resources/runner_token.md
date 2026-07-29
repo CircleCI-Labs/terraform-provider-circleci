@@ -32,8 +32,18 @@ output "runner_token" {
 ### Required
 
 - `nickname` (String) A human-readable label for the token. Changing this value forces a new resource to be created.
-- `organization_id` (String) The ID of the organization that owns the resource class. Changing this value forces a new resource to be created.
 - `resource_class` (String) The resource class this token grants access to, in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this runner token.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this runner token.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

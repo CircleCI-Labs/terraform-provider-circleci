@@ -19,19 +19,20 @@ var (
 	_ datasource.DataSourceWithConfigure = &pipelinesDataSource{}
 )
 
-// pipelinesTypeName is the Terraform type name, used in the Cloud-only
+// pipelineDefinitionsTypeName is the Terraform type name, used in the Cloud-only
 // diagnostic.
-const pipelinesTypeName = "circleci_pipelines"
+const pipelineDefinitionsTypeName = "circleci_pipeline_definitions"
 
 // pipelinesDataSourceModel maps the data source schema.
 type pipelinesDataSourceModel struct {
-	ProjectID types.String        `tfsdk:"project_id"`
-	Pipelines []pipelineItemModel `tfsdk:"pipelines"`
+	ProjectID           types.String        `tfsdk:"project_id"`
+	PipelineDefinitions []pipelineItemModel `tfsdk:"pipeline_definitions"`
 }
 
 // pipelineItemModel maps one pipeline definition in the list. The attribute names
-// match `circleci_pipeline`, including the flattened config and checkout sources,
-// so a definition read here and one read there describe themselves the same way.
+// match `circleci_pipeline_definition`, including the flattened config and checkout
+// sources, so a definition read here and one read there describe themselves the same
+// way.
 type pipelineItemModel struct {
 	ID                           types.String `tfsdk:"id"`
 	Name                         types.String `tfsdk:"name"`
@@ -46,8 +47,9 @@ type pipelineItemModel struct {
 	CheckoutSourceRepoExternalID types.String `tfsdk:"checkout_source_repo_external_id"`
 }
 
-// NewPipelinesDataSource is a helper function to simplify the provider implementation.
-func NewPipelinesDataSource() datasource.DataSource {
+// NewPipelineDefinitionsDataSource is a helper function to simplify the provider
+// implementation.
+func NewPipelineDefinitionsDataSource() datasource.DataSource {
 	return &pipelinesDataSource{}
 }
 
@@ -58,7 +60,7 @@ type pipelinesDataSource struct {
 
 // Metadata returns the data source type name.
 func (d *pipelinesDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_pipelines"
+	resp.TypeName = req.ProviderTypeName + "_pipeline_definitions"
 }
 
 // Schema defines the schema for the data source.
@@ -76,9 +78,10 @@ func (d *pipelinesDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 				MarkdownDescription: "Unique identifier (UUID) of the project whose pipeline definitions are listed.",
 				Required:            true,
 			},
-			"pipelines": schema.ListNestedAttribute{
-				MarkdownDescription: "The pipeline definitions on the project, in the order the API returns them.",
-				Computed:            true,
+			"pipeline_definitions": schema.ListNestedAttribute{
+				MarkdownDescription: "The pipeline definitions on the project, in the order the API " +
+					"returns them.",
+				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"id": schema.StringAttribute{
@@ -137,7 +140,7 @@ func (d *pipelinesDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 func (d *pipelinesDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	// Gate before the request: on CircleCI Server the route is not present at all
 	// and the HTTP 404 would read as "no such project".
-	if !requireCloud(d.client, pipelinesTypeName, &resp.Diagnostics) {
+	if !requireCloud(d.client, pipelineDefinitionsTypeName, &resp.Diagnostics) {
 		return
 	}
 
@@ -161,9 +164,9 @@ func (d *pipelinesDataSource) Read(ctx context.Context, req datasource.ReadReque
 
 	// An empty, non-null list keeps `for_each` and `length()` working against a
 	// project that has no pipeline definitions yet.
-	state.Pipelines = make([]pipelineItemModel, 0, len(definitions))
+	items := make([]pipelineItemModel, 0, len(definitions))
 	for _, definition := range definitions {
-		state.Pipelines = append(state.Pipelines, pipelineItemModel{
+		items = append(items, pipelineItemModel{
 			ID:                           types.StringValue(definition.ID),
 			Name:                         types.StringValue(definition.Name),
 			Description:                  types.StringValue(definition.Description),
@@ -177,6 +180,8 @@ func (d *pipelinesDataSource) Read(ctx context.Context, req datasource.ReadReque
 			CheckoutSourceRepoExternalID: types.StringValue(definition.CheckoutSource.Repo.ExternalID),
 		})
 	}
+
+	state.PipelineDefinitions = items
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

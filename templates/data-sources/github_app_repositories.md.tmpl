@@ -27,7 +27,7 @@ Pagination is followed internally, so the result covers every repository rather 
 
 ~> **This data source reads an unpublished CircleCI API, deliberately.** The route is declared in CircleCI's own API definitions only so that request validation accepts it, under a comment marking it *"Internal / CLI-only. Defined here so the validation middleware accepts them, but intentionally NOT customer-facing: they are excluded from the public docs bundles."* It does not appear in the published OpenAPI spec or in the CircleCI API reference, and it therefore carries **no compatibility guarantee** — CircleCI may change its response shape, its path, or withdraw it entirely, without notice and without a deprecation window.
 
-It is used here because there is no published way to resolve a repository name to the numeric external ID that `circleci_pipeline` and `circleci_trigger` require. See `circleci_github_app_repository` for the single-repository lookup and the full rationale.
+It is used here because there is no published way to resolve a repository name to the numeric external ID that `circleci_pipeline_definition` and `circleci_trigger` require. See `circleci_github_app_repository` for the single-repository lookup and the full rationale.
 
 ## An empty list is ambiguous
 

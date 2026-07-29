@@ -29,9 +29,11 @@ const triggerTypeName = "circleci_trigger"
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &triggerResource{}
-	_ resource.ResourceWithConfigure   = &triggerResource{}
-	_ resource.ResourceWithImportState = &triggerResource{}
+	_ resource.Resource                     = &triggerResource{}
+	_ resource.ResourceWithConfigure        = &triggerResource{}
+	_ resource.ResourceWithImportState      = &triggerResource{}
+	_ resource.ResourceWithConfigValidators = &triggerResource{}
+	_ resource.ResourceWithModifyPlan       = &triggerResource{}
 )
 
 // triggerResourceModel maps the output schema.
@@ -39,6 +41,7 @@ type triggerResourceModel struct {
 	Id                                  types.String `tfsdk:"id"`
 	ProjectId                           types.String `tfsdk:"project_id"`
 	PipelineId                          types.String `tfsdk:"pipeline_id"`
+	PipelineDefinitionId                types.String `tfsdk:"pipeline_definition_id"`
 	CreatedAt                           types.String `tfsdk:"created_at"`
 	CheckoutRef                         types.String `tfsdk:"checkout_ref"`
 	ConfigRef                           types.String `tfsdk:"config_ref"`
@@ -90,13 +93,10 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				MarkdownDescription: "The ID of the project this trigger belongs to.",
 				Required:            true,
 			},
-			"pipeline_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the pipeline this trigger is associated with.",
-				Required:            true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
-				},
-			},
+			// See pipeline_definition_id_deprecation.go: this pair takes a pipeline
+			// *definition* id under two names while `pipeline_id` is retired.
+			"pipeline_id":            deprecatedTriggerPipelineIDAttribute(),
+			"pipeline_definition_id": triggerPipelineDefinitionIDAttribute(),
 			"created_at": schema.StringAttribute{
 				MarkdownDescription: "The timestamp when the trigger was created.",
 				Computed:            true,
@@ -180,6 +180,45 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			},
 		},
 	}
+}
+
+// ConfigValidators requires exactly one of the two pipeline definition id names.
+func (r *triggerResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		pipelineDefinitionIDConfigValidator(),
+	}
+}
+
+// ModifyPlan applies the Cloud-only gate and makes `pipeline_id` and
+// `pipeline_definition_id` agree in the plan.
+//
+// The gate is the same one cloud_only.go applies to every other Cloud-only type; it is
+// here because a resource has exactly one ModifyPlan and this one has a second job.
+//
+// Both id attributes are Optional+Computed, so the name the practitioner did not write
+// is planned as its retained prior value. Changing the definition would otherwise plan
+// one name as the new id and the other as the old one, and persist both — state naming
+// two different definitions, which the next Read resolves to the stale one. See
+// pipeline_definition_id_deprecation.go.
+func (r *triggerResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if r.client != nil && !req.Plan.Raw.IsNull() {
+		requireCloud(r.client, triggerTypeName, &resp.Diagnostics)
+	}
+
+	// Ask before reading the configuration: a destroy plans a null config, and
+	// Get-ing that into the model fails with a value-conversion error.
+	if !pipelineDefinitionIDPlanNeedsReconcile(req) {
+		return
+	}
+
+	var config triggerResourceModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	reconcilePipelineDefinitionIDPlan(ctx, resp, config.PipelineId, config.PipelineDefinitionId)
 }
 
 // Create creates the resource and sets the initial Terraform state.
@@ -335,11 +374,18 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 		Parameters:  parameters,
 	}
 
+	// Whichever of the two names the configuration used; see
+	// pipeline_definition_id_deprecation.go.
+	pipelineDefinitionID := effectivePipelineDefinitionID(
+		circleCiTerrformTriggerResource.PipelineId,
+		circleCiTerrformTriggerResource.PipelineDefinitionId,
+	)
+
 	// Create new Trigger
 	newReturnedTrigger, err := r.client.CreateTrigger(
 		ctx,
 		circleCiTerrformTriggerResource.ProjectId.ValueString(),
-		circleCiTerrformTriggerResource.PipelineId.ValueString(),
+		pipelineDefinitionID,
 		newTrigger,
 	)
 	if err != nil {
@@ -352,7 +398,14 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 
 	// Map response body to schema and populate Computed attribute values
 	circleCiTerrformTriggerResource.Id = types.StringValue(newReturnedTrigger.ID)
-	circleCiTerrformTriggerResource.PipelineId = types.StringValue(circleCiTerrformTriggerResource.PipelineId.ValueString())
+	// Both names, so neither is left unknown in state and switching between them is
+	// not a change. The API never echoes the definition back, so this is the value we
+	// created against.
+	setPipelineDefinitionIDs(
+		&circleCiTerrformTriggerResource.PipelineId,
+		&circleCiTerrformTriggerResource.PipelineDefinitionId,
+		pipelineDefinitionID,
+	)
 	if newReturnedTrigger.CheckoutRef != "" {
 		circleCiTerrformTriggerResource.CheckoutRef = types.StringValue(newReturnedTrigger.CheckoutRef)
 	}
@@ -706,7 +759,8 @@ func (r *triggerResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.client = client
 }
 
-// ImportState imports a trigger from a "project_id/pipeline_id/trigger_id" address.
+// ImportState imports a trigger from a "project_id/pipeline_definition_id/trigger_id"
+// address.
 //
 // The pipeline definition id has to be part of the import address because **the API
 // never returns it.** A trigger is *created* under a definition
@@ -714,11 +768,10 @@ func (r *triggerResource) Configure(_ context.Context, req resource.ConfigureReq
 // the project (GET /projects/{project_id}/triggers/{trigger_id}), and the response
 // body carries no reference back to the definition — see circleci.Trigger.
 //
-// The import id used to be just "project_id/trigger_id", which meant `pipeline_id`
-// (a Required attribute) stayed null in state after every import. The next plan then
-// saw a Required attribute missing and there was nothing the practitioner could do
-// short of editing state by hand. Asking for the third segment is the only way to
-// make import produce usable state.
+// The import id used to be just "project_id/trigger_id", which meant the definition id
+// stayed null in state after every import. The next plan then saw it missing and there
+// was nothing the practitioner could do short of editing state by hand. Asking for the
+// third segment is the only way to make import produce usable state.
 func (r *triggerResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	const wantSegments = 3
 
@@ -726,13 +779,14 @@ func (r *triggerResource) ImportState(ctx context.Context, req resource.ImportSt
 
 	if len(parts) != wantSegments || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		detail := fmt.Sprintf(
-			"Expected import ID format: 'project_id/pipeline_id/trigger_id'. Got: %s", req.ID,
+			"Expected import ID format: 'project_id/pipeline_definition_id/trigger_id'. Got: %s",
+			req.ID,
 		)
 		if len(parts) == 2 {
 			// The old two-segment form. Say so explicitly: it used to be accepted, and
-			// silently producing state with a null pipeline_id is what this replaced.
+			// silently producing state with no definition id is what this replaced.
 			detail += "\n\nEarlier provider versions accepted 'project_id/trigger_id', but that " +
-				"left pipeline_id unset because the API does not return the pipeline definition " +
+				"left the definition id unset because the API does not return the pipeline definition " +
 				"a trigger belongs to. Add the pipeline definition id as the middle segment."
 		}
 
@@ -741,11 +795,19 @@ func (r *triggerResource) ImportState(ctx context.Context, req resource.ImportSt
 		return
 	}
 
-	projectID, pipelineID, triggerID := parts[0], parts[1], parts[2]
+	projectID, pipelineDefinitionID, triggerID := parts[0], parts[1], parts[2]
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), triggerID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_id"), projectID)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("pipeline_id"), pipelineID)...)
+	// Both names: they are Computed, so an import that filled only one would leave the
+	// other null in state, and the first plan afterwards would show a diff on an
+	// attribute the practitioner cannot correct.
+	resp.Diagnostics.Append(
+		resp.State.SetAttribute(ctx, path.Root("pipeline_id"), pipelineDefinitionID)...,
+	)
+	resp.Diagnostics.Append(
+		resp.State.SetAttribute(ctx, path.Root("pipeline_definition_id"), pipelineDefinitionID)...,
+	)
 }
 
 func isValidEventPreset(eventPreset string) bool {

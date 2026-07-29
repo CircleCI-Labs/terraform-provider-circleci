@@ -30,7 +30,24 @@ type runnersDataSourceModel struct {
 	ResourceClass  types.String      `tfsdk:"resource_class"`
 	Namespace      types.String      `tfsdk:"namespace"`
 	OrganizationId types.String      `tfsdk:"organization_id"`
+	OrgId          types.String      `tfsdk:"org_id"`
 	Runners        []runnerItemModel `tfsdk:"runners"`
+}
+
+// runnerOrgIDDataSourceAttribute adds the runner API's UUID-only organization
+// check to one of the shared organization attributes from org_id_deprecation.go.
+//
+// The runner routes take an organization UUID and reject a `vcs/org` slug with an
+// opaque HTTP 400, so the format is enforced at plan time instead. The shared
+// builders carry no validators, so the two runner data sources wrap them here
+// rather than each spelling the attribute out again and drifting from the
+// deprecation wording.
+func runnerOrgIDDataSourceAttribute(attribute schema.StringAttribute) schema.StringAttribute {
+	attribute.Validators = []validator.String{
+		stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
+	}
+
+	return attribute
 }
 
 // runnerItemModel maps one registered runner agent in the list.
@@ -63,12 +80,23 @@ func (d *runnersDataSource) Metadata(_ context.Context, req datasource.MetadataR
 
 // ConfigValidators requires at least one filter. The runner API rejects an
 // unfiltered list, so refusing it at plan time is clearer than a 400.
+//
+// The organization filter counts under either of its two names, so this is not
+// orgIDDataSourceConfigValidator: the organization is optional here, and
+// requiring exactly one of the pair would break a namespace-only listing, which
+// is a supported configuration today. What the pair still must not be is both at
+// once, which the Conflicting validator covers. See org_id_deprecation.go.
 func (d *runnersDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
 	return []datasource.ConfigValidator{
 		datasourcevalidator.AtLeastOneOf(
 			path.MatchRoot("resource_class"),
 			path.MatchRoot("namespace"),
 			path.MatchRoot("organization_id"),
+			path.MatchRoot("org_id"),
+		),
+		datasourcevalidator.Conflicting(
+			path.MatchRoot("organization_id"),
+			path.MatchRoot("org_id"),
 		),
 	}
 }
@@ -77,7 +105,8 @@ func (d *runnersDataSource) ConfigValidators(_ context.Context) []datasource.Con
 func (d *runnersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Lists the self-hosted runner agents registered with CircleCI. " +
-			"At least one of `resource_class`, `namespace` or `organization_id` must be set.\n\n" +
+			"At least one of `resource_class`, `namespace` or `org_id` (or the deprecated " +
+			"`organization_id`) must be set.\n\n" +
 			"Available on CircleCI Cloud and CircleCI Server. On Server the runner API is served by " +
 			"your own installation, so the provider's `runner_host` attribute must be set to your " +
 			"Server hostname.\n\n" +
@@ -97,13 +126,14 @@ func (d *runnersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "Only return runners in this runner namespace.",
 				Optional:            true,
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Only return runners owned by this organization, as an organization UUID.",
-				Optional:            true,
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
-				},
-			},
+			// Only return runners owned by this organization. See
+			// org_id_deprecation.go for why it is accepted under two names.
+			"organization_id": runnerOrgIDDataSourceAttribute(
+				deprecatedOrgIDDataSourceAttribute("runners"),
+			),
+			"org_id": runnerOrgIDDataSourceAttribute(
+				orgIDDataSourceAttribute("runners"),
+			),
 			"runners": schema.ListNestedAttribute{
 				MarkdownDescription: "The matching runner agents, in the order the API returned them.",
 				Computed:            true,
@@ -163,7 +193,7 @@ func (d *runnersDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	params := circleci.ListRunnersParams{
 		ResourceClass: config.ResourceClass.ValueString(),
 		Namespace:     config.Namespace.ValueString(),
-		OrgID:         config.OrganizationId.ValueString(),
+		OrgID:         effectiveOrgID(config.OrganizationId, config.OrgId),
 	}
 
 	runners, err := d.client.ListRunners(ctx, params)

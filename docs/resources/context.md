@@ -24,7 +24,17 @@ resource "circleci_context" "example" {
 ### Required
 
 - `name` (String) The name of the CircleCI context. Changing this value forces a new resource to be created.
-- `organization_id` (String) The ID of the organization that owns this context. There is no API route to move a context between organizations, so changing this value forces a new resource to be created.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this context.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this context.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

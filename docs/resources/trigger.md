@@ -32,7 +32,7 @@ installation does not expose.
 ```terraform
 resource "circleci_trigger" "github" {
   project_id                    = "00000000-0000-0000-0000-000000000000"
-  pipeline_id                   = "00000000-0000-0000-0000-000000000001"
+  pipeline_definition_id        = "00000000-0000-0000-0000-000000000001"
   event_source_provider         = "github_app"
   event_preset                  = "all-pushes"
   event_source_repo_external_id = "12345678"
@@ -43,15 +43,15 @@ resource "circleci_trigger" "github" {
 
 ```terraform
 resource "circleci_trigger" "scheduled" {
-  project_id                               = "00000000-0000-0000-0000-000000000000"
-  pipeline_id                              = "00000000-0000-0000-0000-000000000001"
-  event_source_provider                    = "schedule"
-  event_name                               = "nightly-build"
-  checkout_ref                             = "main"
-  config_ref                               = "main"
-  event_source_schedule_cron_expression    = "0 2 * * *"
-  event_source_schedule_attribution_actor  = "system"
-  parameters                               = {
+  project_id                              = "00000000-0000-0000-0000-000000000000"
+  pipeline_definition_id                  = "00000000-0000-0000-0000-000000000001"
+  event_source_provider                   = "schedule"
+  event_name                              = "nightly-build"
+  checkout_ref                            = "main"
+  config_ref                              = "main"
+  event_source_schedule_cron_expression   = "0 2 * * *"
+  event_source_schedule_attribution_actor = "system"
+  parameters                              = {
     run_nightly_foo = "true"
     branch          = "main"
   }
@@ -63,7 +63,7 @@ resource "circleci_trigger" "scheduled" {
 ```terraform
 resource "circleci_trigger" "webhook" {
   project_id                   = "00000000-0000-0000-0000-000000000000"
-  pipeline_id                  = "00000000-0000-0000-0000-000000000001"
+  pipeline_definition_id       = "00000000-0000-0000-0000-000000000001"
   event_source_provider        = "webhook"
   event_name                   = "my-webhook-event"
   checkout_ref                 = "main"
@@ -82,7 +82,6 @@ resource "circleci_trigger" "webhook" {
 ~> The required attributes differ per provider, because this one endpoint covers several contracts. `event_name` is required for `webhook` and `schedule` only. `checkout_ref` and `config_ref` are required for `webhook` and `schedule`. `event_preset` is required for `github_oauth` and accepts only `all-pushes` or `only-build-prs` there, is optional for `github_app` and `github_server`, and must be omitted for `webhook` and `schedule`. `disabled` is unsupported for `github_oauth`, and `parameters` is supported only for `schedule`.
 
 GitLab and Bitbucket Cloud pipelines cannot be given triggers through this API.
-- `pipeline_id` (String) The ID of the pipeline this trigger is associated with.
 - `project_id` (String) The ID of the project this trigger belongs to.
 
 ### Optional
@@ -97,6 +96,12 @@ GitLab and Bitbucket Cloud pipelines cannot be given triggers through this API.
 - `event_source_schedule_cron_expression` (String) Cron expression for the schedule event source. Required when event_source_provider is schedule.
 - `event_source_web_hook_sender` (String) The webhook sender identifier. Required when `event_source_provider` is `webhook`.
 - `parameters` (Map of String) Pipeline parameters to pass when running pipelines from this trigger. Only supported when `event_source_provider` is `schedule`.
+- `pipeline_definition_id` (String) Unique identifier (UUID) of the [`circleci_pipeline_definition`](pipeline_definition) this trigger creates pipeline runs from.
+
+This is a pipeline **definition** — where to check out code and where to find configuration — not a pipeline run. Same field as the deprecated `pipeline_id`; set exactly one of the two.
+- `pipeline_id` (String, Deprecated) Unique identifier (UUID) of the pipeline definition this trigger creates pipeline runs from.
+
+~> **Deprecated in favour of `pipeline_definition_id`.** This attribute has always taken the id of a [`circleci_pipeline_definition`](pipeline_definition), not of a pipeline run, which is what `pipeline_id` means on the run-scoped data sources. Both names work and mean the same thing; set exactly one. Switching to `pipeline_definition_id` does not replace the trigger.
 
 ### Read-Only
 
@@ -107,20 +112,20 @@ GitLab and Bitbucket Cloud pipelines cannot be given triggers through this API.
 
 ## Import
 
-Import is supported using `project_id/pipeline_id/trigger_id`:
+Import is supported using `project_id/pipeline_definition_id/trigger_id`:
 
 ```shell
-terraform import circleci_trigger.example "<project_id>/<pipeline_id>/<trigger_id>"
+terraform import circleci_trigger.example "<project_id>/<pipeline_definition_id>/<trigger_id>"
 ```
 
 -> **Why the pipeline definition id is part of the address.** A trigger is *created*
 under a pipeline definition (`POST .../pipeline-definitions/{pipeline_definition_id}/triggers`)
 but *read* under the project (`GET /projects/{project_id}/triggers/{trigger_id}`), and
-the read response carries no reference back to the definition. `pipeline_id` therefore
-cannot be recovered from the API and has to be supplied.
+the read response carries no reference back to the definition. The definition id
+therefore cannot be recovered from the API and has to be supplied.
 
 ~> **Changed in 0.5.0.** Earlier versions accepted `project_id/trigger_id`. That form
-left `pipeline_id` — a required attribute — unset in state after import, leaving the
-next plan with no way to converge short of editing state by hand. Supplying the third
-segment is what makes import produce usable state; the two-segment form now reports an
-error explaining this rather than silently importing something broken.
+left the pipeline definition id unset in state after import, leaving the next plan with
+no way to converge short of editing state by hand. Supplying the third segment is what
+makes import produce usable state; the two-segment form now reports an error explaining
+this rather than silently importing something broken.

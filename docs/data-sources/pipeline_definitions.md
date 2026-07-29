@@ -1,15 +1,20 @@
 ---
-page_title: "circleci_pipelines Data Source - circleci"
+page_title: "circleci_pipeline_definitions Data Source - circleci"
 subcategory: ""
 description: |-
   Fetches every pipeline definition on a CircleCI project.
 ---
 
-# circleci_pipelines (Data Source)
+# circleci_pipeline_definitions (Data Source)
 
 Fetches every pipeline definition on a CircleCI project, including definitions
-created outside Terraform. Use [`circleci_pipeline`](pipeline) to fetch one
-definition by id, and [`circleci_pipeline`](../resources/pipeline) to manage one.
+created outside Terraform. Use
+[`circleci_pipeline_definition`](pipeline_definition) to fetch one definition by id,
+and [`circleci_pipeline_definition`](../resources/pipeline_definition) to manage one.
+
+-> **These are definitions, not runs.** Each item here is a declared pairing of a
+config source and a checkout source, not an execution of one; for those see
+[`circleci_pipeline_run`](pipeline_run).
 
 ## Availability
 
@@ -26,23 +31,29 @@ indistinguishable from a project that does not exist, so this data source reject
 ## Example Usage
 
 ```terraform
-data "circleci_pipelines" "project" {
+# Lists every pipeline definition on a project. Unlike the singular
+# circleci_pipeline_definition data source, this needs no definition ID, so it
+# is the way to discover definitions Terraform did not create.
+#
+# CircleCI Cloud only: CircleCI Server does not route pipeline-definitions.
+data "circleci_pipeline_definitions" "project" {
   project_id = "00000000-0000-0000-0000-000000000000"
 }
 
-output "circleci_pipeline_names" {
-  value = [for pipeline in data.circleci_pipelines.project.pipelines : pipeline.name]
+output "circleci_pipeline_definition_names" {
+  value = [for definition in data.circleci_pipeline_definitions.project.pipeline_definitions : definition.name]
 }
 
-# The triggers data source is scoped by pipeline definition, so pair the two to
-# walk every trigger on the project.
+# Triggers hang off a pipeline definition, so pair the two to walk every trigger
+# on the project.
 data "circleci_triggers" "all" {
   for_each = {
-    for pipeline in data.circleci_pipelines.project.pipelines : pipeline.name => pipeline.id
+    for definition in data.circleci_pipeline_definitions.project.pipeline_definitions :
+    definition.name => definition.id
   }
 
-  project_id  = data.circleci_pipelines.project.project_id
-  pipeline_id = each.value
+  project_id             = data.circleci_pipeline_definitions.project.project_id
+  pipeline_definition_id = each.value
 }
 ```
 
@@ -55,10 +66,10 @@ data "circleci_triggers" "all" {
 
 ### Read-Only
 
-- `pipelines` (Attributes List) The pipeline definitions on the project, in the order the API returns them. (see [below for nested schema](#nestedatt--pipelines))
+- `pipeline_definitions` (Attributes List) The pipeline definitions on the project, in the order the API returns them. (see [below for nested schema](#nestedatt--pipeline_definitions))
 
-<a id="nestedatt--pipelines"></a>
-### Nested Schema for `pipelines`
+<a id="nestedatt--pipeline_definitions"></a>
+### Nested Schema for `pipeline_definitions`
 
 Read-Only:
 
@@ -77,12 +88,13 @@ Read-Only:
 ## Notes
 
 * The nested `config_source` and `checkout_source` objects are flattened into
-  prefixed attributes, matching [`circleci_pipeline`](pipeline).
+  prefixed attributes, matching
+  [`circleci_pipeline_definition`](pipeline_definition).
 * A definition may take its configuration from one repository and its code from
   another, which is why the two sources are reported separately.
 * `description`, `created_at` and the repository fields are omitted by the API
   when unknown and read back as empty strings.
 * The endpoint returns every definition in one response, so there is no
   pagination to follow.
-* `pipelines` is always a list, empty when the project has no definitions, so
-  configurations can iterate over it unconditionally.
+* `pipeline_definitions` is always a list, empty when the project has no
+  definitions, so configurations can iterate over it unconditionally.

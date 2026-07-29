@@ -1,6 +1,6 @@
 resource "circleci_trigger" "scheduled" {
   project_id                              = "00000000-0000-0000-0000-000000000000"
-  pipeline_id                             = "00000000-0000-0000-0000-000000000001"
+  pipeline_definition_id                  = "00000000-0000-0000-0000-000000000001"
   event_source_provider                   = "schedule"
   event_name                              = "nightly-build"
   checkout_ref                            = "main"

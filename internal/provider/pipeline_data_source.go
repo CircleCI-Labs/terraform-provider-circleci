@@ -35,19 +35,30 @@ type pipelineDataSourceModel struct {
 	CheckoutSourceRepoExternalId types.String `tfsdk:"checkout_source_repo_external_id"`
 }
 
-// NewPipelineDataSource is a helper function to simplify the provider implementation.
-func NewPipelineDataSource() datasource.DataSource {
+// NewPipelineDefinitionDataSource is a helper function to simplify the provider
+// implementation.
+func NewPipelineDefinitionDataSource() datasource.DataSource {
 	return &PipelineDataSource{}
+}
+
+// NewDeprecatedPipelineDataSource registers the same implementation under the old
+// type name, circleci_pipeline. See pipeline_rename.go.
+func NewDeprecatedPipelineDataSource() datasource.DataSource {
+	return &PipelineDataSource{deprecated: true}
 }
 
 // PipelineDataSource is the data source implementation.
 type PipelineDataSource struct {
 	client *circleci.Client
+
+	// deprecated marks the copy registered under the old type name.
+	deprecated bool
 }
 
 // Metadata returns the data source type name.
 func (d *PipelineDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_pipeline"
+	resp.TypeName = req.ProviderTypeName +
+		renamedTypeName(d.deprecated, "_pipeline", "_pipeline_definition")
 }
 
 // Schema defines the schema for the data source.
@@ -107,13 +118,19 @@ func (d *PipelineDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 			},
 		},
 	}
+
+	if d.deprecated {
+		deprecateRenamedDataSource(&resp.Schema, pipelineTypeName, pipelineDefinitionTypeName,
+			"reads a pipeline definition, not a pipeline run")
+	}
 }
 
 // Read refreshes the Terraform state with the latest data.
 func (d *PipelineDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	// Gate before the request: on CircleCI Server the route is not present at
 	// all and the HTTP 404 would read as "no such pipeline".
-	if !requireCloud(d.client, pipelineTypeName, &resp.Diagnostics) {
+	typeName := renamedTypeName(d.deprecated, pipelineTypeName, pipelineDefinitionTypeName)
+	if !requireCloud(d.client, typeName, &resp.Diagnostics) {
 		return
 	}
 

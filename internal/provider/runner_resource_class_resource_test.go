@@ -47,10 +47,14 @@ func TestAccRunnerResourceClassResource(t *testing.T) {
 			},
 			// ImportState testing
 			{
-				ResourceName:            "circleci_runner_resource_class.test",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"force_delete", "organization_id"}, // force_delete is not stored in API, organization_id is not importable
+				ResourceName:      "circleci_runner_resource_class.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// force_delete is not stored by the API, and neither organization
+				// attribute name is importable: the import ID is the resource class
+				// string alone, and the API reports no organization on a resource
+				// class to recover one from.
+				ImportStateVerifyIgnore: []string{"force_delete", "organization_id", "org_id"},
 				ImportStateId:           resourceClass,
 			},
 			// Update after import testing

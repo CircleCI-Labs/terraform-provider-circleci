@@ -45,11 +45,18 @@ resource "circleci_group" "developers" {
 ### Required
 
 - `name` (String) Name of the group. Changing this value forces a new resource to be created.
-- `organization_id` (String) Unique identifier (UUID) of the organization the group belongs to. Changing this value forces a new resource to be created.
 
 ### Optional
 
 - `description` (String) Description of the group. Changing this value forces a new resource to be created.
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this group.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this group.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

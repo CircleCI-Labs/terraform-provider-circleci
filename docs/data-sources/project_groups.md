@@ -62,8 +62,16 @@ output "api_project_group_roles" {
 
 ### Required
 
-- `organization_id` (String) Unique identifier (UUID) of the organization the project belongs to.
 - `project_id` (String) Unique identifier (UUID) of the project whose groups are listed.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization to read project groups from.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization to read project groups from.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 
 ### Read-Only
 

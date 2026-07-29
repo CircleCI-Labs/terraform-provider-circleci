@@ -18,8 +18,8 @@ import (
 func testAccTriggersDataSourceConfig(host, deployment string) string {
 	return pluralProviderConfig(host, deployment) + fmt.Sprintf(`
 data "circleci_triggers" "test" {
-  project_id  = %[1]q
-  pipeline_id = %[2]q
+  project_id             = %[1]q
+  pipeline_definition_id = %[2]q
 }
 `, testPluralProjectID, testPluralPipelineID)
 }
@@ -40,7 +40,7 @@ func TestTriggersDataSourceSchema(t *testing.T) {
 
 	// Both ids are required: a trigger id is only meaningful within a pipeline
 	// definition, which is only meaningful within a project.
-	for _, name := range []string{"project_id", "pipeline_id"} {
+	for _, name := range []string{"project_id", "pipeline_definition_id"} {
 		attribute, ok := resp.Schema.Attributes[name]
 		if !ok {
 			t.Fatalf("schema is missing the %q attribute", name)

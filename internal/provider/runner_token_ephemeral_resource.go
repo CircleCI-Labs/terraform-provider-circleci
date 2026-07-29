@@ -38,14 +38,16 @@ const ephemeralRunnerTokenPrivateKey = "token_id"
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ ephemeral.EphemeralResource              = &ephemeralRunnerTokenResource{}
-	_ ephemeral.EphemeralResourceWithConfigure = &ephemeralRunnerTokenResource{}
-	_ ephemeral.EphemeralResourceWithClose     = &ephemeralRunnerTokenResource{}
+	_ ephemeral.EphemeralResource                     = &ephemeralRunnerTokenResource{}
+	_ ephemeral.EphemeralResourceWithConfigure        = &ephemeralRunnerTokenResource{}
+	_ ephemeral.EphemeralResourceWithClose            = &ephemeralRunnerTokenResource{}
+	_ ephemeral.EphemeralResourceWithConfigValidators = &ephemeralRunnerTokenResource{}
 )
 
 // ephemeralRunnerTokenModel maps the ephemeral resource schema.
 type ephemeralRunnerTokenModel struct {
 	OrganizationID types.String `tfsdk:"organization_id"`
+	OrgID          types.String `tfsdk:"org_id"`
 	ResourceClass  types.String `tfsdk:"resource_class"`
 	Nickname       types.String `tfsdk:"nickname"`
 	ID             types.String `tfsdk:"id"`
@@ -69,6 +71,23 @@ func (e *ephemeralRunnerTokenResource) Metadata(_ context.Context, req ephemeral
 
 // Schema defines the schema for the ephemeral resource.
 func (e *ephemeralRunnerTokenResource) Schema(_ context.Context, _ ephemeral.SchemaRequest, resp *ephemeral.SchemaResponse) {
+	// An ephemeral resource holds no state, so there is nothing to replace and no
+	// prior value to retain: both names are plain Optional, with exactly one
+	// required. See org_id_deprecation.go.
+	//
+	// The builders take no validators, so the runner API's UUID-only shape check
+	// is attached here — to both names, or it would be bypassed by using the new
+	// one.
+	orgIDValidators := []validator.String{
+		stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
+	}
+
+	deprecatedOrganizationID := deprecatedOrgIDEphemeralAttribute("the resource class this token is for")
+	deprecatedOrganizationID.Validators = orgIDValidators
+
+	orgID := orgIDEphemeralAttribute("the resource class this token is for")
+	orgID.Validators = orgIDValidators
+
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Creates a CircleCI self-hosted runner authentication token for the duration " +
 			"of a single Terraform run, deleting it again when the run ends.\n\n" +
@@ -82,13 +101,8 @@ func (e *ephemeralRunnerTokenResource) Schema(_ context.Context, _ ephemeral.Sch
 			"credential unaccounted for — see that id in the warning if one appears, and check/delete it by " +
 			"hand.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				Required:            true,
-				MarkdownDescription: "The UUID of the organization that owns the resource class.",
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
-				},
-			},
+			"organization_id": deprecatedOrganizationID,
+			"org_id":          orgID,
 			"resource_class": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "The resource class this token grants access to, in `namespace/name` format (e.g. `myorg/myrunner`).",
@@ -127,6 +141,13 @@ func (e *ephemeralRunnerTokenResource) Configure(_ context.Context, req ephemera
 	e.client = client
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (e *ephemeralRunnerTokenResource) ConfigValidators(_ context.Context) []ephemeral.ConfigValidator {
+	return []ephemeral.ConfigValidator{
+		orgIDEphemeralConfigValidator(),
+	}
+}
+
 // Open creates a runner token and records its id in private state, so Close
 // can delete it again without needing the token value itself.
 func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {
@@ -137,7 +158,7 @@ func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.O
 	}
 
 	t, err := e.client.CreateToken(ctx, circleci.TokenInput{
-		OrganizationID: config.OrganizationID.ValueString(),
+		OrganizationID: effectiveOrgID(config.OrganizationID, config.OrgID),
 		ResourceClass:  config.ResourceClass.ValueString(),
 		Nickname:       config.Nickname.ValueString(),
 	})
@@ -153,6 +174,11 @@ func (e *ephemeralRunnerTokenResource) Open(ctx context.Context, req ephemeral.O
 	config.ID = types.StringValue(t.ID)
 	config.Token = types.StringValue(t.Token)
 	config.CreatedAt = types.StringValue(t.CreatedAt)
+	// The organization is deliberately not mirrored onto whichever of the two
+	// names the configuration left out. Unlike the managed resources, both are
+	// plain Optional rather than Optional+Computed — an ephemeral resource has no
+	// state for a retained value to live in — so filling one in would be a result
+	// that disagrees with the configuration. See org_id_deprecation.go.
 
 	resp.Diagnostics.Append(resp.Result.Set(ctx, &config)...)
 	if resp.Diagnostics.HasError() {

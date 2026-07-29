@@ -55,7 +55,17 @@ The provider emits a warning after a successful rename to say so.
 ### Required
 
 - `name` (String) The namespace name, unique across all of CircleCI. Changing this renames the namespace in place rather than replacing it: the namespace keeps its id and its orbs. Configurations elsewhere that reference orbs by the old name stop resolving, so rename deliberately.
-- `organization_id` (String) Unique identifier (UUID) of the organization that owns the namespace. A namespace cannot be moved between organizations, so changing this forces a new resource to be created.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this namespace.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this namespace.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

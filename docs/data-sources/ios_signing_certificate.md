@@ -45,7 +45,10 @@ output "distribution_certificate_expires_at" {
 - `expires_at` (String) When the certificate expires, as an RFC 3339 timestamp with millisecond precision, or an empty string if CircleCI could not determine an expiry from the certificate.
 - `file_name` (String) The certificate's display name.
 - `fingerprint` (String) The certificate's fingerprint.
-- `organization_id` (String) Unique identifier (UUID) of the organization the certificate belongs to.
+- `org_id` (String) Unique identifier (UUID) of the organization that owns this certificate.
+- `organization_id` (String) Unique identifier (UUID) of the organization that owns this certificate.
+
+Superseded by `org_id`, which reports the same value and matches CircleCI's own naming. Both are reported; prefer `org_id` in new configurations.
 
 ## Security
 

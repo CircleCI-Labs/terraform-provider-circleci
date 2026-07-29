@@ -720,7 +720,7 @@ func TestPipelineResourceUnit_DriftRecreatesRatherThanHardError(t *testing.T) {
 }
 
 // TestPipelineResourceUnit_ServerDeploymentIsGated documents the fix to a
-// third bug: unlike circleci_pipelines (the plural data source, gated via
+// third bug: unlike circleci_pipeline_definitions (the plural data source, gated via
 // requireCloud in pipelines_data_source.go) and the v3-only resources gated in
 // cloud_only.go, circleci_pipeline used to implement neither
 // ResourceWithModifyPlan nor any requireCloud check — it could not, because its

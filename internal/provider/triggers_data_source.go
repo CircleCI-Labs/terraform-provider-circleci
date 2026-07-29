@@ -25,9 +25,9 @@ const triggersTypeName = "circleci_triggers"
 
 // triggersDataSourceModel maps the data source schema.
 type triggersDataSourceModel struct {
-	ProjectID  types.String       `tfsdk:"project_id"`
-	PipelineID types.String       `tfsdk:"pipeline_id"`
-	Triggers   []triggerItemModel `tfsdk:"triggers"`
+	ProjectID            types.String       `tfsdk:"project_id"`
+	PipelineDefinitionID types.String       `tfsdk:"pipeline_definition_id"`
+	Triggers             []triggerItemModel `tfsdk:"triggers"`
 }
 
 // triggerItemModel maps one trigger in the list. The attribute names match
@@ -82,9 +82,12 @@ func (d *triggersDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 				MarkdownDescription: "Unique identifier (UUID) of the project owning the pipeline definition.",
 				Required:            true,
 			},
-			"pipeline_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the pipeline definition whose triggers are " +
-					"listed. Use [`circleci_pipelines`](./pipelines) to discover the definitions on a project.",
+			"pipeline_definition_id": schema.StringAttribute{
+				MarkdownDescription: "Unique identifier (UUID) of the pipeline **definition** whose " +
+					"triggers are listed — not of a pipeline run, which is what `pipeline_id` means " +
+					"elsewhere in this provider. Use " +
+					"[`circleci_pipeline_definitions`](pipeline_definitions) to discover the " +
+					"definitions on a project.",
 				Required: true,
 			},
 			"triggers": schema.ListNestedAttribute{
@@ -190,12 +193,12 @@ func (d *triggersDataSource) Read(ctx context.Context, req datasource.ReadReques
 	}
 
 	projectID := state.ProjectID.ValueString()
-	pipelineID := state.PipelineID.ValueString()
+	pipelineDefinitionID := state.PipelineDefinitionID.ValueString()
 
-	triggers, err := d.client.ListTriggers(ctx, projectID, pipelineID)
+	triggers, err := d.client.ListTriggers(ctx, projectID, pipelineDefinitionID)
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to list CircleCI triggers for pipeline definition "+pipelineID,
+			"Unable to list CircleCI triggers for pipeline definition "+pipelineDefinitionID,
 			circleci.Detail(err),
 		)
 

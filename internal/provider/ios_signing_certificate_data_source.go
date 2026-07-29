@@ -28,6 +28,7 @@ var (
 type iosSigningCertificateDataSourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	FileName       types.String `tfsdk:"file_name"`
 	CertType       types.String `tfsdk:"cert_type"`
 	Fingerprint    types.String `tfsdk:"fingerprint"`
@@ -51,6 +52,9 @@ func (d *iosSigningCertificateDataSource) Metadata(_ context.Context, req dataso
 }
 
 // Schema defines the schema for the data source.
+// The organization is an output here, not a lookup key, so the pair is Computed.
+var iosCertOrgIDDeprecated, iosCertOrgIDCurrent = computedOrgIDDataSourceAttributes("this certificate")
+
 func (d *iosSigningCertificateDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches an iOS signing certificate by id. The certificate's `.p12` " +
@@ -63,11 +67,9 @@ func (d *iosSigningCertificateDataSource) Schema(_ context.Context, _ datasource
 				MarkdownDescription: "Unique identifier (UUID) of the certificate.",
 				Required:            true,
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the " +
-					"certificate belongs to.",
-				Computed: true,
-			},
+			// Reported under both names; see computedOrgIDDataSourceAttributes.
+			"organization_id": iosCertOrgIDDeprecated,
+			"org_id":          iosCertOrgIDCurrent,
 			"file_name": schema.StringAttribute{
 				MarkdownDescription: "The certificate's display name.",
 				Computed:            true,
@@ -130,11 +132,14 @@ func (d *iosSigningCertificateDataSource) Read(ctx context.Context, req datasour
 	state := iosSigningCertificateDataSourceModel{
 		Id:             types.StringValue(cert.ID),
 		OrganizationId: types.StringValue(cert.OrganizationID),
-		FileName:       types.StringValue(cert.FileName),
-		CertType:       types.StringValue(cert.CertType),
-		Fingerprint:    types.StringValue(cert.Fingerprint),
-		CreatedAt:      types.StringValue(stringOrEmpty(cert.CreatedAt)),
-		ExpiresAt:      types.StringValue(stringOrEmpty(cert.ExpiresAt)),
+		// Same value under both names, so dropping organization_id at the next major
+		// removes nothing a configuration cannot already read as org_id.
+		OrgId:       types.StringValue(cert.OrganizationID),
+		FileName:    types.StringValue(cert.FileName),
+		CertType:    types.StringValue(cert.CertType),
+		Fingerprint: types.StringValue(cert.Fingerprint),
+		CreatedAt:   types.StringValue(stringOrEmpty(cert.CreatedAt)),
+		ExpiresAt:   types.StringValue(stringOrEmpty(cert.ExpiresAt)),
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

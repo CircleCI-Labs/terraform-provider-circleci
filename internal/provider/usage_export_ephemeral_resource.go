@@ -68,8 +68,9 @@ var usageExportPollIntervalVar = usageExportPollInterval
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ ephemeral.EphemeralResource              = &usageExportEphemeralResource{}
-	_ ephemeral.EphemeralResourceWithConfigure = &usageExportEphemeralResource{}
+	_ ephemeral.EphemeralResource                     = &usageExportEphemeralResource{}
+	_ ephemeral.EphemeralResourceWithConfigure        = &usageExportEphemeralResource{}
+	_ ephemeral.EphemeralResourceWithConfigValidators = &usageExportEphemeralResource{}
 )
 
 // usageExportEphemeralModel maps the ephemeral resource schema. It doubles as
@@ -79,6 +80,7 @@ var (
 // fill in before calling Result.Set.
 type usageExportEphemeralModel struct {
 	OrganizationID types.String `tfsdk:"organization_id"`
+	OrgID          types.String `tfsdk:"org_id"`
 	Start          types.String `tfsdk:"start"`
 	End            types.String `tfsdk:"end"`
 	SharedOrgIDs   types.List   `tfsdk:"shared_org_ids"`
@@ -117,10 +119,11 @@ func (e *usageExportEphemeralResource) Schema(_ context.Context, _ ephemeral.Sch
 			"nothing to clean up — the job and its export artifacts are retained by CircleCI on their own " +
 			"schedule regardless of what this ephemeral resource does.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				Required:            true,
-				MarkdownDescription: "UUID of the organization to export usage data for.",
-			},
+			// An ephemeral resource holds no state, so there is nothing to replace
+			// and no prior value to retain: both names are plain Optional, with
+			// exactly one required. See org_id_deprecation.go.
+			"organization_id": deprecatedOrgIDEphemeralAttribute("the usage data being exported"),
+			"org_id":          orgIDEphemeralAttribute("the usage data being exported"),
 			"start": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Start of the export window, as an RFC 3339 timestamp (e.g. `\"2024-01-01T00:00:00Z\"`).",
@@ -132,7 +135,7 @@ func (e *usageExportEphemeralResource) Schema(_ context.Context, _ ephemeral.Sch
 			"shared_org_ids": schema.ListAttribute{
 				ElementType:         types.StringType,
 				Optional:            true,
-				MarkdownDescription: "UUIDs of additional organizations that share billing with `organization_id`, to include in the export.",
+				MarkdownDescription: "UUIDs of additional organizations that share billing with `org_id`, to include in the export.",
 			},
 			"poll_timeout": schema.StringAttribute{
 				Optional: true,
@@ -178,6 +181,13 @@ func (e *usageExportEphemeralResource) Configure(_ context.Context, req ephemera
 	}
 
 	e.client = client
+}
+
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (e *usageExportEphemeralResource) ConfigValidators(_ context.Context) []ephemeral.ConfigValidator {
+	return []ephemeral.ConfigValidator{
+		orgIDEphemeralConfigValidator(),
+	}
 }
 
 // Open creates a usage export job and waits for it to reach a terminal state.
@@ -232,7 +242,12 @@ func (e *usageExportEphemeralResource) Open(ctx context.Context, req ephemeral.O
 		}
 	}
 
-	orgID := config.OrganizationID.ValueString()
+	// Whichever of the two organization attribute names the configuration set. It
+	// is not mirrored onto the other in the result: both are plain Optional rather
+	// than Optional+Computed — an ephemeral resource has no state for a retained
+	// value to live in — so filling one in would be a result that disagrees with
+	// the configuration. See org_id_deprecation.go.
+	orgID := effectiveOrgID(config.OrganizationID, config.OrgID)
 
 	job, err := e.client.UsageExports().Create(ctx, orgID, circleci.CreateUsageExportJobRequest{
 		Start:        config.Start.ValueString(),

@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &groupMembershipDataSource{}
-	_ datasource.DataSourceWithConfigure = &groupMembershipDataSource{}
+	_ datasource.DataSource                     = &groupMembershipDataSource{}
+	_ datasource.DataSourceWithConfigure        = &groupMembershipDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &groupMembershipDataSource{}
 )
 
 // groupMembershipDataSourceModel maps the data source schema.
@@ -26,6 +27,7 @@ var (
 // fields the API returns alongside each id.
 type groupMembershipDataSourceModel struct {
 	OrganizationId types.String           `tfsdk:"organization_id"`
+	OrgId          types.String           `tfsdk:"org_id"`
 	GroupId        types.String           `tfsdk:"group_id"`
 	UserIds        types.Set              `tfsdk:"user_ids"`
 	Members        []groupMemberItemModel `tfsdk:"members"`
@@ -67,10 +69,10 @@ func (d *groupMembershipDataSource) Schema(_ context.Context, _ datasource.Schem
 			"~> **These endpoints are not part of the published CircleCI OpenAPI specification** and may " +
 			"change without notice.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the group belongs to.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("group memberships"),
+			"org_id":          orgIDDataSourceAttribute("group memberships"),
 			"group_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the group whose members are listed.",
 				Required:            true,
@@ -110,6 +112,13 @@ func (d *groupMembershipDataSource) Schema(_ context.Context, _ datasource.Schem
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *groupMembershipDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the group's members.
 func (d *groupMembershipDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if !requireStandaloneCapable(d.client, "circleci_group_membership", &resp.Diagnostics) {
@@ -122,7 +131,8 @@ func (d *groupMembershipDataSource) Read(ctx context.Context, req datasource.Rea
 		return
 	}
 
-	organizationID, groupID := state.OrganizationId.ValueString(), state.GroupId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
+	groupID := state.GroupId.ValueString()
 
 	members, err := d.client.GroupMembership().List(ctx, organizationID, groupID)
 	if err != nil {

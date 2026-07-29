@@ -39,34 +39,42 @@ likely to be asked for by enterprise customers who want RBAC groups, since group
 without member management is half a feature. Worth raising with the owning team as a
 public-API request rather than treating it as provider work.
 
-### 0b. The 1.0 renames need a decision on timing
+### 0b. The `org_id` deprecation is done. What is left is timing, and two names
 
-v3 API conventions require `organization_id` → `org_id`, and `pipeline` → `run`.
-Every currently shipped resource uses `organization_id`, and mixing the two would be
-worse than either, so **all renames are batched into a planned 1.0** with a state
-migration and a `moved {}` guide — one upgrade absorbing all of them rather than
-several releases each breaking something.
+**Decided and implemented: option B.** Both `organization_id` and `org_id` are accepted
+on 37 resources and data sources, with `organization_id` deprecated. Existing
+configurations keep working untouched, switching is a verified no-op, and no state
+upgrade is involved at any point. See `DESIGN.md` for why the obvious implementation
+would have destroyed data, and `internal/provider/org_id_deprecation.go` for the code —
+all of it in one file, so ending the deprecation is a small change rather than an audit.
 
-What needs deciding:
+Nothing here is blocking a release. What is left:
 
-- **Is 1.0 real, and when?** The batching only makes sense if it actually happens.
- Right now every rename is deferred against a release that has no owner or date.
-- **Does the 0.5.0 work in this branch ship first**, or wait and go out as 1.0 with the
- renames included? Shipping 0.5.0 first gets the bug fixes to users sooner — including
- the webhook one — at the cost of a second breaking upgrade later.
+- **When does `organization_id` come out?** That is the only remaining question on this
+  topic, and it is a question about how long to leave the old name available rather than
+  a technical one. The removal itself is: delete `deprecatedOrgIDAttribute`, drop
+  `orgIDConfigValidator`, make `orgIDAttribute` `Required`, follow the compiler.
+- **When do `circleci_pipeline` and `circleci_trigger.pipeline_id` come out?** Same
+  question, same answer shape — see 0h below. Ideally all three removals land in one
+  major release so practitioners upgrade once.
+
+#### Still genuinely breaking, and independent of the above
+
 - **`circleci_trigger`'s attribute names diverge from its own data source** (`repo` vs
- `repository`, `web_hook` vs `webhook`). That is a bug, but fixing it is breaking, so
- it is queued for the same batch.
-- **`circleci_webhook.signing_secret`** is misleading — the API only ever returns a
- mask, so the attribute can never round-trip. Deprecating it is breaking
- ([#21](../../issues/21)).
+  `repository`, `web_hook` vs `webhook`). A bug; fixing it breaks configurations.
+- **`circleci_webhook.signing_secret`** can never round-trip, because the API only
+  returns a mask. Deprecating it is breaking ([#21](../../issues/21)).
 - **`circleci_project`'s settings toggles are `Optional+Computed`**, which is what made
- issue #26's first bug possible. The bug itself is fixed (see 0f); making the attributes
- `Optional`-only, per this repo's own rule for settings resources, is still the cleaner
- shape and needs a state migration, so it belongs in the same batch.
+  issue #26's first bug possible. The bug is fixed (see 0f); making them `Optional`-only,
+  per this repo's own rule for settings resources, is the cleaner shape and does need a
+  state upgrade.
 
-There is a full list in `DESIGN.md` under "Schema naming"; this is the summary for
-taking to a team.
+#### Why 0.5.0 should ship first
+
+Its fixes are severe and have nothing to do with naming: `circleci_project` could not
+apply at all against the real API, `circleci_webhook` never sent its signing secret, and
+every Terraform-created project had commit status reporting silently disabled. None of
+that should wait behind a decision about vocabulary.
 
 ---
 
@@ -169,6 +177,38 @@ accounts that names this provider directly as a motivation. The provider cannot 
 `POST /user/token` is session-only auth, deliberately, so there is no endpoint to call.
 
 Worth carrying into the same conversation as 0a, since both are about machine identity.
+
+### 0h. "Pipeline" now always says which pipeline it means — DECIDED and implemented
+
+CircleCI's API identifies two things with a UUID: a pipeline **definition**
+(`/projects/:project_id/pipeline-definitions`, holding checkout source and config
+source) and a pipeline **run** (`/pipeline/:id`, one execution). Colloquially "pipeline"
+means the run, so naming the definition resource `circleci_pipeline` aimed the familiar
+word at the unfamiliar concept. The provider now says `definition` or `run` everywhere.
+
+Deprecated, because these shipped in v0.4.0 and real configurations use them:
+
+| Old | New | Migration |
+|---|---|---|
+| `circleci_pipeline` (resource) | `circleci_pipeline_definition` | `moved{}` + `ResourceWithMoveState`; verified non-destructive |
+| `circleci_pipeline` (data source) | `circleci_pipeline_definition` | config edit; data sources hold no state |
+| `circleci_trigger.pipeline_id` | `pipeline_definition_id` | config edit; switching plans as no change |
+
+Renamed outright, because they existed only in unreleased builds:
+`circleci_pipelines`, `circleci_pipeline_config`, `circleci_pipeline_values`,
+`circleci_pipeline_workflows`, `pipeline_id` on the run-scoped data sources, `pipelines`
+on `circleci_pipeline_definitions`, `pipeline_id` on `circleci_triggers`, and the nested
+`pipeline_id` on `circleci_deploy_component`.
+
+**The general rule this established, worth applying to future renames:** deprecate only
+what has shipped. A first pass here added deprecated aliases for all of it, which meant
+a brand-new data source would have shipped with an already-deprecated attribute — telling
+practitioners not to use something they had never seen, and creating removal work for no
+one's benefit. Checking the last released tag takes a minute and is the difference
+between three deprecations and eleven.
+
+Nothing here is blocking. The open question is the same as 0b: **when do the three
+deprecated names come out**, and ideally they come out together.
 
 ## 0c. Resolved: the webhook signing secret bug needs no disclosure
 

@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &groupsDataSource{}
-	_ datasource.DataSourceWithConfigure = &groupsDataSource{}
+	_ datasource.DataSource                     = &groupsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &groupsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &groupsDataSource{}
 )
 
 // groupsDataSourceModel maps the data source schema.
@@ -26,6 +27,7 @@ var (
 // single list-nested attribute named after the entity.
 type groupsDataSourceModel struct {
 	OrganizationId types.String     `tfsdk:"organization_id"`
+	OrgId          types.String     `tfsdk:"org_id"`
 	Groups         []groupItemModel `tfsdk:"groups"`
 }
 
@@ -63,10 +65,10 @@ func (d *groupsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 			"~> **Group membership is not managed by Terraform.** Adding and removing group members is " +
 			"only possible in the CircleCI web UI, so the users in a group are not exposed here.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose groups are listed.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("groups"),
+			"org_id":          orgIDDataSourceAttribute("groups"),
 			"groups": schema.ListNestedAttribute{
 				MarkdownDescription: "The groups in the organization, in the order the API returns them.",
 				Computed:            true,
@@ -91,6 +93,13 @@ func (d *groupsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *groupsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the organization's groups.
 func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if !requireStandaloneCapable(d.client, "circleci_groups", &resp.Diagnostics) {
@@ -103,7 +112,7 @@ func (d *groupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 
-	organizationID := state.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
 
 	groups, err := d.client.Groups().List(ctx, organizationID)
 	if err != nil {

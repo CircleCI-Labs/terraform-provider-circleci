@@ -22,15 +22,17 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &projectGroupResource{}
-	_ resource.ResourceWithConfigure   = &projectGroupResource{}
-	_ resource.ResourceWithImportState = &projectGroupResource{}
+	_ resource.Resource                     = &projectGroupResource{}
+	_ resource.ResourceWithConfigure        = &projectGroupResource{}
+	_ resource.ResourceWithImportState      = &projectGroupResource{}
+	_ resource.ResourceWithConfigValidators = &projectGroupResource{}
 )
 
 // projectGroupResourceModel maps the resource schema.
 type projectGroupResourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	ProjectId      types.String `tfsdk:"project_id"`
 	GroupId        types.String `tfsdk:"group_id"`
 	Role           types.String `tfsdk:"role"`
@@ -77,14 +79,10 @@ func (r *projectGroupResource) Schema(_ context.Context, _ resource.SchemaReques
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the project and group " +
-					"belong to. Changing this value forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("the project and group in this grant", true),
+			"org_id":          orgIDAttribute("the project and group in this grant", true),
 			"project_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the project the group is granted access " +
 					"to. Changing this value forces a new resource to be created.",
@@ -119,6 +117,13 @@ func (r *projectGroupResource) Schema(_ context.Context, _ resource.SchemaReques
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *projectGroupResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create grants the group its role on the project.
 //
 // The assign call answers with an acknowledgement rather than the stored grant,
@@ -130,7 +135,7 @@ func (r *projectGroupResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	organizationID := plan.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
 	projectID := plan.ProjectId.ValueString()
 	groupID := plan.GroupId.ValueString()
 
@@ -158,6 +163,7 @@ func (r *projectGroupResource) Create(ctx context.Context, req resource.CreateRe
 	plan.Id = types.StringValue(projectGroupID(organizationID, projectID, groupID))
 	plan.Role = types.StringValue(group.Role)
 	plan.Name = types.StringValue(group.Name)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -170,7 +176,7 @@ func (r *projectGroupResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
-	organizationID := state.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
 	projectID := state.ProjectId.ValueString()
 	groupID := state.GroupId.ValueString()
 
@@ -195,6 +201,7 @@ func (r *projectGroupResource) Read(ctx context.Context, req resource.ReadReques
 	state.Id = types.StringValue(projectGroupID(organizationID, projectID, groupID))
 	state.Role = types.StringValue(group.Role)
 	state.Name = types.StringValue(group.Name)
+	setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -207,7 +214,7 @@ func (r *projectGroupResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	organizationID := plan.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
 	projectID := plan.ProjectId.ValueString()
 	groupID := plan.GroupId.ValueString()
 
@@ -235,6 +242,7 @@ func (r *projectGroupResource) Update(ctx context.Context, req resource.UpdateRe
 	plan.Id = types.StringValue(projectGroupID(organizationID, projectID, groupID))
 	plan.Role = types.StringValue(group.Role)
 	plan.Name = types.StringValue(group.Name)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -298,7 +306,10 @@ func (r *projectGroupResource) ImportState(ctx context.Context, req resource.Imp
 		return
 	}
 
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), parts[0])...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), parts[0])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_id"), parts[1])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("group_id"), parts[2])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"),

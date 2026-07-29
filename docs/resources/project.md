@@ -35,7 +35,6 @@ resource "circleci_project" "example" {
 ### Required
 
 - `name` (String) The name of the project repository. Changing this value forces a new resource to be created.
-- `organization_id` (String) The ID of the organization that owns this project. Changing this value forces a new resource to be created.
 
 ### Optional
 
@@ -46,6 +45,14 @@ resource "circleci_project" "example" {
 ~> On GitLab this is not a project setting but a per-trigger filter, so it has no effect there.
 - `disable_ssh` (Boolean) Whether to disable SSH access to builds.
 - `forks_receive_secret_env_vars` (Boolean) Whether forked pull requests can access secret environment variables.
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this project.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this project.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 - `pr_only_branch_overrides` (List of String) List of branches that override the PR-only build setting.
 - `set_github_status` (Boolean) Whether to set GitHub commit status on builds.
 - `setup_workflows` (Boolean) Whether setup workflows are enabled.

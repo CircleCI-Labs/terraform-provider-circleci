@@ -1,11 +1,11 @@
 ---
-page_title: "circleci_pipeline_workflows Data Source - circleci"
+page_title: "circleci_pipeline_run_workflows Data Source - circleci"
 subcategory: ""
 description: |-
   Fetches every workflow in a CircleCI pipeline run.
 ---
 
-# circleci_pipeline_workflows (Data Source)
+# circleci_pipeline_run_workflows (Data Source)
 
 Fetches every workflow in a CircleCI pipeline run. Pagination is followed internally, so the result
 covers every workflow rather than one page.
@@ -16,7 +16,7 @@ and until this was added nothing in the provider could produce one — the only 
 know it.
 
 ```
-circleci_pipeline_run  ->  circleci_pipeline_workflows  ->  circleci_workflow_jobs
+circleci_pipeline_run  ->  circleci_pipeline_run_workflows  ->  circleci_workflow_jobs
 ```
 
 ~> **This is a point-in-time read of mutable runtime state.** `status` changes as each workflow runs,
@@ -30,16 +30,18 @@ blocks; using it to derive a resource attribute will cause a perpetual diff.
 | --- | --- |
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments (`the CircleCI API`); see [`circleci_pipeline_run`](pipeline_run). |
-| **API** | `GET /api/v2/pipeline/{pipeline-id}/workflow` |
+| **API** | `GET /api/v2/pipeline/{id}/workflow` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token with permission to view the project's builds. |
 
--> **`pipeline_id` is a pipeline *run*, not a pipeline definition.** Pass the `id` from
-[`circleci_pipeline_run`](pipeline_run), not from the [`circleci_pipeline`](../resources/pipeline)
-resource — those are different objects with different identifiers.
+-> **`run_id` is a pipeline *run*, not a pipeline definition.** Pass the `id` from
+[`circleci_pipeline_run`](pipeline_run), not from the
+[`circleci_pipeline_definition`](../resources/pipeline_definition) resource — those are different
+objects with different identifiers, and both are UUIDs, so passing the wrong one fails at apply rather
+than at plan.
 
 ## Example Usage
 
-{{ tffile "examples/data-sources/circleci_pipeline_workflows/data-source.tf" }}
+{{ tffile "examples/data-sources/circleci_pipeline_run_workflows/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

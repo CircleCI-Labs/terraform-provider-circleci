@@ -29,9 +29,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &otelExporterResource{}
-	_ resource.ResourceWithConfigure   = &otelExporterResource{}
-	_ resource.ResourceWithImportState = &otelExporterResource{}
+	_ resource.Resource                     = &otelExporterResource{}
+	_ resource.ResourceWithConfigure        = &otelExporterResource{}
+	_ resource.ResourceWithImportState      = &otelExporterResource{}
+	_ resource.ResourceWithConfigValidators = &otelExporterResource{}
 )
 
 // otelExporterTypeName is the Terraform type name.
@@ -54,6 +55,7 @@ const otelExperimentalNote = "~> **Experimental.** CircleCI flags the OTLP expor
 type otelExporterResourceModel struct {
 	ID             types.String `tfsdk:"id"`
 	OrganizationID types.String `tfsdk:"organization_id"`
+	OrgID          types.String `tfsdk:"org_id"`
 	Endpoint       types.String `tfsdk:"endpoint"`
 	Protocol       types.String `tfsdk:"protocol"`
 	Insecure       types.Bool   `tfsdk:"insecure"`
@@ -97,14 +99,10 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the exporter belongs to. " +
-					"Changing this value forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this exporter", true),
+			"org_id":          orgIDAttribute("this exporter", true),
 			"endpoint": schema.StringAttribute{
 				MarkdownDescription: "The OTLP endpoint spans are sent to, as `host:port` — for example " +
 					"`otel.example.com:4317`. Do **not** include a scheme: `https://` or `grpc://` is " +
@@ -179,6 +177,13 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *otelExporterResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan otelExporterResourceModel
@@ -195,8 +200,10 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 		}
 	}
 
+	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
+
 	exporter, err := r.client.CreateOTelExporter(ctx, circleci.CreateOTelExporterRequest{
-		OrgID:    plan.OrganizationID.ValueString(),
+		OrgID:    orgID,
 		Endpoint: plan.Endpoint.ValueString(),
 		Protocol: plan.Protocol.ValueString(),
 		Insecure: plan.Insecure.ValueBool(),
@@ -209,7 +216,7 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 				"Could not create an OTLP exporter for organization %s: %s\n\n"+
 					"An organization may have at most %d exporters, and the endpoint must be a bare "+
 					"host:port with no scheme.",
-				plan.OrganizationID.ValueString(), circleci.Detail(err), circleci.OTelExporterLimit,
+				orgID, circleci.Detail(err), circleci.OTelExporterLimit,
 			),
 		)
 
@@ -221,6 +228,7 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 	// state would both lose the real values and make the applied state differ
 	// from the plan.
 	plan.ID = types.StringValue(exporter.ID)
+	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
 	plan.Endpoint = types.StringValue(exporter.Endpoint)
 	plan.Protocol = types.StringValue(exporter.Protocol)
 	plan.Insecure = types.BoolValue(exporter.Insecure)
@@ -244,8 +252,9 @@ func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
-	exporter, err := r.client.GetOTelExporter(ctx,
-		state.OrganizationID.ValueString(), state.ID.ValueString())
+	orgID := effectiveOrgID(state.OrganizationID, state.OrgID)
+
+	exporter, err := r.client.GetOTelExporter(ctx, orgID, state.ID.ValueString())
 	if err != nil {
 		// The API has no single-exporter route, so a missing exporter surfaces as
 		// an absence from the organization's list rather than a 404. IsNotFound
@@ -260,13 +269,14 @@ func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadReques
 			"Error reading CircleCI OTLP exporter",
 			fmt.Sprintf(
 				"Could not read OTLP exporter %s for organization %s: %s",
-				state.ID.ValueString(), state.OrganizationID.ValueString(), circleci.Detail(err),
+				state.ID.ValueString(), orgID, circleci.Detail(err),
 			),
 		)
 
 		return
 	}
 
+	setOrgIDs(&state.OrganizationID, &state.OrgID, orgID)
 	state.Endpoint = types.StringValue(exporter.Endpoint)
 	state.Protocol = types.StringValue(exporter.Protocol)
 	state.Insecure = types.BoolValue(exporter.Insecure)
@@ -350,7 +360,10 @@ func (r *otelExporterResource) ImportState(ctx context.Context, req resource.Imp
 		return
 	}
 
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), exporterID)...)
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	fwdatasource "github.com/hashicorp/terraform-plugin-framework/datasource"
+	dsschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
@@ -43,6 +44,21 @@ func TestDeployComponentDataSourceSchema(t *testing.T) {
 	if !resp.Schema.Attributes["versions"].IsComputed() {
 		t.Error("versions is not computed, but it is entirely API-derived")
 	}
+
+	versions, ok := resp.Schema.Attributes["versions"].(dsschema.ListNestedAttribute)
+	if !ok {
+		t.Fatalf("versions is %T, not a list of nested objects", resp.Schema.Attributes["versions"])
+	}
+
+	nested := versions.NestedObject.Attributes
+
+	runID, ok := nested["run_id"]
+	if !ok {
+		t.Fatal("versions is missing the run_id attribute")
+	}
+	if !runID.IsComputed() {
+		t.Error("run_id is not computed, but it is entirely API-derived")
+	}
 }
 
 func TestAccDeployComponentDataSource(t *testing.T) {
@@ -62,7 +78,7 @@ func TestAccDeployComponentDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_component.test",
 						tfjsonpath.New("versions"),
-						knownvalue.ListSizeExact(1),
+						knownvalue.ListSizeExact(2),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_component.test",
@@ -74,8 +90,15 @@ func TestAccDeployComponentDataSource(t *testing.T) {
 					// that literal sentinel value.
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_component.test",
-						tfjsonpath.New("versions").AtSliceIndex(0).AtMapKey("pipeline_id"),
+						tfjsonpath.New("versions").AtSliceIndex(0).AtMapKey("run_id"),
 						knownvalue.Null(),
+					),
+					// The second version does have a run recorded, so null everywhere
+					// would not pass for a correct read.
+					statecheck.ExpectKnownValue(
+						"data.circleci_deploy_component.test",
+						tfjsonpath.New("versions").AtSliceIndex(1).AtMapKey("run_id"),
+						knownvalue.StringExact(testDeployVersionRunID),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_component.test",

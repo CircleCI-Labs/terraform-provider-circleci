@@ -2,45 +2,47 @@
 page_title: "circleci_pipeline Resource - circleci"
 subcategory: ""
 description: |-
-  Manages a CircleCI pipeline definition.
+  Deprecated. Renamed to circleci_pipeline_definition.
 ---
 
 # circleci_pipeline (Resource)
 
-Manages a CircleCI pipeline definition. A pipeline definition specifies where to find the pipeline configuration and where to check out code from.
+~> **Deprecated: this type name has been renamed to
+[`circleci_pipeline_definition`](pipeline_definition).** It manages a pipeline
+*definition* — where to find configuration and where to check out code — not a
+pipeline run, and the name `circleci_pipeline` obscured that. Both names are served
+by the same implementation and manage the same thing.
 
-## Availability
+`circleci_pipeline` still works. Using it produces a deprecation warning, not an
+error. It will be removed in the next major release.
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
+## Migrating
 
-~> **Not available on CircleCI Server** This resource uses the
-`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
-Server installation does not expose. Server installations should define
-workflows in `.circleci/config.yml` instead.
-
-## Example Usage
+Rename the resource in your configuration and add a `moved` block:
 
 ```terraform
-resource "circleci_pipeline" "example" {
-  project_id                       = "00000000-0000-0000-0000-000000000000"
-  name                             = "my-pipeline"
-  description                      = "My pipeline description"
-  config_source_provider           = "github_app"
-  config_source_file_path          = ".circleci/config.yml"
-  config_source_repo_external_id   = "123456789"
-  checkout_source_provider         = "github_app"
-  checkout_source_repo_external_id = "123456789"
+resource "circleci_pipeline_definition" "example" {
+  # ... unchanged arguments ...
+}
+
+moved {
+  from = circleci_pipeline.example
+  to   = circleci_pipeline_definition.example
 }
 ```
 
+Apply it. The state entry is re-addressed in place, so the definition is **not**
+destroyed and **not** recreated, its id is preserved, and any triggers attached to
+it stay attached. Delete the `moved` block once applied.
+
+~> Do not rename without the `moved` block. Terraform would see an unknown address
+in state and plan to destroy the definition and create a new one, changing its id
+and orphaning its triggers.
+
+See [Renaming pipeline resources and data sources](../guides/renaming-pipeline-types)
+for the full migration, including `import` blocks under the new name.
+
+For everything else — arguments, availability, examples — see
+[`circleci_pipeline_definition`](pipeline_definition).
+
 {{ .SchemaMarkdown | trimspace }}
-
-## Import
-
-Import is supported using `project_id/pipeline_id`:
-
-```shell
-terraform import circleci_pipeline.example "<project_id>/<pipeline_id>"
-```

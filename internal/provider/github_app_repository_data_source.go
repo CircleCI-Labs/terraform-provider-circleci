@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &githubAppRepositoryDataSource{}
-	_ datasource.DataSourceWithConfigure = &githubAppRepositoryDataSource{}
+	_ datasource.DataSource                     = &githubAppRepositoryDataSource{}
+	_ datasource.DataSourceWithConfigure        = &githubAppRepositoryDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &githubAppRepositoryDataSource{}
 )
 
 // Type names, used in diagnostics.
@@ -39,6 +40,7 @@ const githubAppRepositoryUnpublishedAPINote = "~> **This data source reads an un
 // githubAppRepositoryDataSourceModel maps the data source schema.
 type githubAppRepositoryDataSourceModel struct {
 	OrganizationID types.String `tfsdk:"organization_id"`
+	OrgID          types.String `tfsdk:"org_id"`
 	FullName       types.String `tfsdk:"full_name"`
 	ExternalID     types.String `tfsdk:"external_id"`
 	ID             types.Int64  `tfsdk:"id"`
@@ -79,11 +81,10 @@ func (d *githubAppRepositoryDataSource) Schema(_ context.Context, _ datasource.S
 			"changed or removed through CircleCI's API.\n\n" +
 			githubAppRepositoryUnpublishedAPINote,
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the CircleCI organization whose GitHub App " +
-					"installation is searched.",
-				Required: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("GitHub App repositories"),
+			"org_id":          orgIDDataSourceAttribute("GitHub App repositories"),
 			"full_name": schema.StringAttribute{
 				MarkdownDescription: "Fully-qualified repository name, in `owner/repo` form. The comparison is " +
 					"case-insensitive, matching how GitHub treats owner and repository names.",
@@ -120,6 +121,13 @@ func (d *githubAppRepositoryDataSource) Schema(_ context.Context, _ datasource.S
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *githubAppRepositoryDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read resolves the repository.
 func (d *githubAppRepositoryDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	// The GitHub App integration only exists for `circleci` type (standalone)
@@ -137,7 +145,7 @@ func (d *githubAppRepositoryDataSource) Read(ctx context.Context, req datasource
 		return
 	}
 
-	organizationID := state.OrganizationID.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationID, state.OrgID)
 	fullName := state.FullName.ValueString()
 
 	repository, err := d.client.GitHubApp().FindRepository(ctx, organizationID, fullName)

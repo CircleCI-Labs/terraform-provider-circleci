@@ -59,7 +59,17 @@ output "distribution_certificate_fingerprint" {
 - `certificate_blob` (String, Sensitive) The certificate's `.p12` file, base64-encoded (standard encoding), for example `filebase64("distribution.p12")`. Write-only: CircleCI never returns this value, so it cannot be read back into state on import or drift detection -- see the resource-level "Security" section. Changing this value forces a new resource to be created.
 - `certificate_password` (String, Sensitive) The password that unlocks `certificate_blob`. Write-only, for the same reason as `certificate_blob`. Changing this value forces a new resource to be created.
 - `file_name` (String) A display name for the certificate, for example `distribution.p12`. This is a label only; it does not have to match the file the `certificate_blob` bytes came from. Limited to 40 characters by the API. Changing this value forces a new resource to be created.
-- `organization_id` (String) Unique identifier (UUID) of the organization the certificate is uploaded to. Changing this value forces a new resource to be created.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this signing certificate.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this signing certificate.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

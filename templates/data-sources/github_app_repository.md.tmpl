@@ -9,7 +9,7 @@ description: |-
 
 Resolves a repository reachable through the CircleCI GitHub App to its numeric GitHub ID.
 
-`circleci_pipeline` and `circleci_trigger` both require that ID — as `config_source_repo_external_id`, `checkout_source_repo_external_id` and `event_source_repo_external_id`. Until now it was not obtainable from Terraform at all, so it had to be copied out of the GitHub UI and pasted into the configuration as a magic number. Use `external_id` from this data source instead.
+`circleci_pipeline_definition` and `circleci_trigger` both require that ID — as `config_source_repo_external_id`, `checkout_source_repo_external_id` and `event_source_repo_external_id`. Until now it was not obtainable from Terraform at all, so it had to be copied out of the GitHub UI and pasted into the configuration as a magic number. Use `external_id` from this data source instead.
 
 ## Availability
 

@@ -39,13 +39,21 @@ func TestGitHubAppRepositoryDataSourceSchema(t *testing.T) {
 		t.Fatalf("schema validation returned diagnostics: %v", diags)
 	}
 
-	for _, name := range []string{"organization_id", "full_name"} {
+	if fullName, ok := resp.Schema.Attributes["full_name"]; !ok || !fullName.IsRequired() {
+		t.Error("full_name is not required, but the lookup cannot be performed without it")
+	}
+
+	// The organization is equally necessary, but it is accepted under two names
+	// while `organization_id` is deprecated, so both are Optional and
+	// orgIDDataSourceConfigValidator requires exactly one. See
+	// org_id_deprecation.go.
+	for _, name := range []string{"organization_id", "org_id"} {
 		attr, ok := resp.Schema.Attributes[name]
 		if !ok {
 			t.Fatalf("schema is missing the %s attribute", name)
 		}
-		if !attr.IsRequired() {
-			t.Errorf("%s is not required, but the lookup cannot be performed without it", name)
+		if !attr.IsOptional() {
+			t.Errorf("%s is not optional, but one of the pair must be settable", name)
 		}
 	}
 

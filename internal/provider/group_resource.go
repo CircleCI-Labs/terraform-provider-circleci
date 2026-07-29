@@ -20,15 +20,17 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &groupResource{}
-	_ resource.ResourceWithConfigure   = &groupResource{}
-	_ resource.ResourceWithImportState = &groupResource{}
+	_ resource.Resource                     = &groupResource{}
+	_ resource.ResourceWithConfigure        = &groupResource{}
+	_ resource.ResourceWithImportState      = &groupResource{}
+	_ resource.ResourceWithConfigValidators = &groupResource{}
 )
 
 // groupResourceModel maps the resource schema.
 type groupResourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	Name           types.String `tfsdk:"name"`
 	Description    types.String `tfsdk:"description"`
 }
@@ -74,14 +76,10 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the group belongs to. " +
-					"Changing this value forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this group", true),
+			"org_id":          orgIDAttribute("this group", true),
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Name of the group. Changing this value forces a new resource to be created.",
 				Required:            true,
@@ -106,6 +104,13 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *groupResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if !requireStandaloneCapable(r.client, "circleci_group", &resp.Diagnostics) {
@@ -118,7 +123,9 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	group, err := r.client.Groups().Create(ctx, plan.OrganizationId.ValueString(), circleci.CreateGroupRequest{
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
+
+	group, err := r.client.Groups().Create(ctx, organizationID, circleci.CreateGroupRequest{
 		Name:        plan.Name.ValueString(),
 		Description: plan.Description.ValueString(),
 	})
@@ -132,11 +139,11 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 	}
 
 	state := groupResourceModel{
-		Id:             types.StringValue(group.ID),
-		OrganizationId: plan.OrganizationId,
-		Name:           types.StringValue(group.Name),
-		Description:    types.StringValue(group.Description),
+		Id:          types.StringValue(group.ID),
+		Name:        types.StringValue(group.Name),
+		Description: types.StringValue(group.Description),
 	}
+	setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -153,7 +160,9 @@ func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
-	group, err := r.client.Groups().Get(ctx, state.OrganizationId.ValueString(), state.Id.ValueString())
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
+
+	group, err := r.client.Groups().Get(ctx, organizationID, state.Id.ValueString())
 	if err != nil {
 		// A group deleted outside Terraform is not an error: drop it from state
 		// so the next plan recreates it.
@@ -202,6 +211,7 @@ func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	state.Id = types.StringValue(group.ID)
 	state.Name = types.StringValue(group.Name)
 	state.Description = types.StringValue(group.Description)
+	setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -222,6 +232,8 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, effectiveOrgID(plan.OrganizationId, plan.OrgId))
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -237,7 +249,7 @@ func (r *groupResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
-	err := r.client.Groups().Delete(ctx, state.OrganizationId.ValueString(), state.Id.ValueString())
+	err := r.client.Groups().Delete(ctx, effectiveOrgID(state.OrganizationId, state.OrgId), state.Id.ValueString())
 	if err != nil {
 		// Already gone is the desired end state. 403 counts: the API answers
 		// "Permission denied." for a group that does not exist, so it is the
@@ -283,6 +295,9 @@ func (r *groupResource) ImportState(ctx context.Context, req resource.ImportStat
 		return
 	}
 
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), groupID)...)
 }

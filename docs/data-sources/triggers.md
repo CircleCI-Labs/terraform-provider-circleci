@@ -57,7 +57,7 @@ project, since `pipeline_id` scopes this listing.
 
 ### Required
 
-- `pipeline_id` (String) Unique identifier (UUID) of the pipeline definition whose triggers are listed. Use [`circleci_pipelines`](./pipelines) to discover the definitions on a project.
+- `pipeline_definition_id` (String) Unique identifier (UUID) of the pipeline **definition** whose triggers are listed — not of a pipeline run, which is what `pipeline_id` means elsewhere in this provider. Use [`circleci_pipeline_definitions`](pipeline_definitions) to discover the definitions on a project.
 - `project_id` (String) Unique identifier (UUID) of the project owning the pipeline definition.
 
 ### Read-Only

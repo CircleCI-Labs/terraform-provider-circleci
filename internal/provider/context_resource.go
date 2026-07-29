@@ -20,14 +20,16 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &contextResource{}
-	_ resource.ResourceWithConfigure   = &contextResource{}
-	_ resource.ResourceWithImportState = &contextResource{}
+	_ resource.Resource                     = &contextResource{}
+	_ resource.ResourceWithConfigure        = &contextResource{}
+	_ resource.ResourceWithImportState      = &contextResource{}
+	_ resource.ResourceWithConfigValidators = &contextResource{}
 )
 
 // contextResourceModel maps the output schema.
 type contextResourceModel struct {
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	Id             types.String `tfsdk:"id"`
 	Name           types.String `tfsdk:"name"`
 	CreatedAt      types.String `tfsdk:"created_at"`
@@ -53,18 +55,15 @@ func (r *contextResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages a CircleCI context. Contexts provide a mechanism for securing and sharing environment variables across projects.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the organization that owns this context. There is no API " +
-					"route to move a context between organizations, so changing this value forces a new " +
-					"resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					// See the BUG note this replaces, below: without this, changing
-					// organization_id planned a silent in-place update that Update()
-					// could never actually perform.
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// There is no API route that moves a context between organizations, so a
+			// genuine organization change must be a replacement — hence replaces:
+			// true. See org_id_deprecation.go for why these are Optional+Computed
+			// and why replacement is conditional on being configured: without the
+			// conditional form, a practitioner who follows the deprecation notice
+			// and drops organization_id would have the context destroyed and
+			// recreated.
+			"organization_id": deprecatedOrgIDAttribute("this context", true),
+			"org_id":          orgIDAttribute("this context", true),
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the context.",
 				Computed:            true,
@@ -90,6 +89,13 @@ func (r *contextResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *contextResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *contextResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan contextResourceModel
@@ -98,7 +104,9 @@ func (r *contextResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	created, err := r.client.CreateContext(ctx, plan.OrganizationId.ValueString(), plan.Name.ValueString())
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
+
+	created, err := r.client.CreateContext(ctx, organizationID, plan.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI context",
@@ -111,6 +119,7 @@ func (r *contextResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.Id = types.StringValue(created.ID)
 	plan.Name = types.StringValue(created.Name)
 	plan.CreatedAt = types.StringValue(created.CreatedAt)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -176,23 +185,30 @@ func (r *contextResource) Read(ctx context.Context, req resource.ReadRequest, re
 	state.Id = types.StringValue(found.ID)
 	state.Name = types.StringValue(found.Name)
 	state.CreatedAt = types.StringValue(found.CreatedAt)
-	// OrganizationId is preserved from state: the read route does not report
-	// which organization a context belongs to.
+	// The organization is preserved from state: internal/circleci's Context does
+	// not carry one, because the read route does not report which organization a
+	// context belongs to. Whichever name state holds is mirrored onto the other,
+	// so a configuration written against either one is stable — see
+	// org_id_deprecation.go.
+	setOrgIDs(&state.OrganizationId, &state.OrgId, effectiveOrgID(state.OrganizationId, state.OrgId))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// Update is unreachable for a real configuration change: every attribute is
-// RequiresReplace, so Terraform never calls this for anything but a
-// refresh-driven re-apply of an unchanged plan. It persists the plan so that
-// case is a no-op rather than leaving the prior state's zero-value fields
-// behind.
+// Update is unreachable for a real configuration change: every writable attribute
+// forces replacement, so Terraform never calls this for anything but a
+// refresh-driven re-apply of an unchanged plan. It persists the plan so that case
+// is a no-op rather than leaving the prior state's zero-value fields behind, and
+// mirrors the organization onto both attribute names so that the unconfigured one
+// is never left unknown in state. See org_id_deprecation.go.
 func (r *contextResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan contextResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, effectiveOrgID(plan.OrganizationId, plan.OrgId))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -252,5 +268,8 @@ func (r *contextResource) ImportState(ctx context.Context, req resource.ImportSt
 	contextID := parts[1]
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), contextID)...)
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
 }

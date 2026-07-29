@@ -36,7 +36,7 @@ distinct class of bug:
 | Hyphenated JSON tags against a snake_case API that ignores unknown keys | Fields silently never sent, or permanently empty. **Three separate instances**: `signing-secret`/`verify-tls` (the security bug), `public-key`/`created-at` on checkout keys, `created-at` on project environment variables |
 | Untyped errors — every failure is `fmt.Errorf("%s: %s", status, body)` | Drift detection by `strings.Contains(err.Error(), "404")`, which also matches a 5xx whose body mentions 404, **silently dropping live resources from state** |
 | Version baked into the client's base URL | "v3 on Cloud, v2 on Server" inexpressible; also a hardcoded `https://circleci.com` that made project creation impossible on Server |
-| `Configure` receiving a narrow service (`*pipeline.PipelineService`) rather than a client | `circleci_pipeline` could not be deployment-gated **at all** — the service carried no deployment information |
+| `Configure` receiving a narrow service (`*pipeline.PipelineService`) rather than a client | `circleci_pipeline_definition` could not be deployment-gated **at all** — the service carried no deployment information |
 | Missing fields (`AdvanceSettings` has no `build_prs_only`) | Settings simply unreachable from Terraform |
 
 The last row is the one worth remembering: a wrapper cannot fix a field the wrapped type
@@ -232,7 +232,7 @@ Where a bug is found in a resource that cannot be fixed in the same change — b
 the fix needs the `circleci-sdk-go` migration — the test asserts **current**
 behaviour with a comment saying so and what to change when it is fixed. Four such
 tests exist today, covering issue #26: `circleci_project` sending every settings
-toggle as `false` on create, and `circleci_pipeline`'s missing `RequiresReplace`,
+toggle as `false` on create, and `circleci_pipeline_definition`'s missing `RequiresReplace`,
 absent drift handling, and ungateable deployment check.
 
 The alternative — a skipped or absent test — loses the finding entirely. A test that
@@ -348,7 +348,7 @@ embedded the real provider but overrode `DataSources()` with a hardcoded list of
 reasoning that those tests "should not depend on the real registration".
 
 That reasoning was backwards, and it cost two data sources their entire test coverage.
-`circleci_pipeline_values` and `circleci_github_app_installation` were correctly
+`circleci_pipeline_run_values` and `circleci_github_app_installation` were correctly
 implemented, correctly registered, and had tests that reused this factory — so both
 failed with **"the provider does not support data source"**, which reads like a broken
 data source rather than a stale list in a test helper. Neither was actually exercised.
@@ -401,16 +401,115 @@ are adding types at once, only whoever owns `provider.go` should run it.
 
 ## Schema naming
 
-### `organization_id` everywhere, for now
+### Both `organization_id` and `org_id`, while the old name is retired
 
-v3 bans `organization_id` in favour of `org_id`, but every existing resource uses
-`organization_id`. Mixing them would be worse than either. All v3 renames
-(`organization_id` → `org_id`, `pipeline` → `run`) are batched into a planned **1.0**
-with a state migration and a `moved{}` guide.
+CircleCI's v3 conventions call the field `org_id`; every release of this provider has
+called it `organization_id`. The HCL name and the wire name are independent tags, so
+this was never a v3 prerequisite — the provider already spoke v3 across 44 call sites
+while exposing `organization_id`, and already sent `org_id` wherever v3 required it.
+Aligning the *Terraform* vocabulary was a naming decision with no forcing function.
 
-Exception: `circleci_url_orb_allow_list_entry` uses `organization`, because that
-route accepts a UUID *or* a `vcs/org` slug and calling it `organization_id` would be
-misleading.
+The decision taken was to **accept both names and deprecate the old one**, rather than
+rename. Existing configurations keep working untouched and indefinitely, switching is a
+no-op, and `organization_id` is removed at a later major once usage has drained. There
+is no state upgrade at any point.
+
+~~All v3 renames are batched into a planned 1.0 with a state migration and a `moved{}`
+guide.~~ Both halves of that earlier note were wrong:
+
+1. **`moved{}` is the wrong mechanism for an *attribute* rename.** It re-addresses
+   resource *instances*; it does nothing for an attribute. That needs `SchemaVersion`
+   plus `UpgradeState`, and the deprecation approach needs neither. `moved{}` applies
+   only to renaming a resource *type*, with `ResourceWithMoveState` — which is exactly
+   what `circleci_pipeline` → `circleci_pipeline_definition` turned out to need, so the
+   mechanism is now in use, just not for the reason originally written down.
+2. **`pipeline` → `run` was bigger than "nearly a non-issue".** The attribute names were
+   the symptom; the *resource type name* was the cause. `circleci_pipeline` managed a
+   definition while colloquial CircleCI usage — and the `/pipeline/:id` route — means a
+   run. Renaming the attributes while leaving the type name in place would have made the
+   provider internally inconsistent rather than clearer. See "Deprecate only what
+   shipped" below.
+
+#### Deprecate only what shipped
+
+A rename inside an unreleased build is not a compatibility event, and treating it as one
+has a real cost.
+
+Every "pipeline" name in the provider was disambiguated at once: the resource type, two
+data source type names, four more data source type names, and five attributes. The first
+implementation gave all of them the full non-breaking treatment — old name kept as a
+working alias, deprecation message, `ExactlyOneOf` validator, alias constructor,
+registration entry, doc page.
+
+Checking the last released tag (v0.4.0, `d7fffe4`, 21 registered types) showed only three
+of those surfaces had ever reached a practitioner: the `circleci_pipeline` resource, the
+`circleci_pipeline` data source, and `pipeline_id` on the `circleci_trigger` resource.
+Everything else was new in the same unreleased version that renamed it.
+
+So eight of eleven deprecations protected nobody, and two of them were actively
+incoherent: `circleci_pipeline_run_values` would have shipped with `pipeline_id` already
+marked deprecated, telling practitioners not to use an attribute they had never seen. The
+cost is not theoretical either — each alias is a registered type name, a doc page, a
+constructor, a test, and a future removal.
+
+Worse, two of the eleven could not have worked at all. `pipelines` on
+`circleci_pipeline_definitions` and the nested `pipeline_id` on
+`circleci_deploy_component` are **`Computed`**, and the framework only raises
+`DeprecationMessage` when a value is present in *configuration*
+(`fwserver/attribute_validation.go` gates on `!configHasNullValue`). A computed
+attribute is always null in config, so the warning can never fire. A "deprecated"
+computed attribute is deprecated only in the documentation.
+
+The rule: **check what shipped before writing a deprecation.** For anything unreleased,
+rename it and note it in the changelog.
+
+#### The obvious implementation destroys data
+
+This is the part worth remembering. `organization_id` carries `RequiresReplace` on
+twelve resources, because CircleCI has no route that moves an object between
+organizations. Add `org_id` as a plain second `Optional` attribute and the sequence is:
+
+1. a practitioner follows the deprecation notice and removes `organization_id`
+2. Terraform plans it as `null` — a change
+3. `RequiresReplace` fires
+4. the resource is **destroyed and recreated**
+
+For `circleci_project` that deletes the project and its build history. The
+"non-breaking" migration would have been more destructive than the breaking rename it
+was meant to avoid, and it would have happened precisely to the users who did as they
+were told.
+
+Reproducible: reverting to the naive shape fails the migration test with
+`expected NoOp, got action(s): [delete create]`.
+
+Three things prevent it, all necessary:
+
+- **`Computed`** on both attributes, so the departing one retains its prior value
+  instead of planning `null`. This is the load-bearing one.
+- **`RequiresReplaceIfConfigured`** instead of `RequiresReplace`, so a null
+  configuration value never forces replacement while a genuine organization change
+  still does.
+- **`reconcileOrgIDPlan` in `ModifyPlan`**, required on any resource built with
+  `replaces: false`. Without replacement, changing the organization plans
+  `organization_id = B` alongside `org_id = A`, which no `Update` can satisfy — the
+  plan is the only place the retained value can be corrected, and the correct value has
+  to come from *config*, since the plan cannot say which name was written.
+
+**Everything lives in `internal/provider/org_id_deprecation.go`**, deliberately. Forty
+call sites resolve to one file, so ending the deprecation is a small deliberate change —
+delete `deprecatedOrgIDAttribute`, drop `orgIDConfigValidator`, make `orgIDAttribute`
+`Required`, follow the compiler — rather than an audit of forty schemas hoping to catch
+every straggler.
+
+Two asymmetries are deliberate and documented in that file: data sources use plain
+`Optional` (nothing to replace, nothing retained, so the unconfigured name stays null),
+and the two data sources where the organization is a read-only *output* get `Computed`
+mirrors instead, so dropping `organization_id` later removes nothing a configuration
+cannot already read.
+
+Exception to the naming: `circleci_url_orb_allow_list_entry` uses `organization`,
+because that route accepts a UUID *or* a `vcs/org` slug and calling it `organization_id`
+would be misleading.
 
 ## Deliberate omissions
 
@@ -446,7 +545,7 @@ v1.1 is the only API version with an active deprecation initiative.
 *"Internal / CLI-only … intentionally NOT customer-facing"*, excluded from the
 published spec. Approved by the maintainer; documented as unpublished and subject
 to change. They are the only way to resolve `owner/repo` to the numeric
-`external_id` that `circleci_pipeline` and `circleci_trigger` require, and the
+`external_id` that `circleci_pipeline_definition` and `circleci_trigger` require, and the
 alternative is practitioners pasting magic numbers.
 
 ### ~~`internal/provider` coverage is around 50%~~ — superseded

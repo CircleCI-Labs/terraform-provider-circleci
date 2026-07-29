@@ -81,13 +81,9 @@ func (r *pipelineResource) ModifyPlan(_ context.Context, req resource.ModifyPlan
 		return
 	}
 
-	requireCloud(r.client, pipelineTypeName, &resp.Diagnostics)
+	requireCloud(r.client, r.typeName(), &resp.Diagnostics)
 }
 
-func (r *triggerResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if r.client == nil || req.Plan.Raw.IsNull() {
-		return
-	}
-
-	requireCloud(r.client, triggerTypeName, &resp.Diagnostics)
-}
+// circleci_trigger's gate is in trigger_resource.go rather than here: a resource has
+// exactly one ModifyPlan, and that one also reconciles `pipeline_id` with
+// `pipeline_definition_id`.

@@ -21,8 +21,8 @@ var (
 
 // pipelineWorkflowsDataSourceModel maps the data source schema.
 type pipelineWorkflowsDataSourceModel struct {
-	PipelineId types.String            `tfsdk:"pipeline_id"`
-	Workflows  []pipelineWorkflowModel `tfsdk:"workflows"`
+	RunId     types.String            `tfsdk:"run_id"`
+	Workflows []pipelineWorkflowModel `tfsdk:"workflows"`
 }
 
 // pipelineWorkflowModel maps one workflow in a pipeline run.
@@ -40,9 +40,9 @@ type pipelineWorkflowModel struct {
 	Tag            types.String `tfsdk:"tag"`
 }
 
-// NewPipelineWorkflowsDataSource is a helper function to simplify the provider
+// NewPipelineRunWorkflowsDataSource is a helper function to simplify the provider
 // implementation.
-func NewPipelineWorkflowsDataSource() datasource.DataSource {
+func NewPipelineRunWorkflowsDataSource() datasource.DataSource {
 	return &pipelineWorkflowsDataSource{}
 }
 
@@ -53,7 +53,7 @@ type pipelineWorkflowsDataSource struct {
 
 // Metadata returns the data source type name.
 func (d *pipelineWorkflowsDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_pipeline_workflows"
+	resp.TypeName = req.ProviderTypeName + "_pipeline_run_workflows"
 }
 
 // Schema defines the schema for the data source.
@@ -64,19 +64,20 @@ func (d *pipelineWorkflowsDataSource) Schema(_ context.Context, _ datasource.Sch
 			"This completes the chain from a pipeline run down to individual jobs. Previously " +
 			"[`circleci_workflow`](workflow) and [`circleci_workflow_jobs`](workflow_jobs) both required a " +
 			"workflow ID that nothing in the provider could produce, so the only way in was to already " +
-			"know it. Now: [`circleci_pipeline_run`](pipeline_run) → `circleci_pipeline_workflows` → " +
+			"know it. Now: [`circleci_pipeline_run`](pipeline_run) → `circleci_pipeline_run_workflows` → " +
 			"`circleci_workflow_jobs`.\n\n" +
-			"~> **`circleci_pipeline_workflows` is a point-in-time read of mutable runtime state.** " +
+			"~> **This is a point-in-time read of mutable runtime state.** " +
 			"`status` changes as each workflow runs, and the set of workflows can grow while the pipeline " +
 			"is in flight. Use it for inspection and in `check` blocks; using it to derive a resource " +
 			"attribute will cause a perpetual diff.\n\n" +
 			"Available on both CircleCI Cloud and CircleCI Server: this route is implemented directly in " +
 			"the same API application on both.",
 		Attributes: map[string]schema.Attribute{
-			"pipeline_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the pipeline run, as returned by " +
-					"[`circleci_pipeline_run`](pipeline_run). Note this is the ID of a pipeline *run*, not " +
-					"of a [`circleci_pipeline`](../resources/pipeline) definition.",
+			"run_id": schema.StringAttribute{
+				MarkdownDescription: "Unique identifier (UUID) of the pipeline run whose workflows to " +
+					"read, as returned by [`circleci_pipeline_run`](pipeline_run).\n\n" +
+					"This is a pipeline **run**, not a " +
+					"[`circleci_pipeline_definition`](pipeline_definition).",
 				Required: true,
 			},
 			"workflows": schema.ListNestedAttribute{
@@ -148,12 +149,12 @@ func (d *pipelineWorkflowsDataSource) Read(ctx context.Context, req datasource.R
 		return
 	}
 
-	pipelineID := state.PipelineId.ValueString()
+	runID := state.RunId.ValueString()
 
-	workflows, err := d.client.Workflows().ListByPipeline(ctx, pipelineID)
+	workflows, err := d.client.Workflows().ListByPipeline(ctx, runID)
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to list workflows for CircleCI pipeline "+pipelineID,
+			"Unable to list workflows for CircleCI pipeline "+runID,
 			circleci.Detail(err),
 		)
 

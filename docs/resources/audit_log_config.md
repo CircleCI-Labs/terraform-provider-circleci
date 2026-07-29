@@ -65,7 +65,6 @@ output "s3_connection_status" {
 
 - `arn` (String) The AWS IAM role CircleCI assumes, via OIDC, to write audit log objects to the bucket. Must be an AWS or MinIO IAM role ARN. Updatable in place.
 - `bucket_name` (String) The destination bucket. 3-63 characters: lowercase letters, digits, dots and hyphens only. Updatable in place.
-- `organization_id` (String) Unique identifier (UUID) of the organization the config belongs to. Changing this value forces a new resource to be created.
 - `target_type` (String) The destination type: `S3` (AWS S3; `region` is required and `endpoint` must be omitted) or `S3_COMPATIBLE` (an S3-compatible endpoint such as MinIO; `endpoint` is required and `region` defaults to `us-east-1` if omitted). Updatable in place.
 
 ### Optional
@@ -73,6 +72,14 @@ output "s3_connection_status" {
 - `bucket_prefix` (String) An optional key prefix under the bucket. Do not include a leading or trailing `/`: CircleCI strips them server-side, which would otherwise leave every plan showing a difference. Updatable in place.
 - `endpoint` (String) The S3-compatible endpoint URL. Required when `target_type = "S3_COMPATIBLE"`, and must be omitted when `target_type = "S3"`. Updatable in place.
 - `is_disabled` (Boolean) Whether streaming is turned off. A disabled config is kept, not deleted, and can be re-enabled in place. Defaults to `false`. Updatable in place.
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this audit log streaming config.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this audit log streaming config.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 - `region` (String) The bucket's AWS region. Required when `target_type = "S3"`. Optional when `target_type = "S3_COMPATIBLE"`, where CircleCI defaults it to `us-east-1` if omitted. Updatable in place.
 
 ### Read-Only

@@ -20,9 +20,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &iosSigningCertificateResource{}
-	_ resource.ResourceWithConfigure   = &iosSigningCertificateResource{}
-	_ resource.ResourceWithImportState = &iosSigningCertificateResource{}
+	_ resource.Resource                     = &iosSigningCertificateResource{}
+	_ resource.ResourceWithConfigure        = &iosSigningCertificateResource{}
+	_ resource.ResourceWithImportState      = &iosSigningCertificateResource{}
+	_ resource.ResourceWithConfigValidators = &iosSigningCertificateResource{}
 )
 
 // iosSigningCertificateTypeName is used in diagnostics, including the
@@ -38,6 +39,7 @@ const iosSigningCertificateTypeName = "circleci_ios_signing_certificate"
 type iosSigningCertificateResourceModel struct {
 	Id                  types.String `tfsdk:"id"`
 	OrganizationId      types.String `tfsdk:"organization_id"`
+	OrgId               types.String `tfsdk:"org_id"`
 	FileName            types.String `tfsdk:"file_name"`
 	CertificateBlob     types.String `tfsdk:"certificate_blob"`
 	CertificatePassword types.String `tfsdk:"certificate_password"`
@@ -110,15 +112,10 @@ func (r *iosSigningCertificateResource) Schema(_ context.Context, _ resource.Sch
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the " +
-					"certificate is uploaded to. Changing this value forces a new resource to be " +
-					"created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this signing certificate", true),
+			"org_id":          orgIDAttribute("this signing certificate", true),
 			"file_name": schema.StringAttribute{
 				MarkdownDescription: "A display name for the certificate, for example " +
 					"`distribution.p12`. This is a label only; it does not have to match the " +
@@ -202,6 +199,13 @@ func (r *iosSigningCertificateResource) Configure(_ context.Context, req resourc
 	r.client = client
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *iosSigningCertificateResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create uploads the certificate and sets the initial Terraform state.
 func (r *iosSigningCertificateResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if !requireCloud(r.client, iosSigningCertificateTypeName, &resp.Diagnostics) {
@@ -215,7 +219,7 @@ func (r *iosSigningCertificateResource) Create(ctx context.Context, req resource
 	}
 
 	cert, err := r.client.CreateSigningCertificate(ctx, circleci.CreateSigningCertificateRequest{
-		OrganizationID: plan.OrganizationId.ValueString(),
+		OrganizationID: effectiveOrgID(plan.OrganizationId, plan.OrgId),
 		FileName:       plan.FileName.ValueString(),
 		CertBlob:       plan.CertificateBlob.ValueString(),
 		CertPassword:   plan.CertificatePassword.ValueString(),
@@ -317,7 +321,9 @@ func (r *iosSigningCertificateResource) ImportState(ctx context.Context, req res
 // setIOSSigningCertificateState copies an API response into the resource model.
 func setIOSSigningCertificateState(model *iosSigningCertificateResourceModel, cert *circleci.SigningCertificate) {
 	model.Id = types.StringValue(cert.ID)
-	model.OrganizationId = types.StringValue(cert.OrganizationID)
+	// Both organization attribute names are written from the one value the API
+	// reports. See org_id_deprecation.go.
+	setOrgIDs(&model.OrganizationId, &model.OrgId, cert.OrganizationID)
 	model.FileName = types.StringValue(cert.FileName)
 	model.CertType = types.StringValue(cert.CertType)
 	model.Fingerprint = types.StringValue(cert.Fingerprint)

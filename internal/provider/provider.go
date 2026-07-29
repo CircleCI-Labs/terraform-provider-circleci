@@ -217,7 +217,7 @@ func (p *CircleCiProvider) Configure(ctx context.Context, req provider.Configure
 func (p *CircleCiProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewProjectResource,
-		NewPipelineResource,
+		NewPipelineDefinitionResource,
 		NewTriggerResource,
 		NewContextResource,
 		NewContextRestrictionResource,
@@ -256,6 +256,11 @@ func (p *CircleCiProvider) Resources(ctx context.Context) []func() resource.Reso
 		// CircleCI Cloud only: v2, but gated behind a Scale-plan billing tier
 		// CircleCI Server does not have. See DESIGN.md.
 		NewAuditLogConfigResource,
+
+		// Deprecated type names, still registered so existing configurations keep
+		// working. Delete this block in the next major release; see
+		// pipeline_resource_rename.go.
+		NewDeprecatedPipelineResource,
 	}
 }
 
@@ -272,7 +277,7 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 	return []func() datasource.DataSource{
 		NewProjectDataSource,
 		NewProjectSettingsDataSource,
-		NewPipelineDataSource,
+		NewPipelineDefinitionDataSource,
 		NewTriggerDataSource,
 		NewContextDataSource,
 		NewContextEnvironmentVariableDataSource,
@@ -293,9 +298,9 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		NewURLOrbAllowListDataSource,
 		NewOTelExportersDataSource,
 		NewPipelineRunDataSource,
-		NewPipelineConfigDataSource,
-		NewPipelineValuesDataSource,
-		NewPipelineWorkflowsDataSource,
+		NewPipelineRunConfigDataSource,
+		NewPipelineRunValuesDataSource,
+		NewPipelineRunWorkflowsDataSource,
 		NewWorkflowDataSource,
 		NewWorkflowJobsDataSource,
 		NewJobDataSource,
@@ -324,7 +329,7 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		NewOrbsDataSource,
 		NewOrbVersionDataSource,
 		NewOrbCategoriesDataSource,
-		NewPipelinesDataSource,
+		NewPipelineDefinitionsDataSource,
 		NewTriggersDataSource,
 		NewCatalogOfferingsDataSource,
 		NewNotificationChannelConfigDataSource,
@@ -344,6 +349,11 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		// CircleCI Server does not have. See DESIGN.md.
 		NewAuditLogConfigsDataSource,
 		NewAuditLogAccessDataSource,
+
+		// Deprecated type name, still registered so existing configurations keep
+		// working. Delete this block in the next major release; see
+		// pipeline_rename.go.
+		NewDeprecatedPipelineDataSource,
 	}
 }
 

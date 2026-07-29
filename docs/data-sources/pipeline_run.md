@@ -9,11 +9,14 @@ description: |-
 
 Fetches one CircleCI pipeline run, by id or by project slug and pipeline number.
 
--> **Naming: this is not `circleci_pipeline`.** [`circleci_pipeline`](pipeline) is an unrelated data
-source that reads a pipeline *definition* — the declared pairing of a config source and a checkout
-source that triggers runs, configured through `circleci_pipeline` the resource. This data source reads a
+-> **Naming: this is not `circleci_pipeline_definition`.**
+[`circleci_pipeline_definition`](pipeline_definition) is an unrelated data source that reads a pipeline
+*definition* — the declared pairing of a config source and a checkout source that triggers runs, managed
+through [the resource of the same name](../resources/pipeline_definition). This data source reads a
 triggered **run**, matching the v3 API's own renaming of "pipeline" to "run" for exactly this reason. The
-two are never interchangeable.
+two are never interchangeable, which is why the definition types are no longer called
+`circleci_pipeline`; see
+[Renaming pipeline resources and data sources](../guides/renaming-pipeline-types).
 
 ~> **This is a point-in-time read of mutable runtime state.** `state`, `errors` and `warnings` change as
 the run is processed, so every `terraform plan` can see a different value until the run reaches a

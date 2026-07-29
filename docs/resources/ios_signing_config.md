@@ -74,8 +74,18 @@ output "release_config_certificate_type" {
 
 - `certificate_id` (String) Unique identifier (UUID) of the `circleci_ios_signing_certificate` this configuration signs with. Changing this value forces a new resource to be created.
 - `name` (String) The configuration's name. May only contain letters, numbers and hyphens, and is limited to 50 characters by the API. Changing this value forces a new resource to be created.
-- `organization_id` (String) Unique identifier (UUID) of the organization the configuration belongs to. Changing this value forces a new resource to be created.
 - `provisioning_profiles` (Attributes List) The provisioning profiles paired with the certificate. Changing this list in any way -- adding, removing or reordering a profile -- forces a new resource to be created, since there is no update route. (see [below for nested schema](#nestedatt--provisioning_profiles))
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this signing configuration.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this signing configuration.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

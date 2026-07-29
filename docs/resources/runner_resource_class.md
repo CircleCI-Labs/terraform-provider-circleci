@@ -24,13 +24,18 @@ resource "circleci_runner_resource_class" "example" {
 
 ### Required
 
-- `organization_id` (String) The UUID of the organization that owns the resource class.
 - `resource_class` (String) The resource class name in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.
 
 ### Optional
 
 - `description` (String) Description of the runner resource class.
 - `force_delete` (Boolean) If true, deletes the resource class even if it has associated tokens.
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this runner resource class.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this runner resource class.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

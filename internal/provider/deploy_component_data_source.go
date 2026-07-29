@@ -44,7 +44,7 @@ type deployComponentVersionModel struct {
 	Namespace      types.String `tfsdk:"namespace"`
 	EnvironmentId  types.String `tfsdk:"environment_id"`
 	IsLive         types.Bool   `tfsdk:"is_live"`
-	PipelineId     types.String `tfsdk:"pipeline_id"`
+	RunId          types.String `tfsdk:"run_id"`
 	WorkflowId     types.String `tfsdk:"workflow_id"`
 	JobId          types.String `tfsdk:"job_id"`
 	JobNumber      types.Int64  `tfsdk:"job_number"`
@@ -95,9 +95,12 @@ func (d *deployComponentDataSource) Schema(_ context.Context, _ datasource.Schem
 					MarkdownDescription: "Whether this is the version currently live in its environment.",
 					Computed:            true,
 				},
-				"pipeline_id": schema.StringAttribute{
+				"run_id": schema.StringAttribute{
 					MarkdownDescription: "Unique identifier (UUID) of the pipeline run that deployed this " +
-						"version. Null when no pipeline run was recorded.",
+						"version, as returned by [`circleci_pipeline_run`](pipeline_run). Null when no " +
+						"pipeline run was recorded.\n\n" +
+						"This is a pipeline **run**, not a " +
+						"[`circleci_pipeline_definition`](../resources/pipeline_definition).",
 					Computed: true,
 				},
 				"workflow_id": schema.StringAttribute{
@@ -213,7 +216,7 @@ func deployComponentVersionToModel(version circleci.DeployComponentVersion) depl
 		Namespace:      types.StringValue(version.Namespace),
 		EnvironmentId:  types.StringValue(version.EnvironmentID),
 		IsLive:         types.BoolValue(version.IsLive),
-		PipelineId:     zeroUUIDToNull(version.PipelineID),
+		RunId:          zeroUUIDToNull(version.PipelineID),
 		WorkflowId:     zeroUUIDToNull(version.WorkflowID),
 		JobId:          zeroUUIDToNull(version.JobID),
 		JobNumber:      types.Int64Null(),

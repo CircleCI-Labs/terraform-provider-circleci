@@ -15,13 +15,15 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &projectGroupsDataSource{}
-	_ datasource.DataSourceWithConfigure = &projectGroupsDataSource{}
+	_ datasource.DataSource                     = &projectGroupsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &projectGroupsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &projectGroupsDataSource{}
 )
 
 // projectGroupsDataSourceModel maps the data source schema.
 type projectGroupsDataSourceModel struct {
 	OrganizationId types.String            `tfsdk:"organization_id"`
+	OrgId          types.String            `tfsdk:"org_id"`
 	ProjectId      types.String            `tfsdk:"project_id"`
 	Groups         []projectGroupItemModel `tfsdk:"groups"`
 }
@@ -57,10 +59,10 @@ func (d *projectGroupsDataSource) Schema(_ context.Context, _ datasource.SchemaR
 			"~> **These endpoints are not part of the published CircleCI OpenAPI specification** and may " +
 			"change without notice.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the project belongs to.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("project groups"),
+			"org_id":          orgIDDataSourceAttribute("project groups"),
 			"project_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the project whose groups are listed.",
 				Required:            true,
@@ -91,6 +93,13 @@ func (d *projectGroupsDataSource) Schema(_ context.Context, _ datasource.SchemaR
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *projectGroupsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the groups granted a role on the project.
 func (d *projectGroupsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var state projectGroupsDataSourceModel
@@ -99,7 +108,8 @@ func (d *projectGroupsDataSource) Read(ctx context.Context, req datasource.ReadR
 		return
 	}
 
-	organizationID, projectID := state.OrganizationId.ValueString(), state.ProjectId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
+	projectID := state.ProjectId.ValueString()
 
 	groups, err := d.client.ProjectGroups().List(ctx, organizationID, projectID)
 	if err != nil {

@@ -22,13 +22,13 @@ var (
 
 // pipelineValuesDataSourceModel maps the data source schema.
 type pipelineValuesDataSourceModel struct {
-	PipelineID types.String `tfsdk:"pipeline_id"`
-	Values     types.Map    `tfsdk:"values"`
+	RunID  types.String `tfsdk:"run_id"`
+	Values types.Map    `tfsdk:"values"`
 }
 
-// NewPipelineValuesDataSource is a helper function to simplify the provider
+// NewPipelineRunValuesDataSource is a helper function to simplify the provider
 // implementation.
-func NewPipelineValuesDataSource() datasource.DataSource {
+func NewPipelineRunValuesDataSource() datasource.DataSource {
 	return &pipelineValuesDataSource{}
 }
 
@@ -40,7 +40,7 @@ type pipelineValuesDataSource struct {
 
 // Metadata returns the data source type name.
 func (d *pipelineValuesDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_pipeline_values"
+	resp.TypeName = req.ProviderTypeName + "_pipeline_run_values"
 }
 
 // Schema defines the schema for the data source.
@@ -55,13 +55,16 @@ func (d *pipelineValuesDataSource) Schema(_ context.Context, _ datasource.Schema
 			"ever-growing row counts.\n\n" +
 			"Available on both CircleCI Cloud and CircleCI Server: this route is implemented directly in " +
 			"the same v2 API application on both, like `circleci_pipeline_run`.\n\n" +
-			"-> **Naming.** `pipeline_id` refers to a pipeline *run* (what `circleci_pipeline_run` reads), " +
-			"not a pipeline *definition* (what the unrelated `circleci_pipeline` data source reads). The " +
-			"name matches the API route's own parameter, `/api/v2/pipeline/{pipeline_id}/values`.",
+			"-> **Naming.** `run_id` is the id of a pipeline *run* (what `circleci_pipeline_run` reads), " +
+			"not of a pipeline *definition* (what `circleci_pipeline_definition` reads). The API route " +
+			"spells the same parameter `pipeline_id`, in `/api/v2/pipeline/{pipeline_id}/values`.",
 		Attributes: map[string]schema.Attribute{
-			"pipeline_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the pipeline run, i.e. `circleci_pipeline_run`'s `id`.",
-				Required:            true,
+			"run_id": schema.StringAttribute{
+				MarkdownDescription: "Unique identifier (UUID) of the pipeline run whose values to read, " +
+					"as returned by [`circleci_pipeline_run`](pipeline_run).\n\n" +
+					"This is a pipeline **run**, not a " +
+					"[`circleci_pipeline_definition`](pipeline_definition).",
+				Required: true,
 			},
 			"values": schema.MapAttribute{
 				MarkdownDescription: "The pipeline's built-in values, keyed by their dotted name (e.g. " +
@@ -94,12 +97,12 @@ func (d *pipelineValuesDataSource) Read(ctx context.Context, req datasource.Read
 		return
 	}
 
-	pipelineID := config.PipelineID.ValueString()
+	runID := config.RunID.ValueString()
 
-	values, err := d.client.PipelineRuns().GetValues(ctx, pipelineID)
+	values, err := d.client.PipelineRuns().GetValues(ctx, runID)
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to read CircleCI pipeline values for pipeline "+pipelineID,
+			"Unable to read CircleCI pipeline values for pipeline "+runID,
 			circleci.Detail(err),
 		)
 

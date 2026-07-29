@@ -39,13 +39,18 @@ ephemeral "circleci_usage_export" "example" {
 ### Required
 
 - `end` (String) End of the export window, as an RFC 3339 timestamp.
-- `organization_id` (String) UUID of the organization to export usage data for.
 - `start` (String) Start of the export window, as an RFC 3339 timestamp (e.g. `"2024-01-01T00:00:00Z"`).
 
 ### Optional
 
+- `org_id` (String) The unique identifier (UUID) of the organization that owns the usage data being exported.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns the usage data being exported.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 - `poll_timeout` (String) How long to wait for the export job to reach a terminal state, as a Go duration string (e.g. `"20m"`). Defaults to `10m0s`. Raise this for an unusually large date range; CircleCI's own rate limit on checking a job's status (10 requests per minute) means this resource polls no more often than every 10s regardless of this value.
-- `shared_org_ids` (List of String) UUIDs of additional organizations that share billing with `organization_id`, to include in the export.
+- `shared_org_ids` (List of String) UUIDs of additional organizations that share billing with `org_id`, to include in the export.
 
 ### Read-Only
 

@@ -25,9 +25,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &iosSigningConfigResource{}
-	_ resource.ResourceWithConfigure   = &iosSigningConfigResource{}
-	_ resource.ResourceWithImportState = &iosSigningConfigResource{}
+	_ resource.Resource                     = &iosSigningConfigResource{}
+	_ resource.ResourceWithConfigure        = &iosSigningConfigResource{}
+	_ resource.ResourceWithImportState      = &iosSigningConfigResource{}
+	_ resource.ResourceWithConfigValidators = &iosSigningConfigResource{}
 )
 
 // iosSigningConfigTypeName is used in diagnostics, including the Cloud-only error.
@@ -43,6 +44,7 @@ var iosSigningConfigNamePattern = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 type iosSigningConfigResourceModel struct {
 	Id                   types.String                   `tfsdk:"id"`
 	OrganizationId       types.String                   `tfsdk:"organization_id"`
+	OrgId                types.String                   `tfsdk:"org_id"`
 	Name                 types.String                   `tfsdk:"name"`
 	CertificateId        types.String                   `tfsdk:"certificate_id"`
 	CertificateFileName  types.String                   `tfsdk:"certificate_file_name"`
@@ -105,15 +107,10 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the " +
-					"configuration belongs to. Changing this value forces a new resource to be " +
-					"created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this signing configuration", true),
+			"org_id":          orgIDAttribute("this signing configuration", true),
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The configuration's name. May only contain letters, " +
 					"numbers and hyphens, and is limited to 50 characters by the API. Changing " +
@@ -202,6 +199,13 @@ func (r *iosSigningConfigResource) Configure(_ context.Context, req resource.Con
 	r.client = client
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *iosSigningConfigResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the signing configuration and sets the initial Terraform state.
 func (r *iosSigningConfigResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if !requireCloud(r.client, iosSigningConfigTypeName, &resp.Diagnostics) {
@@ -223,7 +227,7 @@ func (r *iosSigningConfigResource) Create(ctx context.Context, req resource.Crea
 	}
 
 	cfg, err := r.client.CreateSigningConfig(ctx, circleci.CreateSigningConfigRequest{
-		OrganizationID:       plan.OrganizationId.ValueString(),
+		OrganizationID:       effectiveOrgID(plan.OrganizationId, plan.OrgId),
 		CertificateID:        plan.CertificateId.ValueString(),
 		Name:                 plan.Name.ValueString(),
 		ProvisioningProfiles: profiles,
@@ -259,7 +263,8 @@ func (r *iosSigningConfigResource) Read(ctx context.Context, req resource.ReadRe
 		return
 	}
 
-	cfg, err := r.client.GetSigningConfig(ctx, state.OrganizationId.ValueString(), state.Id.ValueString())
+	cfg, err := r.client.GetSigningConfig(ctx,
+		effectiveOrgID(state.OrganizationId, state.OrgId), state.Id.ValueString())
 	if circleci.IsNotFound(err) {
 		resp.State.RemoveResource(ctx)
 
@@ -334,7 +339,10 @@ func (r *iosSigningConfigResource) ImportState(ctx context.Context, req resource
 		return
 	}
 
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), configID)...)
 }
 
@@ -345,7 +353,9 @@ func (r *iosSigningConfigResource) ImportState(ctx context.Context, req resource
 // non-null blob every element of the configured list carries.
 func setIOSSigningConfigState(model *iosSigningConfigResourceModel, cfg *circleci.SigningConfig) {
 	model.Id = types.StringValue(cfg.ID)
-	model.OrganizationId = types.StringValue(cfg.OrganizationID)
+	// Both organization attribute names are written from the one value the API
+	// reports. See org_id_deprecation.go.
+	setOrgIDs(&model.OrganizationId, &model.OrgId, cfg.OrganizationID)
 	model.Name = types.StringValue(cfg.Name)
 	model.CertificateId = types.StringValue(cfg.CertificateID)
 	model.CertificateFileName = types.StringValue(cfg.CertificateFileName)

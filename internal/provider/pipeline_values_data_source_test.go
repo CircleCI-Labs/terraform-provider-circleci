@@ -55,7 +55,7 @@ func TestPipelineValuesDataSourceSchema(t *testing.T) {
 
 	ctx := t.Context()
 	resp := &fwdatasource.SchemaResponse{}
-	NewPipelineValuesDataSource().Schema(ctx, fwdatasource.SchemaRequest{}, resp)
+	NewPipelineRunValuesDataSource().Schema(ctx, fwdatasource.SchemaRequest{}, resp)
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
@@ -64,9 +64,14 @@ func TestPipelineValuesDataSourceSchema(t *testing.T) {
 		t.Fatalf("schema validation returned diagnostics: %v", diags)
 	}
 
-	pipelineID, ok := resp.Schema.Attributes["pipeline_id"]
-	if !ok || !pipelineID.IsRequired() {
-		t.Error("pipeline_id must be present and required")
+	// run_id is the sole identifier: without it there is nothing to read, so it has
+	// to be Required rather than left to a validator.
+	runID, ok := resp.Schema.Attributes["run_id"]
+	if !ok {
+		t.Fatal("run_id must be present, as it is the lookup key")
+	}
+	if !runID.IsRequired() {
+		t.Error("run_id is not required, but the data source cannot read anything without it")
 	}
 
 	values, ok := resp.Schema.Attributes["values"]
@@ -79,8 +84,8 @@ func TestAccPipelineValuesDataSource(t *testing.T) {
 	host := newMockPipelineValuesAPI(t)
 
 	config := discoveryProviderConfig(host, "cloud") + fmt.Sprintf(`
-data "circleci_pipeline_values" "test" {
-  pipeline_id = %[1]q
+data "circleci_pipeline_run_values" "test" {
+  run_id = %[1]q
 }
 `, testPipelineValuesRunID)
 
@@ -91,26 +96,26 @@ data "circleci_pipeline_values" "test" {
 				Config: config,
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_values.test",
+						"data.circleci_pipeline_run_values.test",
 						tfjsonpath.New("values").AtMapKey("pipeline.id"),
 						knownvalue.StringExact(testPipelineValuesRunID),
 					),
 					// The API sends this as a JSON number, not a string; it must still
 					// come back rendered as "42", not "4.2e+01" or similar.
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_values.test",
+						"data.circleci_pipeline_run_values.test",
 						tfjsonpath.New("values").AtMapKey("pipeline.number"),
 						knownvalue.StringExact("42"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_values.test",
+						"data.circleci_pipeline_run_values.test",
 						tfjsonpath.New("values").AtMapKey("pipeline.git.branch"),
 						knownvalue.StringExact("main"),
 					),
 					// An empty value must survive as an empty string element, not vanish
 					// from the map.
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_values.test",
+						"data.circleci_pipeline_run_values.test",
 						tfjsonpath.New("values").AtMapKey("pipeline.git.tag"),
 						knownvalue.StringExact(""),
 					),
@@ -129,8 +134,8 @@ func TestAccPipelineValuesDataSource_notFound(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	config := discoveryProviderConfig(srv.URL, "cloud") + fmt.Sprintf(`
-data "circleci_pipeline_values" "test" {
-  pipeline_id = %[1]q
+data "circleci_pipeline_run_values" "test" {
+  run_id = %[1]q
 }
 `, testPipelineValuesRunID)
 

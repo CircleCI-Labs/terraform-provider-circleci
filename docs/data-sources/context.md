@@ -23,8 +23,13 @@ data "circleci_context" "example" {
 ### Optional
 
 - `id` (String) The ID of the context. Set either this or `name`.
-- `name` (String) The name of the context. Set either this or `id`. Looking a context up by name also requires `organization_id`, because the API has no lookup-by-name route: the provider lists the organization's contexts and matches on the name, which is unique within an organization.
-- `organization_id` (String) The ID of the organization owning the context. Required when identifying the context by `name`, and ignored when `id` is set.
+- `name` (String) The name of the context. Set either this or `id`. Looking a context up by name also requires the organization, as `org_id` (or the deprecated `organization_id`), because the API has no lookup-by-name route: the provider lists the organization's contexts and matches on the name, which is unique within an organization. Neither is needed when `id` is set, and both are ignored in that case.
+- `org_id` (String) The unique identifier (UUID) of the organization to read contexts from.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization to read contexts from.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 
 ### Read-Only
 

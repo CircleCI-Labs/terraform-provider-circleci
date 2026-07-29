@@ -45,7 +45,12 @@ output "outdated_agents" {
 ### Optional
 
 - `namespace` (String) Only return runners in this runner namespace.
-- `organization_id` (String) Only return runners owned by this organization, as an organization UUID.
+- `org_id` (String) The unique identifier (UUID) of the organization to read runners from.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization to read runners from.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 - `resource_class` (String) Only return runners in this resource class, in `namespace/name` format (e.g. `myorg/myrunner`).
 
 ### Read-Only

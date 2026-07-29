@@ -21,7 +21,7 @@ up by name.
 | **Organization type** | Any. |
 | **Token** | Any valid API token. |
 
-~> **`pipeline_id`, `workflow_id` and `job_id` on a version can be null.** The API represents "no
+~> **`run_id`, `workflow_id` and `job_id` on a version can be null.** The API represents "no
 association recorded" as the all-zero UUID (`00000000-0000-0000-0000-000000000000`) rather than omitting
 the field; this provider converts that sentinel to `null` so it cannot be mistaken for a real identifier.
 

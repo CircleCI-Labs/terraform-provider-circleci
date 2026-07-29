@@ -16,13 +16,15 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &auditLogConfigsDataSource{}
-	_ datasource.DataSourceWithConfigure = &auditLogConfigsDataSource{}
+	_ datasource.DataSource                     = &auditLogConfigsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &auditLogConfigsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &auditLogConfigsDataSource{}
 )
 
 // auditLogConfigsDataSourceModel maps the data source schema.
 type auditLogConfigsDataSourceModel struct {
 	OrganizationID types.String              `tfsdk:"organization_id"`
+	OrgID          types.String              `tfsdk:"org_id"`
 	Configs        []auditLogConfigItemModel `tfsdk:"audit_log_configs"`
 }
 
@@ -64,10 +66,10 @@ func (d *auditLogConfigsDataSource) Schema(_ context.Context, _ datasource.Schem
 			"config per `target_type`, so this never needs paginating.\n\n" +
 			"~> **CircleCI Cloud only, and only on a Scale plan.** See `circleci_audit_log_config` for why.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose configs are listed.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("audit log configs"),
+			"org_id":          orgIDDataSourceAttribute("audit log configs"),
 			"audit_log_configs": schema.ListNestedAttribute{
 				MarkdownDescription: "The organization's audit log streaming configs, in the order the API " +
 					"returned them.",
@@ -133,6 +135,13 @@ func (d *auditLogConfigsDataSource) Schema(_ context.Context, _ datasource.Schem
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *auditLogConfigsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 func (d *auditLogConfigsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if !requireCloud(d.client, "circleci_audit_log_configs", &resp.Diagnostics) {
 		return
@@ -144,13 +153,15 @@ func (d *auditLogConfigsDataSource) Read(ctx context.Context, req datasource.Rea
 		return
 	}
 
-	configs, err := d.client.ListAuditLogConfigs(ctx, config.OrganizationID.ValueString())
+	organizationID := effectiveOrgID(config.OrganizationID, config.OrgID)
+
+	configs, err := d.client.ListAuditLogConfigs(ctx, organizationID)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI audit log configs",
 			fmt.Sprintf(
 				"Could not list audit log configs for organization %s: %s",
-				config.OrganizationID.ValueString(), circleci.Detail(err),
+				organizationID, circleci.Detail(err),
 			),
 		)
 

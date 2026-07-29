@@ -28,7 +28,10 @@ data "circleci_project" "example" {
 
 - `id` (String) Project ID.
 - `name` (String) Project name (e.g. my-repository).
-- `organization_id` (String) ID for the project's organization.
+- `org_id` (String) Unique identifier (UUID) of the organization that owns this project.
+- `organization_id` (String) Unique identifier (UUID) of the organization that owns this project.
+
+Superseded by `org_id`, which reports the same value and matches CircleCI's own naming. Both are reported; prefer `org_id` in new configurations.
 - `organization_name` (String) Name of the project's organization (e.g. my-org).
 - `organization_slug` (String) Slug of the project's organization (e.g. github/my-org).
 - `vcs_info` (Attributes) Attributes relating to the project's connected version control system. (see [below for nested schema](#nestedatt--vcs_info))

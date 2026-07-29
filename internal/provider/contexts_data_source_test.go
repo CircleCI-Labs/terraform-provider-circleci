@@ -37,12 +37,18 @@ func TestContextsDataSourceSchema(t *testing.T) {
 		t.Fatalf("schema validation returned diagnostics: %v", diags)
 	}
 
-	organizationID, ok := resp.Schema.Attributes["organization_id"]
-	if !ok {
-		t.Fatal("schema is missing the organization_id attribute")
-	}
-	if !organizationID.IsRequired() {
-		t.Error("organization_id is not required, but it is the scope of the listing")
+	// The organization is the scope of the listing, but it is accepted under two
+	// names while `organization_id` is deprecated, so neither can be Required on
+	// its own: orgIDDataSourceConfigValidator is what requires exactly one of
+	// them. See org_id_deprecation.go.
+	for _, name := range []string{"organization_id", "org_id"} {
+		attribute, ok := resp.Schema.Attributes[name]
+		if !ok {
+			t.Fatalf("schema is missing the %q attribute", name)
+		}
+		if !attribute.IsOptional() {
+			t.Errorf("attribute %q is not optional, but one of the pair must be settable", name)
+		}
 	}
 
 	contexts, ok := resp.Schema.Attributes["contexts"]

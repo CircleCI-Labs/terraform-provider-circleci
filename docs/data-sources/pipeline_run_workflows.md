@@ -1,11 +1,11 @@
 ---
-page_title: "circleci_pipeline_workflows Data Source - circleci"
+page_title: "circleci_pipeline_run_workflows Data Source - circleci"
 subcategory: ""
 description: |-
   Fetches every workflow in a CircleCI pipeline run.
 ---
 
-# circleci_pipeline_workflows (Data Source)
+# circleci_pipeline_run_workflows (Data Source)
 
 Fetches every workflow in a CircleCI pipeline run. Pagination is followed internally, so the result
 covers every workflow rather than one page.
@@ -16,7 +16,7 @@ and until this was added nothing in the provider could produce one — the only 
 know it.
 
 ```
-circleci_pipeline_run  ->  circleci_pipeline_workflows  ->  circleci_workflow_jobs
+circleci_pipeline_run  ->  circleci_pipeline_run_workflows  ->  circleci_workflow_jobs
 ```
 
 ~> **This is a point-in-time read of mutable runtime state.** `status` changes as each workflow runs,
@@ -30,21 +30,23 @@ blocks; using it to derive a resource attribute will cause a perpetual diff.
 | --- | --- |
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments (`the CircleCI API`); see [`circleci_pipeline_run`](pipeline_run). |
-| **API** | `GET /api/v2/pipeline/{pipeline-id}/workflow` |
+| **API** | `GET /api/v2/pipeline/{id}/workflow` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token with permission to view the project's builds. |
 
--> **`pipeline_id` is a pipeline *run*, not a pipeline definition.** Pass the `id` from
-[`circleci_pipeline_run`](pipeline_run), not from the [`circleci_pipeline`](../resources/pipeline)
-resource — those are different objects with different identifiers.
+-> **`run_id` is a pipeline *run*, not a pipeline definition.** Pass the `id` from
+[`circleci_pipeline_run`](pipeline_run), not from the
+[`circleci_pipeline_definition`](../resources/pipeline_definition) resource — those are different
+objects with different identifiers, and both are UUIDs, so passing the wrong one fails at apply rather
+than at plan.
 
 ## Example Usage
 
 ```terraform
 # Lists every workflow in a pipeline run. Available on both CircleCI Cloud and
 # CircleCI Server.
-data "circleci_pipeline_workflows" "this" {
-  pipeline_id = "1e2d3c4b-5a69-7887-9a0b-1c2d3e4f5061"
+data "circleci_pipeline_run_workflows" "this" {
+  run_id = "1e2d3c4b-5a69-7887-9a0b-1c2d3e4f5061"
 }
 
 # This data source is the link that makes the run -> workflow -> job chain
@@ -52,7 +54,7 @@ data "circleci_pipeline_workflows" "this" {
 # provider could produce one.
 data "circleci_workflow_jobs" "each" {
   for_each = {
-    for workflow in data.circleci_pipeline_workflows.this.workflows :
+    for workflow in data.circleci_pipeline_run_workflows.this.workflows :
     workflow.name => workflow.id
   }
 
@@ -61,7 +63,7 @@ data "circleci_workflow_jobs" "each" {
 
 output "circleci_failed_workflows" {
   value = [
-    for workflow in data.circleci_pipeline_workflows.this.workflows : workflow.name
+    for workflow in data.circleci_pipeline_run_workflows.this.workflows : workflow.name
     if workflow.status == "failed"
   ]
 }
@@ -72,7 +74,9 @@ output "circleci_failed_workflows" {
 
 ### Required
 
-- `pipeline_id` (String) Unique identifier (UUID) of the pipeline run, as returned by [`circleci_pipeline_run`](pipeline_run). Note this is the ID of a pipeline *run*, not of a [`circleci_pipeline`](../resources/pipeline) definition.
+- `run_id` (String) Unique identifier (UUID) of the pipeline run whose workflows to read, as returned by [`circleci_pipeline_run`](pipeline_run).
+
+This is a pipeline **run**, not a [`circleci_pipeline_definition`](pipeline_definition).
 
 ### Read-Only
 

@@ -1,0 +1,51 @@
+---
+page_title: "circleci_pipeline_run_values Data Source - circleci"
+subcategory: ""
+description: |-
+  Reads the built-in pipeline.* values available to a CircleCI pipeline run.
+---
+
+# circleci_pipeline_run_values (Data Source)
+
+Reads the built-in `pipeline.*` values available to a CircleCI pipeline run: things like
+`pipeline.id`, `pipeline.number`, `pipeline.project.git_url` and `pipeline.git.branch` — the same values
+a config interpolates as `<< pipeline.number >>`. See
+[Pipeline values](https://circleci.com/docs/reference/pipeline-variables/) for the full set.
+
+This is deliberately narrow: it is bounded to one run's fixed set of built-in values, unlike the
+insights run-reporting endpoints this provider omits, which return unbounded, ever-growing row counts.
+
+~> **This is a point-in-time read.** A run's values are fixed once it exists, but the run itself may not
+exist yet when this is read, in which case the read fails. Use this data source for inspection and in
+`check` blocks; using it to derive a resource attribute couples that resource to one run.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments; see [`circleci_pipeline_run`](pipeline_run). |
+| **API** | `GET /api/v2/pipeline/{id}/values` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with permission to view the project's builds. |
+
+-> **`run_id` is a pipeline *run*, not a pipeline definition.** Pass the `id` from
+[`circleci_pipeline_run`](pipeline_run), not from the
+[`circleci_pipeline_definition`](../resources/pipeline_definition) resource — those are different
+objects with different identifiers, and both are UUIDs, so passing the wrong one fails at apply rather
+than at plan.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_pipeline_run_values/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Notes
+
+* Every value is rendered as a string, because the API mixes strings and numbers in one response and a
+  map attribute has a single element type. An empty string always means the run's underlying value was
+  itself empty, not that the key is absent.
+* The set of keys is whatever the run recorded, so it varies with how the run was triggered — a
+  schedule-triggered run reports different `pipeline.trigger_parameters.*` keys than a push-triggered
+  one.

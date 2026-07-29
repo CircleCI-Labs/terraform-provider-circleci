@@ -23,9 +23,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &orbNamespaceResource{}
-	_ resource.ResourceWithConfigure   = &orbNamespaceResource{}
-	_ resource.ResourceWithImportState = &orbNamespaceResource{}
+	_ resource.Resource                     = &orbNamespaceResource{}
+	_ resource.ResourceWithConfigure        = &orbNamespaceResource{}
+	_ resource.ResourceWithImportState      = &orbNamespaceResource{}
+	_ resource.ResourceWithConfigValidators = &orbNamespaceResource{}
 )
 
 // orbNamespaceTypeName is used in diagnostics, including the Cloud-only error.
@@ -44,6 +45,7 @@ type orbNamespaceResourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	Name           types.String `tfsdk:"name"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 }
 
 // NewOrbNamespaceResource is a helper function to simplify the provider implementation.
@@ -96,15 +98,10 @@ func (r *orbNamespaceResource) Schema(_ context.Context, _ resource.SchemaReques
 					),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization that owns the " +
-					"namespace. A namespace cannot be moved between organizations, so changing " +
-					"this forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this namespace", true),
+			"org_id":          orgIDAttribute("this namespace", true),
 		},
 	}
 }
@@ -119,6 +116,13 @@ func (r *orbNamespaceResource) Configure(_ context.Context, req resource.Configu
 	r.client = client
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *orbNamespaceResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
 // Create creates the namespace and sets the initial Terraform state.
 func (r *orbNamespaceResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if !requireCloud(r.client, orbNamespaceTypeName, &resp.Diagnostics) {
@@ -131,9 +135,11 @@ func (r *orbNamespaceResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
+
 	ns, err := r.client.CreateNamespace(ctx, circleci.CreateNamespaceRequest{
 		Name:           plan.Name.ValueString(),
-		OrganizationID: plan.OrganizationId.ValueString(),
+		OrganizationID: organizationID,
 	})
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -146,6 +152,7 @@ func (r *orbNamespaceResource) Create(ctx context.Context, req resource.CreateRe
 
 	plan.Id = types.StringValue(ns.ID)
 	plan.Name = types.StringValue(ns.Name)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -192,8 +199,11 @@ func (r *orbNamespaceResource) Read(ctx context.Context, req resource.ReadReques
 
 	state.Id = types.StringValue(ns.ID)
 	state.Name = types.StringValue(ns.Name)
-	// organization_id is not part of the namespace representation, so it is
-	// carried over from state rather than refreshed.
+	// The organization is not part of the namespace representation, so it is
+	// carried over from state rather than refreshed. Both attribute names are
+	// written, so an import that supplied only organization_id still leaves
+	// org_id populated. See org_id_deprecation.go.
+	setOrgIDs(&state.OrganizationId, &state.OrgId, effectiveOrgID(state.OrganizationId, state.OrgId))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -217,6 +227,7 @@ func (r *orbNamespaceResource) Update(ctx context.Context, req resource.UpdateRe
 	}
 
 	plan.Id = state.Id
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, effectiveOrgID(plan.OrganizationId, plan.OrgId))
 
 	if plan.Name.ValueString() == state.Name.ValueString() {
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -303,7 +314,10 @@ func (r *orbNamespaceResource) ImportState(ctx context.Context, req resource.Imp
 		return
 	}
 
+	// Both organization attribute names are set, so a configuration written
+	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
 
 	// Read resolves whichever of the two is set.
 	if orbIsUUID(ref) {

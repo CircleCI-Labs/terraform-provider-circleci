@@ -93,8 +93,18 @@ resource "circleci_group_membership" "contractors" {
 ### Required
 
 - `group_id` (String) Unique identifier (UUID) of the group whose membership is managed. Changing this value forces a new resource to be created.
-- `organization_id` (String) Unique identifier (UUID) of the organization the group belongs to. Changing this value forces a new resource to be created.
 - `user_ids` (Set of String) Unique identifiers (UUIDs) of the users that make up the group. This is the complete membership: users not listed here are removed from the group. Users are addressed by UUID; a login or email address is not accepted. An empty set empties the group.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns the group whose membership this manages.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns the group whose membership this manages.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

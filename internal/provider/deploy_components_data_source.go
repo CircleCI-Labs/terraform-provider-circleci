@@ -17,8 +17,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &deployComponentsDataSource{}
-	_ datasource.DataSourceWithConfigure = &deployComponentsDataSource{}
+	_ datasource.DataSource                     = &deployComponentsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &deployComponentsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &deployComponentsDataSource{}
 )
 
 // deployComponentsTypeName is the data source's type name, used in diagnostics.
@@ -27,6 +28,7 @@ const deployComponentsTypeName = "circleci_deploy_components"
 // deployComponentsDataSourceModel maps the data source schema.
 type deployComponentsDataSourceModel struct {
 	OrganizationId types.String           `tfsdk:"organization_id"`
+	OrgId          types.String           `tfsdk:"org_id"`
 	ProjectId      types.String           `tfsdk:"project_id"`
 	Name           types.String           `tfsdk:"name"`
 	Components     []deployComponentModel `tfsdk:"components"`
@@ -112,10 +114,10 @@ func (d *deployComponentsDataSource) Schema(_ context.Context, _ datasource.Sche
 			"than one page.\n\n" +
 			"~> **CircleCI Cloud only.** Deploy/release tracking is not part of CircleCI Server.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose components are listed.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("deploy components"),
+			"org_id":          orgIDDataSourceAttribute("deploy components"),
 			"project_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of a CircleCI project to filter by. " +
 					"Leave unset to list components across every project in the organization.",
@@ -139,6 +141,13 @@ func (d *deployComponentsDataSource) Schema(_ context.Context, _ datasource.Sche
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *deployComponentsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the organization's deploy components.
 func (d *deployComponentsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if !requireCloud(d.client, deployComponentsTypeName, &resp.Diagnostics) {
@@ -151,7 +160,7 @@ func (d *deployComponentsDataSource) Read(ctx context.Context, req datasource.Re
 		return
 	}
 
-	orgID := state.OrganizationId.ValueString()
+	orgID := effectiveOrgID(state.OrganizationId, state.OrgId)
 
 	components, err := d.client.DeployComponents().List(ctx, orgID, state.ProjectId.ValueString(), state.Name.ValueString())
 	if err != nil {

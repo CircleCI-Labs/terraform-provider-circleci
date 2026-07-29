@@ -17,7 +17,7 @@ import (
 
 func testAccPipelinesDataSourceConfig(host, deployment string) string {
 	return pluralProviderConfig(host, deployment) + fmt.Sprintf(`
-data "circleci_pipelines" "test" {
+data "circleci_pipeline_definitions" "test" {
   project_id = %[1]q
 }
 `, testPluralProjectID)
@@ -28,7 +28,7 @@ func TestPipelinesDataSourceSchema(t *testing.T) {
 
 	ctx := t.Context()
 	resp := &fwdatasource.SchemaResponse{}
-	NewPipelinesDataSource().Schema(ctx, fwdatasource.SchemaRequest{}, resp)
+	NewPipelineDefinitionsDataSource().Schema(ctx, fwdatasource.SchemaRequest{}, resp)
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
@@ -45,12 +45,12 @@ func TestPipelinesDataSourceSchema(t *testing.T) {
 		t.Error("project_id is not required, but it is the scope of the listing")
 	}
 
-	pipelines, ok := resp.Schema.Attributes["pipelines"]
+	definitions, ok := resp.Schema.Attributes["pipeline_definitions"]
 	if !ok {
-		t.Fatal("schema is missing the pipelines attribute")
+		t.Fatal("schema is missing the pipeline_definitions attribute")
 	}
-	if !pipelines.IsComputed() {
-		t.Error("pipelines is not computed, but it is entirely API-derived")
+	if !definitions.IsComputed() {
+		t.Error("pipeline_definitions is not computed, but it is entirely API-derived")
 	}
 }
 
@@ -75,67 +75,67 @@ func TestAccPipelinesDataSource(t *testing.T) {
 				Config: testAccPipelinesDataSourceConfig(host, "cloud"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions"),
 						knownvalue.ListSizeExact(2),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("name"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("name"),
 						knownvalue.StringExact("build"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("description"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("description"),
 						knownvalue.StringExact("Main pipeline"),
 					),
 					// The nested config and checkout sources are flattened, matching
 					// circleci_pipeline.
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("config_source_provider"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("config_source_provider"),
 						knownvalue.StringExact("github_app"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("config_source_file_path"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("config_source_file_path"),
 						knownvalue.StringExact(".circleci/config.yml"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("config_source_repo_full_name"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("config_source_repo_full_name"),
 						knownvalue.StringExact("acme/api"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("config_source_repo_external_id"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("config_source_repo_external_id"),
 						knownvalue.StringExact("123456"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(0).AtMapKey("checkout_source_repo_full_name"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(0).AtMapKey("checkout_source_repo_full_name"),
 						knownvalue.StringExact("acme/api"),
 					),
 					// An omitted description, created_at and repo all read back as ""
 					// rather than making the whole read fail.
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(1).AtMapKey("description"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(1).AtMapKey("description"),
 						knownvalue.StringExact(""),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(1).AtMapKey("created_at"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(1).AtMapKey("created_at"),
 						knownvalue.StringExact(""),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(1).AtMapKey("config_source_repo_full_name"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(1).AtMapKey("config_source_repo_full_name"),
 						knownvalue.StringExact(""),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines").AtSliceIndex(1).AtMapKey("checkout_source_provider"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions").AtSliceIndex(1).AtMapKey("checkout_source_provider"),
 						knownvalue.StringExact("webhook"),
 					),
 				},
@@ -162,7 +162,7 @@ func TestAccPipelinesDataSource_serverDeployment(t *testing.T) {
 			Config: testAccPipelinesDataSourceConfig(host, "server"),
 			// The message must name the type, say Cloud is required, and report the
 			// configured deployment.
-			ExpectError: regexp.MustCompile(`(?s)circleci_pipelines requires CircleCI Cloud.*"server"`),
+			ExpectError: regexp.MustCompile(`(?s)circleci_pipeline_definitions requires CircleCI Cloud.*"server"`),
 		}},
 	})
 }
@@ -177,8 +177,8 @@ func TestAccPipelinesDataSource_empty(t *testing.T) {
 				Config: testAccPipelinesDataSourceConfig(host, "cloud"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipelines.test",
-						tfjsonpath.New("pipelines"),
+						"data.circleci_pipeline_definitions.test",
+						tfjsonpath.New("pipeline_definitions"),
 						knownvalue.ListSizeExact(0),
 					),
 				},

@@ -15,13 +15,15 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &iosSigningCertificatesDataSource{}
-	_ datasource.DataSourceWithConfigure = &iosSigningCertificatesDataSource{}
+	_ datasource.DataSource                     = &iosSigningCertificatesDataSource{}
+	_ datasource.DataSourceWithConfigure        = &iosSigningCertificatesDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &iosSigningCertificatesDataSource{}
 )
 
 // iosSigningCertificatesDataSourceModel maps the data source schema.
 type iosSigningCertificatesDataSourceModel struct {
 	OrganizationId types.String                     `tfsdk:"organization_id"`
+	OrgId          types.String                     `tfsdk:"org_id"`
 	Certificates   []iosSigningCertificateItemModel `tfsdk:"certificates"`
 }
 
@@ -62,11 +64,10 @@ func (d *iosSigningCertificatesDataSource) Schema(_ context.Context, _ datasourc
 			"can report a certificate's `.p12` content or password -- see " +
 			"`circleci_ios_signing_certificate`'s \"Security\" section.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose " +
-					"certificates are listed.",
-				Required: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("iOS signing certificates"),
+			"org_id":          orgIDDataSourceAttribute("iOS signing certificates"),
 			"certificates": schema.ListNestedAttribute{
 				MarkdownDescription: "The organization's signing certificates, in the order the " +
 					"API returned them.",
@@ -118,6 +119,13 @@ func (d *iosSigningCertificatesDataSource) Configure(_ context.Context, req data
 	d.client = client
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *iosSigningCertificatesDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the organization's signing certificates.
 func (d *iosSigningCertificatesDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if !requireCloud(d.client, "circleci_ios_signing_certificates", &resp.Diagnostics) {
@@ -130,7 +138,7 @@ func (d *iosSigningCertificatesDataSource) Read(ctx context.Context, req datasou
 		return
 	}
 
-	organizationID := state.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
 
 	certs, err := d.client.ListSigningCertificates(ctx, organizationID)
 	if err != nil {

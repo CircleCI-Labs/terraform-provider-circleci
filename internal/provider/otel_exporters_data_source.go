@@ -16,13 +16,15 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &otelExportersDataSource{}
-	_ datasource.DataSourceWithConfigure = &otelExportersDataSource{}
+	_ datasource.DataSource                     = &otelExportersDataSource{}
+	_ datasource.DataSourceWithConfigure        = &otelExportersDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &otelExportersDataSource{}
 )
 
 // otelExportersDataSourceModel maps the data source schema.
 type otelExportersDataSourceModel struct {
 	OrganizationID types.String            `tfsdk:"organization_id"`
+	OrgID          types.String            `tfsdk:"org_id"`
 	Exporters      []otelExporterItemModel `tfsdk:"exporters"`
 }
 
@@ -59,11 +61,10 @@ func (d *otelExportersDataSource) Schema(_ context.Context, _ datasource.SchemaR
 			"~> **Header values are not returned.** CircleCI encrypts them at rest and reports every " +
 			"value as `" + circleci.OTelRedactedHeaderValue + "`. Only the header names are usable.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose exporters are " +
-					"listed.",
-				Required: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("OTLP exporters"),
+			"org_id":          orgIDDataSourceAttribute("OTLP exporters"),
 			"exporters": schema.ListNestedAttribute{
 				MarkdownDescription: fmt.Sprintf(
 					"The organization's OTLP exporters, in the order the API returned them. "+
@@ -112,6 +113,13 @@ func (d *otelExportersDataSource) Schema(_ context.Context, _ datasource.SchemaR
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *otelExportersDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 func (d *otelExportersDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var config otelExportersDataSourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
@@ -119,13 +127,15 @@ func (d *otelExportersDataSource) Read(ctx context.Context, req datasource.ReadR
 		return
 	}
 
-	exporters, err := d.client.ListOTelExporters(ctx, config.OrganizationID.ValueString())
+	organizationID := effectiveOrgID(config.OrganizationID, config.OrgID)
+
+	exporters, err := d.client.ListOTelExporters(ctx, organizationID)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI OTLP exporters",
 			fmt.Sprintf(
 				"Could not list OTLP exporters for organization %s: %s",
-				config.OrganizationID.ValueString(), circleci.Detail(err),
+				organizationID, circleci.Detail(err),
 			),
 		)
 

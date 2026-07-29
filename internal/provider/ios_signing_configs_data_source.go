@@ -15,13 +15,15 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &iosSigningConfigsDataSource{}
-	_ datasource.DataSourceWithConfigure = &iosSigningConfigsDataSource{}
+	_ datasource.DataSource                     = &iosSigningConfigsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &iosSigningConfigsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &iosSigningConfigsDataSource{}
 )
 
 // iosSigningConfigsDataSourceModel maps the data source schema.
 type iosSigningConfigsDataSourceModel struct {
 	OrganizationId types.String                `tfsdk:"organization_id"`
+	OrgId          types.String                `tfsdk:"org_id"`
 	Configs        []iosSigningConfigItemModel `tfsdk:"configs"`
 }
 
@@ -73,11 +75,10 @@ func (d *iosSigningConfigsDataSource) Schema(_ context.Context, _ datasource.Sch
 			"`circleci_ios_signing_certificate`'s content; see that resource's \"Security\" " +
 			"section.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose " +
-					"signing configurations are listed.",
-				Required: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("iOS signing configurations"),
+			"org_id":          orgIDDataSourceAttribute("iOS signing configurations"),
 			"configs": schema.ListNestedAttribute{
 				MarkdownDescription: "The organization's signing configurations, in the order " +
 					"the API returned them.",
@@ -136,6 +137,13 @@ func (d *iosSigningConfigsDataSource) Configure(_ context.Context, req datasourc
 	d.client = client
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *iosSigningConfigsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read lists the organization's signing configurations.
 func (d *iosSigningConfigsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if !requireCloud(d.client, "circleci_ios_signing_configs", &resp.Diagnostics) {
@@ -148,7 +156,7 @@ func (d *iosSigningConfigsDataSource) Read(ctx context.Context, req datasource.R
 		return
 	}
 
-	organizationID := state.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
 
 	configs, err := d.client.ListSigningConfigs(ctx, organizationID)
 	if err != nil {

@@ -16,14 +16,16 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &groupDataSource{}
-	_ datasource.DataSourceWithConfigure = &groupDataSource{}
+	_ datasource.DataSource                     = &groupDataSource{}
+	_ datasource.DataSourceWithConfigure        = &groupDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &groupDataSource{}
 )
 
 // groupDataSourceModel maps the data source schema.
 type groupDataSourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	Name           types.String `tfsdk:"name"`
 	Description    types.String `tfsdk:"description"`
 }
@@ -51,7 +53,8 @@ func (d *groupDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 			"organization: the API documents group creation as supported only for standalone " +
 			"organizations, and a CircleCI Server installation is always a `github` type " +
 			"organization.\n\n" +
-			"Group ids are unique only within an organization, so `organization_id` is required as well. " +
+			"Group ids are unique only within an organization, so the organization is required as well, " +
+			"as `org_id` (or the deprecated `organization_id`). " +
 			"Use `circleci_groups` to list every group in an organization.\n\n" +
 			"~> **Group membership is not managed by Terraform.** Adding and removing group members is " +
 			"only possible in the CircleCI web UI, so the users in a group are not exposed here.",
@@ -60,10 +63,10 @@ func (d *groupDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 				MarkdownDescription: "Unique identifier (UUID) of the group.",
 				Required:            true,
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization the group belongs to.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("groups"),
+			"org_id":          orgIDDataSourceAttribute("groups"),
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Name of the group.",
 				Computed:            true,
@@ -73,6 +76,13 @@ func (d *groupDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, 
 				Computed:            true,
 			},
 		},
+	}
+}
+
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *groupDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
 	}
 }
 
@@ -88,7 +98,7 @@ func (d *groupDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 		return
 	}
 
-	organizationID := state.OrganizationId.ValueString()
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
 	groupID := state.Id.ValueString()
 
 	group, err := d.client.Groups().Get(ctx, organizationID, groupID)

@@ -27,6 +27,7 @@ type projectDataSourceModel struct {
 	Id               types.String                   `tfsdk:"id"`
 	Name             types.String                   `tfsdk:"name"`
 	OrganizationId   types.String                   `tfsdk:"organization_id"`
+	OrgId            types.String                   `tfsdk:"org_id"`
 	OrganizationName types.String                   `tfsdk:"organization_name"`
 	OrganizationSlug types.String                   `tfsdk:"organization_slug"`
 	Slug             types.String                   `tfsdk:"slug"`
@@ -55,6 +56,9 @@ func (d *ProjectDataSource) Metadata(_ context.Context, req datasource.MetadataR
 }
 
 // Schema defines the schema for the data source.
+// The organization is an output here, not a lookup key, so the pair is Computed.
+var projectOrgIDDeprecated, projectOrgIDCurrent = computedOrgIDDataSourceAttributes("this project")
+
 func (d *ProjectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches information about a CircleCI project.",
@@ -67,10 +71,9 @@ func (d *ProjectDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "Project name (e.g. my-repository).",
 				Computed:            true,
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "ID for the project's organization.",
-				Computed:            true,
-			},
+			// Reported under both names; see computedOrgIDDataSourceAttributes.
+			"organization_id": projectOrgIDDeprecated,
+			"org_id":          projectOrgIDCurrent,
 			"organization_name": schema.StringAttribute{
 				MarkdownDescription: "Name of the project's organization (e.g. my-org).",
 				Computed:            true,
@@ -145,7 +148,7 @@ func (d *ProjectDataSource) Read(ctx context.Context, req datasource.ReadRequest
 
 	data.Id = types.StringValue(apiResp.ID)
 	data.Name = types.StringValue(apiResp.Name)
-	data.OrganizationId = types.StringValue(apiResp.OrganizationID)
+	setOrgIDs(&data.OrganizationId, &data.OrgId, apiResp.OrganizationID)
 	data.OrganizationName = types.StringValue(apiResp.OrganizationName)
 	data.OrganizationSlug = types.StringValue(apiResp.OrganizationSlug)
 	data.VcsInfo = &projectVcsInfoDataSourceModel{

@@ -62,7 +62,6 @@ output "exporter_issues" {
 ### Required
 
 - `endpoint` (String) The OTLP endpoint spans are sent to, as `host:port` — for example `otel.example.com:4317`. Do **not** include a scheme: `https://` or `grpc://` is rejected. Changing this value forces a new resource to be created.
-- `organization_id` (String) Unique identifier (UUID) of the organization the exporter belongs to. Changing this value forces a new resource to be created.
 - `protocol` (String) The OTLP transport: `grpc` (usually port 4317) or `http` (usually port 4318). Changing this value forces a new resource to be created.
 
 ### Optional
@@ -71,6 +70,14 @@ output "exporter_issues" {
 
 ~> **Header values cannot be read back.** CircleCI encrypts them at rest and every read answers with the placeholder `xxxx`, so Terraform cannot detect a value changed outside Terraform. A header *added or removed* outside Terraform is detected, because the names are returned in full.
 - `insecure` (Boolean) Whether to connect to the endpoint without transport security. Defaults to `false`. Leave it false unless the collector is reachable only over a private network: headers, including any credentials, travel in the clear otherwise. Changing this value forces a new resource to be created.
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this exporter.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this exporter.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 
 ### Read-Only
 

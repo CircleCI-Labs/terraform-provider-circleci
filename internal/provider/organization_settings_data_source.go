@@ -15,8 +15,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &organizationSettingsDataSource{}
-	_ datasource.DataSourceWithConfigure = &organizationSettingsDataSource{}
+	_ datasource.DataSource                     = &organizationSettingsDataSource{}
+	_ datasource.DataSourceWithConfigure        = &organizationSettingsDataSource{}
+	_ datasource.DataSourceWithConfigValidators = &organizationSettingsDataSource{}
 )
 
 // organizationSettingsDataSourceModel maps the data source schema. It mirrors the
@@ -25,6 +26,7 @@ var (
 // fifteen toggles is exactly right.
 type organizationSettingsDataSourceModel struct {
 	OrganizationID                      types.String `tfsdk:"organization_id"`
+	OrgID                               types.String `tfsdk:"org_id"`
 	EnableAIAgents                      types.Bool   `tfsdk:"enable_ai_agents"`
 	EnableAIErrorSummarization          types.Bool   `tfsdk:"enable_ai_error_summarization"`
 	EnableCertifiedPublicOrbs           types.Bool   `tfsdk:"enable_certified_public_orbs"`
@@ -73,10 +75,10 @@ func (d *organizationSettingsDataSource) Schema(_ context.Context, _ datasource.
 			"CircleCI Server does not route. Using this data source with `deployment = \"server\"` " +
 			"reports an error.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The UUID of the CircleCI organization to read settings for.",
-				Required:            true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id":               deprecatedOrgIDDataSourceAttribute("settings"),
+			"org_id":                        orgIDDataSourceAttribute("settings"),
 			"enable_ai_agents":              toggle("Whether CircleCI AI agents may run for this organization."),
 			"enable_ai_error_summarization": toggle("Whether CircleCI generates AI summaries of build and test failures."),
 			"enable_certified_public_orbs":  toggle("Whether pipelines may use public orbs certified by CircleCI."),
@@ -106,6 +108,13 @@ func (d *organizationSettingsDataSource) Schema(_ context.Context, _ datasource.
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (d *organizationSettingsDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{
+		orgIDDataSourceConfigValidator(),
+	}
+}
+
 // Read fetches the organization's settings.
 func (d *organizationSettingsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	if d.client == nil || !requireCloud(d.client, organizationSettingsTypeName, &resp.Diagnostics) {
@@ -119,7 +128,7 @@ func (d *organizationSettingsDataSource) Read(ctx context.Context, req datasourc
 		return
 	}
 
-	orgID := data.OrganizationID.ValueString()
+	orgID := effectiveOrgID(data.OrganizationID, data.OrgID)
 
 	settings, err := d.client.GetOrganizationSettings(ctx, orgID)
 	if err != nil {

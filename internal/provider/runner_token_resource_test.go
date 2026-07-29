@@ -55,10 +55,13 @@ func TestAccRunnerTokenResource(t *testing.T) {
 			},
 			// ImportState testing — token value will be empty after import since it's write-once
 			{
-				ResourceName:            "circleci_runner_token.test",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"token", "organization_id"},
+				ResourceName:      "circleci_runner_token.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// Neither organization attribute survives an import: the import ID
+				// is "resource_class/token_id" and the token representation carries
+				// no organization, so there is nothing for Read to fill them from.
+				ImportStateVerifyIgnore: []string{"token", "organization_id", "org_id"},
 				ImportStateIdFunc: func(s *terraform.State) (string, error) {
 					rc, found := s.RootModule().Resources["circleci_runner_token.test"].Primary.Attributes["resource_class"]
 					if !found {

@@ -47,15 +47,18 @@ var runnerResourceClassPattern = regexp.MustCompile(`^[^/]+/[^/]+$`)
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &runnerResourceClassResource{}
-	_ resource.ResourceWithConfigure   = &runnerResourceClassResource{}
-	_ resource.ResourceWithImportState = &runnerResourceClassResource{}
+	_ resource.Resource                     = &runnerResourceClassResource{}
+	_ resource.ResourceWithConfigure        = &runnerResourceClassResource{}
+	_ resource.ResourceWithImportState      = &runnerResourceClassResource{}
+	_ resource.ResourceWithConfigValidators = &runnerResourceClassResource{}
+	_ resource.ResourceWithModifyPlan       = &runnerResourceClassResource{}
 )
 
 // runnerResourceClassResourceModel maps the resource schema.
 type runnerResourceClassResourceModel struct {
 	Id             types.String `tfsdk:"id"`
 	OrganizationId types.String `tfsdk:"organization_id"`
+	OrgId          types.String `tfsdk:"org_id"`
 	ResourceClass  types.String `tfsdk:"resource_class"`
 	Description    types.String `tfsdk:"description"`
 	ForceDelete    types.Bool   `tfsdk:"force_delete"`
@@ -78,6 +81,29 @@ func (r *runnerResourceClassResource) Metadata(_ context.Context, req resource.M
 
 // Schema defines the schema for the resource.
 func (r *runnerResourceClassResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+	// replaces is false here, unlike every other resource carrying this attribute
+	// pair: organization_id has never forced replacement on a runner resource
+	// class, and the deprecation is not the place to start. The owning
+	// organization is derived from resource_class's namespace by the service
+	// anyway (see Create), so a changed organization_id is bookkeeping that the
+	// existing no-op Update already absorbs, and turning it into a destroy would
+	// be a gratuitous breaking change. See org_id_deprecation.go.
+	//
+	// The builders take no validators — no other resource needs one — so the
+	// runner API's UUID-only shape check is attached here. Catching the wrong
+	// shape at plan time gives a better error than the API's opaque 400, and both
+	// spellings must enforce it or the check would be trivially bypassed by using
+	// the new name.
+	orgIDValidators := []validator.String{
+		stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
+	}
+
+	deprecatedOrganizationID := deprecatedOrgIDAttribute("this runner resource class", false)
+	deprecatedOrganizationID.Validators = orgIDValidators
+
+	orgID := orgIDAttribute("this runner resource class", false)
+	orgID.Validators = orgIDValidators
+
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages a CircleCI runner resource class.",
 		Attributes: map[string]schema.Attribute{
@@ -88,13 +114,8 @@ func (r *runnerResourceClassResource) Schema(_ context.Context, _ resource.Schem
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The UUID of the organization that owns the resource class.",
-				Required:            true,
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
-				},
-			},
+			"organization_id": deprecatedOrganizationID,
+			"org_id":          orgID,
 			"resource_class": schema.StringAttribute{
 				MarkdownDescription: "The resource class name in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.",
 				Required:            true,
@@ -125,6 +146,57 @@ func (r *runnerResourceClassResource) Schema(_ context.Context, _ resource.Schem
 	}
 }
 
+// ConfigValidators requires exactly one of the two organization attribute names.
+func (r *runnerResourceClassResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		orgIDConfigValidator(),
+	}
+}
+
+// ModifyPlan makes both organization attribute names agree in the plan.
+//
+// This is needed here and nowhere else, because this is the only resource that
+// passes replaces: false, and the two halves of org_id_deprecation.go's design do
+// not compose without it:
+//
+//   - Both attributes are Optional+Computed, so when one leaves the configuration
+//     Terraform plans the value it already had rather than null. That is what makes
+//     switching between the two names a no-op.
+//   - On the resources that replace, a genuine organization change is a destroy and
+//     create, so Create sees a fresh plan and the retained value never matters.
+//
+// Without replacement, a genuine organization change is an in-place update — and
+// then the retained value does matter, because it is stale. Changing
+// organization_id from A to B plans organization_id = B (from configuration) and
+// org_id = A (retained from state), and no Update can fix that: writing B to both
+// contradicts the plan's org_id, writing A to both contradicts the plan's
+// organization_id, and persisting the plan verbatim leaves state claiming two
+// different organizations, which the next Read then resolves to the stale one.
+// Terraform rejects the first two outright with "Provider produced inconsistent
+// result after apply".
+//
+// The reconciliation therefore has to happen while the plan is still being made,
+// which is the one place the retained value can be corrected. The configuration is
+// the authority on which name is in use, so it is read from there rather than from
+// the plan, where the two are indistinguishable.
+func (r *runnerResourceClassResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	// Ask before reading the configuration: a destroy plans a null config, and
+	// Get-ing that into the model fails with a value-conversion error.
+	if !orgIDPlanNeedsReconcile(req) {
+		return
+	}
+
+	var config runnerResourceClassResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Shared, because any resource built with `replaces: false` needs exactly this
+	// and the reason is not obvious from the schema. See org_id_deprecation.go.
+	reconcileOrgIDPlan(ctx, resp, config.OrganizationId, config.OrgId)
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan runnerResourceClassResourceModel
@@ -134,12 +206,14 @@ func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.C
 		return
 	}
 
-	// organization_id is Required in the schema, so it is always sent here even
-	// though the production create handler (the CircleCI API)
-	// derives the owning org from resource_class's namespace and ignores it —
-	// see circleci.ResourceClassInput's doc comment.
+	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
+
+	// The schema requires an organization, so one is always sent here even though
+	// the production create handler (the CircleCI API) derives the
+	// owning org from resource_class's namespace and never reads org_id from the
+	// body — see circleci.ResourceClassInput's doc comment.
 	createReq := circleci.ResourceClassInput{
-		OrganizationID: plan.OrganizationId.ValueString(),
+		OrganizationID: organizationID,
 		ResourceClass:  plan.ResourceClass.ValueString(),
 		Description:    plan.Description.ValueString(),
 	}
@@ -156,6 +230,7 @@ func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.C
 	plan.Id = types.StringValue(rc.ID)
 	plan.ResourceClass = types.StringValue(rc.ResourceClass)
 	plan.Description = types.StringValue(rc.Description)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, organizationID)
 
 	diags = resp.State.Set(ctx, plan)
 	resp.Diagnostics.Append(diags...)
@@ -181,10 +256,12 @@ func (r *runnerResourceClassResource) Read(ctx context.Context, req resource.Rea
 	}
 	namespace := rcName[:slashIdx]
 
-	// Scope the list by organization as well as namespace. organization_id is null
-	// immediately after an import (it is not part of the import ID), in which case
-	// the namespace filter alone is used.
-	classes, err := r.client.ListResourceClasses(ctx, namespace, state.OrganizationId.ValueString())
+	// Scope the list by organization as well as namespace. Neither organization
+	// attribute is set immediately after an import (the organization is not part
+	// of the import ID), in which case the namespace filter alone is used.
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
+
+	classes, err := r.client.ListResourceClasses(ctx, namespace, organizationID)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error reading CircleCI runner resource classes",
@@ -211,12 +288,20 @@ func (r *runnerResourceClassResource) Read(ctx context.Context, req resource.Rea
 	state.Description = types.StringValue(found.Description)
 	// ForceDelete is not returned by the API — preserve value from state.
 
+	// The resource class representation carries no organization, so whichever
+	// attribute name state holds is mirrored onto the other. The guard matters
+	// after an import, where neither name is known: writing "" over two null
+	// values would be a spurious change. See org_id_deprecation.go.
+	if organizationID != "" {
+		setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
+	}
+
 	diags = resp.State.Set(ctx, &state)
 	resp.Diagnostics.Append(diags...)
 }
 
-// Update persists plan values (such as organization_id and force_delete) into
-// state. The runner API has no update endpoint, so no API call is made.
+// Update persists plan values (the organization and force_delete) into state. The
+// runner API has no update endpoint, so no API call is made.
 func (r *runnerResourceClassResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan runnerResourceClassResourceModel
 	diags := req.Plan.Get(ctx, &plan)
@@ -225,6 +310,11 @@ func (r *runnerResourceClassResource) Update(ctx context.Context, req resource.U
 		return
 	}
 
+	// The plan is persisted verbatim, including both organization attribute names:
+	// ModifyPlan has already made them agree, and re-deriving them here could only
+	// disagree with the plan Terraform is holding. That also covers the update
+	// after an import, where neither name is in state and the unconfigured one
+	// would otherwise still be unknown.
 	diags = resp.State.Set(ctx, &plan)
 	resp.Diagnostics.Append(diags...)
 }

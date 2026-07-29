@@ -28,7 +28,7 @@ Set `event_source_provider = "schedule"` on a `circleci_trigger` attached to a
 pipeline definition:
 
 ```terraform
-resource "circleci_pipeline" "nightly" {
+resource "circleci_pipeline_definition" "nightly" {
   project_id  = var.project_id
   name        = "nightly"
   description = "Nightly build"
@@ -42,13 +42,13 @@ resource "circleci_pipeline" "nightly" {
 }
 
 resource "circleci_trigger" "nightly" {
-  project_id  = var.project_id
-  pipeline_id = circleci_pipeline.nightly.id
-  event_name  = "nightly"
+  project_id             = var.project_id
+  pipeline_definition_id = circleci_pipeline_definition.nightly.id
+  event_name             = "nightly"
 
-  event_source_provider                    = "schedule"
-  event_source_schedule_cron_expression    = "0 4 * * *"
-  event_source_schedule_attribution_actor  = "system"
+  event_source_provider                   = "schedule"
+  event_source_schedule_cron_expression   = "0 4 * * *"
+  event_source_schedule_attribution_actor = "system"
 
   checkout_ref = "main"
   config_ref   = "main"
@@ -64,7 +64,7 @@ determines whose permissions the triggered pipeline runs with.
 | Legacy schedule field | Trigger equivalent |
 |---|---|
 | `name` | `event_name` |
-| `description` | `circleci_pipeline.description` |
+| `description` | `circleci_pipeline_definition.description` |
 | `timetable` | `event_source_schedule_cron_expression` |
 | `attribution-actor` | `event_source_schedule_attribution_actor` |
 | `parameters` | `parameters` |
@@ -85,12 +85,13 @@ If you are coming from `kelvintaywl/circleci` or `healx/circleci`:
 3. Delete the schedule in the CircleCI web application, or via
    `DELETE /api/v2/schedule/{schedule-id}`. A schedule and an equivalent trigger
    would otherwise both fire.
-4. Add `circleci_pipeline` and `circleci_trigger` resources as above and apply.
+4. Add `circleci_pipeline_definition` and `circleci_trigger` resources as above
+   and apply.
 
 There is no import path from a legacy schedule to a trigger — they are different
 objects — so the old schedule must be removed explicitly.
 
--> **CircleCI Server** `circleci_pipeline` and `circleci_trigger` are
+-> **CircleCI Server** `circleci_pipeline_definition` and `circleci_trigger` are
 unavailable on CircleCI Server, which does not expose the pipeline definition and
 trigger endpoints. Server installations must continue to use scheduled workflows
 in `.circleci/config.yml`.

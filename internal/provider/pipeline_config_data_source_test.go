@@ -19,7 +19,7 @@ func TestPipelineConfigDataSourceSchema(t *testing.T) {
 
 	ctx := t.Context()
 	resp := &fwdatasource.SchemaResponse{}
-	NewPipelineConfigDataSource().Schema(ctx, fwdatasource.SchemaRequest{}, resp)
+	NewPipelineRunConfigDataSource().Schema(ctx, fwdatasource.SchemaRequest{}, resp)
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
@@ -41,23 +41,23 @@ func TestAccPipelineConfigDataSource(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: observabilityProviderConfig(host, "cloud") + fmt.Sprintf(`
-data "circleci_pipeline_config" "test" {
+data "circleci_pipeline_run_config" "test" {
   pipeline_run_id = %[1]q
 }
 `, testRunID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_config.test",
+						"data.circleci_pipeline_run_config.test",
 						tfjsonpath.New("source"),
 						knownvalue.StringExact("callithumpian"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_config.test",
+						"data.circleci_pipeline_run_config.test",
 						tfjsonpath.New("compiled"),
 						knownvalue.StringExact("adscititious"),
 					),
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_config.test",
+						"data.circleci_pipeline_run_config.test",
 						tfjsonpath.New("setup_config"),
 						knownvalue.StringExact("mo' repos"),
 					),
@@ -75,13 +75,13 @@ func TestAccPipelineConfigDataSource_availableOnServer(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: observabilityProviderConfig(host, "server") + fmt.Sprintf(`
-data "circleci_pipeline_config" "test" {
+data "circleci_pipeline_run_config" "test" {
   pipeline_run_id = %[1]q
 }
 `, testRunID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
-						"data.circleci_pipeline_config.test",
+						"data.circleci_pipeline_run_config.test",
 						tfjsonpath.New("compiled"),
 						knownvalue.StringExact("adscititious"),
 					),

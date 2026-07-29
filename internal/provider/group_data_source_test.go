@@ -39,13 +39,21 @@ func TestGroupDataSourceSchema(t *testing.T) {
 	}
 
 	// A group id is only unique within an organization, so both are inputs.
-	for _, name := range []string{"id", "organization_id"} {
+	if id, ok := resp.Schema.Attributes["id"]; !ok || !id.IsRequired() {
+		t.Error("attribute \"id\" is not required, but the lookup needs it")
+	}
+
+	// The organization is just as necessary, but it is accepted under two names
+	// while `organization_id` is deprecated, so both are Optional and
+	// orgIDDataSourceConfigValidator requires exactly one. See
+	// org_id_deprecation.go.
+	for _, name := range []string{"organization_id", "org_id"} {
 		attribute, ok := resp.Schema.Attributes[name]
 		if !ok {
 			t.Fatalf("schema is missing the %q attribute", name)
 		}
-		if !attribute.IsRequired() {
-			t.Errorf("attribute %q is not required, but the lookup needs it", name)
+		if !attribute.IsOptional() {
+			t.Errorf("attribute %q is not optional, but one of the pair must be settable", name)
 		}
 	}
 }

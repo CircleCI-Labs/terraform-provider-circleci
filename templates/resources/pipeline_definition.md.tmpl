@@ -1,0 +1,43 @@
+---
+page_title: "circleci_pipeline_definition Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a CircleCI pipeline definition.
+---
+
+# circleci_pipeline_definition (Resource)
+
+Manages a CircleCI pipeline definition. A pipeline definition specifies where to find the pipeline configuration and where to check out code from.
+
+-> **A definition is not a run.** This resource manages the declared pairing of a
+config source and a checkout source. Each execution of it is a pipeline *run*, read
+with [`circleci_pipeline_run`](../data-sources/pipeline_run) — a different object
+with a different identifier. This resource was named `circleci_pipeline` until it
+was renamed for exactly that reason; the old name still works, and
+[Renaming pipeline resources and data sources](../guides/renaming-pipeline-types)
+covers the move.
+
+## Availability
+
+| CircleCI Cloud | CircleCI Server |
+|---|---|
+| yes | **no** |
+
+~> **Not available on CircleCI Server** This resource uses the
+`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
+Server installation does not expose. Server installations should define
+workflows in `.circleci/config.yml` instead.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_pipeline_definition/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using `project_id/pipeline_definition_id`:
+
+```shell
+terraform import circleci_pipeline_definition.example "<project_id>/<pipeline_definition_id>"
+```

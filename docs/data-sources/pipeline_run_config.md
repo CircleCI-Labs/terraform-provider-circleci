@@ -1,11 +1,11 @@
 ---
-page_title: "circleci_pipeline_config Data Source - circleci"
+page_title: "circleci_pipeline_run_config Data Source - circleci"
 subcategory: ""
 description: |-
   Fetches the source and compiled configuration for a CircleCI pipeline run.
 ---
 
-# circleci_pipeline_config (Data Source)
+# circleci_pipeline_run_config (Data Source)
 
 Fetches the source and compiled configuration for a CircleCI pipeline run — genuinely useful for
 asserting what a run actually compiled to, orb expansion included, rather than trusting that the
@@ -36,7 +36,7 @@ data "circleci_pipeline_run" "this" {
   number       = 25
 }
 
-data "circleci_pipeline_config" "this" {
+data "circleci_pipeline_run_config" "this" {
   pipeline_run_id = data.circleci_pipeline_run.this.id
 }
 
@@ -44,7 +44,7 @@ data "circleci_pipeline_config" "this" {
 # trusting that the checked-in YAML alone reflects what ran.
 check "orb_was_expanded" {
   assert {
-    condition     = strcontains(data.circleci_pipeline_config.this.compiled, "circleci/node")
+    condition     = strcontains(data.circleci_pipeline_run_config.this.compiled, "circleci/node")
     error_message = "Compiled pipeline config no longer references the circleci/node orb."
   }
 }

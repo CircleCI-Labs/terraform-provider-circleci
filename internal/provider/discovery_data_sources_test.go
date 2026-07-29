@@ -34,7 +34,8 @@ import (
 // silently shadowed the real list, so a data source added later was simply absent and
 // any test reusing this factory failed with "the provider does not support data
 // source" — which reads like a broken data source rather than a stale test list.
-// circleci_pipeline_values and circleci_github_app_installation both hit exactly that.
+// circleci_pipeline_run_values and circleci_github_app_installation both hit exactly
+// that.
 //
 // TestEveryConstructorIsRegistered already guarantees the real list is complete, so
 // depending on it is strictly better than duplicating it. This mirrors

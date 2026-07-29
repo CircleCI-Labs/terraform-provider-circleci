@@ -48,7 +48,12 @@ output "resource_class_ids" {
 ### Optional
 
 - `namespace` (String) Only return resource classes in this runner namespace.
-- `organization_id` (String) Only return resource classes owned by this organization, as an organization UUID.
+- `org_id` (String) The unique identifier (UUID) of the organization to read runner resource classes from.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization to read runner resource classes from.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 
 ### Read-Only
 

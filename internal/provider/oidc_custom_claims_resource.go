@@ -41,6 +41,7 @@ const oidcCustomClaimsTypeName = "circleci_oidc_custom_claims"
 // from the PATCH body, the second overwrites it with an empty list.
 type oidcCustomClaimsResourceModel struct {
 	OrganizationID    types.String  `tfsdk:"organization_id"`
+	OrgID             types.String  `tfsdk:"org_id"`
 	ProjectID         types.String  `tfsdk:"project_id"`
 	Audience          types.List    `tfsdk:"audience"`
 	TTL               durationValue `tfsdk:"ttl"`
@@ -51,12 +52,13 @@ type oidcCustomClaimsResourceModel struct {
 // scope returns a human-readable description of which claims this instance
 // manages, for diagnostics.
 func (m oidcCustomClaimsResourceModel) scope() string {
+	orgID := effectiveOrgID(m.OrganizationID, m.OrgID)
+
 	if m.ProjectID.IsNull() || m.ProjectID.ValueString() == "" {
-		return fmt.Sprintf("organization %s", m.OrganizationID.ValueString())
+		return fmt.Sprintf("organization %s", orgID)
 	}
 
-	return fmt.Sprintf("project %s in organization %s",
-		m.ProjectID.ValueString(), m.OrganizationID.ValueString())
+	return fmt.Sprintf("project %s in organization %s", m.ProjectID.ValueString(), orgID)
 }
 
 // NewOIDCCustomClaimsResource is a helper function to simplify the provider implementation.
@@ -83,6 +85,7 @@ func (r *oidcCustomClaimsResource) ConfigValidators(_ context.Context) []resourc
 			path.MatchRoot("audience"),
 			path.MatchRoot("ttl"),
 		),
+		orgIDConfigValidator(),
 	}
 }
 
@@ -103,14 +106,10 @@ func (r *oidcCustomClaimsResource) Schema(_ context.Context, _ resource.SchemaRe
 			"`audience`) from your configuration does not stop managing it, it resets it: the next apply " +
 			"deletes that claim. Use two resources on different scopes rather than two on the same one.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Unique identifier (UUID) of the organization whose identity tokens " +
-					"are customized. Changing this value forces a new resource to be created.",
-				Required: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
-			},
+			// See org_id_deprecation.go for why these are Optional+Computed and why
+			// replacement is conditional on being configured.
+			"organization_id": deprecatedOrgIDAttribute("this OIDC claim customization", true),
+			"org_id":          orgIDAttribute("this OIDC claim customization", true),
 			"project_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the project whose identity tokens are " +
 					"customized. Omit it to customize the organization's tokens instead. " +
@@ -171,8 +170,9 @@ func (r *oidcCustomClaimsResource) Create(ctx context.Context, req resource.Crea
 		return
 	}
 
-	claims, err := r.client.UpdateOIDCCustomClaims(ctx,
-		plan.OrganizationID.ValueString(), plan.ProjectID.ValueString(), update)
+	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
+
+	claims, err := r.client.UpdateOIDCCustomClaims(ctx, orgID, plan.ProjectID.ValueString(), update)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI OIDC custom claims",
@@ -191,6 +191,7 @@ func (r *oidcCustomClaimsResource) Create(ctx context.Context, req resource.Crea
 	// semantically, so a configuration of "30m" does not diff against "30m0s".
 	plan.TTL = newDurationValue(claims.TTL)
 	setOIDCClaimTimestamps(&plan, claims)
+	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -203,8 +204,9 @@ func (r *oidcCustomClaimsResource) Read(ctx context.Context, req resource.ReadRe
 		return
 	}
 
-	claims, err := r.client.GetOIDCCustomClaims(ctx,
-		state.OrganizationID.ValueString(), state.ProjectID.ValueString())
+	orgID := effectiveOrgID(state.OrganizationID, state.OrgID)
+
+	claims, err := r.client.GetOIDCCustomClaims(ctx, orgID, state.ProjectID.ValueString())
 	if err != nil {
 		if circleci.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
@@ -243,6 +245,7 @@ func (r *oidcCustomClaimsResource) Read(ctx context.Context, req resource.ReadRe
 	// normalize towards.
 	state.TTL = newDurationValue(claims.TTL)
 	setOIDCClaimTimestamps(&state, claims)
+	setOrgIDs(&state.OrganizationID, &state.OrgID, orgID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -261,7 +264,7 @@ func (r *oidcCustomClaimsResource) Update(ctx context.Context, req resource.Upda
 		return
 	}
 
-	orgID := plan.OrganizationID.ValueString()
+	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
 	projectID := plan.ProjectID.ValueString()
 
 	// Reset first, so that a configuration which swaps one claim for the other
@@ -309,6 +312,7 @@ func (r *oidcCustomClaimsResource) Update(ctx context.Context, req resource.Upda
 	// semantically, so a configuration of "30m" does not diff against "30m0s".
 	plan.TTL = newDurationValue(claims.TTL)
 	setOIDCClaimTimestamps(&plan, claims)
+	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -341,7 +345,7 @@ func (r *oidcCustomClaimsResource) Delete(ctx context.Context, req resource.Dele
 	}
 
 	_, err := r.client.DeleteOIDCCustomClaims(ctx,
-		state.OrganizationID.ValueString(), state.ProjectID.ValueString(), claims)
+		effectiveOrgID(state.OrganizationID, state.OrgID), state.ProjectID.ValueString(), claims)
 	if err != nil {
 		// Claims someone already reset outside Terraform are not a failure: the
 		// desired end state is reached either way.
@@ -372,6 +376,10 @@ func (r *oidcCustomClaimsResource) Configure(_ context.Context, req resource.Con
 // ImportState imports existing OIDC custom claims into Terraform state.
 // Expected import ID format: "organization_id" for organization-level claims, or
 // "organization_id/project_id" for project-level claims.
+//
+// Both organization attribute names are set from the import ID, so a
+// configuration written against either one imports cleanly. See
+// org_id_deprecation.go.
 func (r *oidcCustomClaimsResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	parts := strings.Split(req.ID, "/")
 
@@ -382,6 +390,7 @@ func (r *oidcCustomClaimsResource) ImportState(ctx context.Context, req resource
 		}
 
 		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), parts[0])...)
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), parts[0])...)
 
 		return
 	case 2:
@@ -390,6 +399,7 @@ func (r *oidcCustomClaimsResource) ImportState(ctx context.Context, req resource
 		}
 
 		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), parts[0])...)
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), parts[0])...)
 		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_id"), parts[1])...)
 
 		return

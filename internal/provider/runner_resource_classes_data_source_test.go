@@ -119,8 +119,12 @@ data "circleci_runner_resource_classes" "test" {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: runnerProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{
-			Config:      config,
-			ExpectError: regexp.MustCompile(`(?s)At least one of these attributes must be configured.*organization_id,namespace`),
+			Config: config,
+			// The organization counts under either of its two names, so both are
+			// listed. See org_id_deprecation.go.
+			ExpectError: regexp.MustCompile(
+				`(?s)At least one of these attributes must be configured.*organization_id,namespace,org_id`,
+			),
 		}},
 	})
 

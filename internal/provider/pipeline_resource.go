@@ -20,15 +20,21 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// pipelineTypeName is the Terraform type name, used in the Cloud-only
-// diagnostic (see cloud_only.go).
-const pipelineTypeName = "circleci_pipeline"
+// The two Terraform type names this resource answers to, used in the Cloud-only
+// diagnostic (see cloud_only.go). The singular data source is renamed the same way
+// and shares both constants, so neither belongs in a file that a single deprecation
+// takes with it.
+const (
+	pipelineTypeName           = "circleci_pipeline"
+	pipelineDefinitionTypeName = "circleci_pipeline_definition"
+)
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
 	_ resource.Resource                = &pipelineResource{}
 	_ resource.ResourceWithConfigure   = &pipelineResource{}
 	_ resource.ResourceWithImportState = &pipelineResource{}
+	_ resource.ResourceWithMoveState   = &pipelineResource{}
 )
 
 // pipelineResourceModel maps the output schema.
@@ -47,19 +53,25 @@ type pipelineResourceModel struct {
 	CheckoutSourceRepoExternalId types.String `tfsdk:"checkout_source_repo_external_id"`
 }
 
-// NewPipelineResource is a helper function to simplify the provider implementation.
-func NewPipelineResource() resource.Resource {
+// NewPipelineDefinitionResource is a helper function to simplify the provider
+// implementation.
+func NewPipelineDefinitionResource() resource.Resource {
 	return &pipelineResource{}
 }
 
 // pipelineResource is the resource implementation.
 type pipelineResource struct {
 	client *circleci.Client
+
+	// deprecated marks the copy registered under the old type name. See
+	// pipeline_resource_rename.go.
+	deprecated bool
 }
 
 // Metadata returns the resource type name.
 func (r *pipelineResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_pipeline"
+	resp.TypeName = req.ProviderTypeName +
+		renamedTypeName(r.deprecated, "_pipeline", "_pipeline_definition")
 }
 
 // Schema defines the schema for the resource.
@@ -147,6 +159,15 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			},
 		},
 	}
+
+	if r.deprecated {
+		resp.Schema.DeprecationMessage = pipelineRenameDeprecationMessage
+		resp.Schema.MarkdownDescription = "~> **Deprecated in favour of " +
+			"[`circleci_pipeline_definition`](pipeline_definition)**, which is what this " +
+			"resource has always managed. Both names work and are the same resource; move " +
+			"existing state with a `moved` block, which does not destroy anything.\n\n" +
+			resp.Schema.MarkdownDescription
+	}
 }
 
 // pipelineResourceModelFromAPI maps an API pipeline definition onto the
@@ -171,7 +192,7 @@ func pipelineResourceModelFromAPI(projectID types.String, definition circleci.Pi
 
 // Create creates the resource and sets the initial Terraform state.
 func (r *pipelineResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	if !requireCloud(r.client, pipelineTypeName, &resp.Diagnostics) {
+	if !requireCloud(r.client, r.typeName(), &resp.Diagnostics) {
 		return
 	}
 
@@ -210,7 +231,7 @@ func (r *pipelineResource) Create(ctx context.Context, req resource.CreateReques
 
 // Read refreshes the Terraform state with the latest data.
 func (r *pipelineResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	if !requireCloud(r.client, pipelineTypeName, &resp.Diagnostics) {
+	if !requireCloud(r.client, r.typeName(), &resp.Diagnostics) {
 		return
 	}
 
@@ -246,7 +267,7 @@ func (r *pipelineResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 // Update updates the resource and sets the updated Terraform state on success.
 func (r *pipelineResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	if !requireCloud(r.client, pipelineTypeName, &resp.Diagnostics) {
+	if !requireCloud(r.client, r.typeName(), &resp.Diagnostics) {
 		return
 	}
 

@@ -29,6 +29,7 @@ type contextDataSourceModel struct {
 	Id             types.String                 `tfsdk:"id"`
 	Name           types.String                 `tfsdk:"name"`
 	OrganizationId types.String                 `tfsdk:"organization_id"`
+	OrgId          types.String                 `tfsdk:"org_id"`
 	CreatedAt      types.String                 `tfsdk:"created_at"`
 	Restrictions   []restrictionDataSourceModel `tfsdk:"restrictions"`
 }
@@ -72,7 +73,8 @@ func (d *ContextDataSource) resolveContext(
 		return found, diags
 	}
 
-	name, organizationID := config.Name.ValueString(), config.OrganizationId.ValueString()
+	name := config.Name.ValueString()
+	organizationID := effectiveOrgID(config.OrganizationId, config.OrgId)
 
 	found, err := d.client.FindContextByName(ctx, organizationID, name)
 	if err != nil {
@@ -102,15 +104,33 @@ func (d *ContextDataSource) resolveContext(
 
 // ConfigValidators requires exactly one identifier, and an organization when
 // looking up by name.
+//
+// The organization is deliberately not validated with
+// orgIDDataSourceConfigValidator: it is only needed for a lookup by name, so
+// requiring exactly one of `organization_id` and `org_id` would break the
+// lookup by id, which names neither. What is required instead is that a lookup
+// by name carries one of the two — expressed as "either name and
+// organization_id are configured together, or name and org_id are" — and that
+// the pair is never set at once. See org_id_deprecation.go.
 func (d *ContextDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
 	return []datasource.ConfigValidator{
 		datasourcevalidator.ExactlyOneOf(
 			path.MatchRoot("id"),
 			path.MatchRoot("name"),
 		),
-		datasourcevalidator.RequiredTogether(
-			path.MatchRoot("name"),
+		datasourcevalidator.Conflicting(
 			path.MatchRoot("organization_id"),
+			path.MatchRoot("org_id"),
+		),
+		datasourcevalidator.Any(
+			datasourcevalidator.RequiredTogether(
+				path.MatchRoot("name"),
+				path.MatchRoot("organization_id"),
+			),
+			datasourcevalidator.RequiredTogether(
+				path.MatchRoot("name"),
+				path.MatchRoot("org_id"),
+			),
 		),
 	}
 }
@@ -132,17 +152,18 @@ func (d *ContextDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 			},
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the context. Set either this or `id`. " +
-					"Looking a context up by name also requires `organization_id`, because the API " +
-					"has no lookup-by-name route: the provider lists the organization's contexts and " +
-					"matches on the name, which is unique within an organization.",
+					"Looking a context up by name also requires the organization, as `org_id` (or the " +
+					"deprecated `organization_id`), because the API has no lookup-by-name route: the " +
+					"provider lists the organization's contexts and matches on the name, which is " +
+					"unique within an organization. Neither is needed when `id` is set, and both are " +
+					"ignored in that case.",
 				Optional: true,
 				Computed: true,
 			},
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the organization owning the context. Required when " +
-					"identifying the context by `name`, and ignored when `id` is set.",
-				Optional: true,
-			},
+			// See org_id_deprecation.go for why the organization is accepted under
+			// two names.
+			"organization_id": deprecatedOrgIDDataSourceAttribute("contexts"),
+			"org_id":          orgIDDataSourceAttribute("contexts"),
 			"created_at": schema.StringAttribute{
 				MarkdownDescription: "The timestamp when the context was created.",
 				Computed:            true,
@@ -218,11 +239,15 @@ func (d *ContextDataSource) Read(ctx context.Context, req datasource.ReadRequest
 
 	// Map response body to model, preserving the organization the caller supplied:
 	// the API does not report a context's owner, so echoing it back keeps the
-	// configuration and the state consistent.
+	// configuration and the state consistent. Both names are echoed exactly as
+	// configured — filling in the one the configuration left out would report a
+	// value Terraform never read from the configuration for an attribute that is
+	// Optional rather than Computed.
 	contextState = contextDataSourceModel{
 		Id:             types.StringValue(found.ID),
 		Name:           types.StringValue(found.Name),
 		OrganizationId: contextState.OrganizationId,
+		OrgId:          contextState.OrgId,
 		CreatedAt:      types.StringValue(found.CreatedAt),
 		Restrictions:   restrictionsAttributeValues,
 	}

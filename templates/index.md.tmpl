@@ -96,9 +96,10 @@ Each resource's documentation states its availability. In summary:
 | Organization settings | yes | **no** |
 | Orb namespaces, orbs, orb versions | yes | **no** |
 
-~> **Note** `circleci_pipeline` and `circleci_trigger` are unavailable on
-CircleCI Server. The `pipeline-definitions` and `triggers` endpoints they depend
-on are not exposed by a Server installation.
+~> **Note** `circleci_pipeline_definition` and `circleci_trigger` are unavailable
+on CircleCI Server. The `pipeline-definitions` and `triggers` endpoints they
+depend on are not exposed by a Server installation. Pipeline *run* data sources —
+`circleci_pipeline_run` and the run-scoped data sources beside it — work on both.
 
 ### The `host` attribute
 

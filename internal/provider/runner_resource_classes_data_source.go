@@ -8,11 +8,9 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
-	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/path"
-	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -28,6 +26,7 @@ var (
 // runnerResourceClassesDataSourceModel maps the data source schema.
 type runnerResourceClassesDataSourceModel struct {
 	OrganizationId  types.String                   `tfsdk:"organization_id"`
+	OrgId           types.String                   `tfsdk:"org_id"`
 	Namespace       types.String                   `tfsdk:"namespace"`
 	ResourceClasses []runnerResourceClassItemModel `tfsdk:"resource_classes"`
 }
@@ -56,11 +55,22 @@ func (d *runnerResourceClassesDataSource) Metadata(_ context.Context, req dataso
 
 // ConfigValidators requires at least one filter, because the runner API rejects
 // an unfiltered list.
+//
+// The organization filter counts under either of its two names. As on
+// circleci_runners, this is deliberately not orgIDDataSourceConfigValidator:
+// requiring exactly one of the pair would break a namespace-only listing, which
+// is supported today. Both at once is still refused, by the Conflicting
+// validator. See org_id_deprecation.go.
 func (d *runnerResourceClassesDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
 	return []datasource.ConfigValidator{
 		datasourcevalidator.AtLeastOneOf(
 			path.MatchRoot("organization_id"),
 			path.MatchRoot("namespace"),
+			path.MatchRoot("org_id"),
+		),
+		datasourcevalidator.Conflicting(
+			path.MatchRoot("organization_id"),
+			path.MatchRoot("org_id"),
 		),
 	}
 }
@@ -69,20 +79,21 @@ func (d *runnerResourceClassesDataSource) ConfigValidators(_ context.Context) []
 func (d *runnerResourceClassesDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Lists CircleCI self-hosted runner resource classes, including ones created " +
-			"outside Terraform. At least one of `organization_id` or `namespace` must be set.\n\n" +
+			"outside Terraform. At least one of `org_id` (or the deprecated `organization_id`) or " +
+			"`namespace` must be set.\n\n" +
 			"Available on CircleCI Cloud and CircleCI Server. On Server the runner API is served by " +
 			"your own installation, so the provider's `runner_host` attribute must be set to your " +
 			"Server hostname.\n\n" +
 			"Use `circleci_runner_resource_class` (singular) to look one up by name.",
 		Attributes: map[string]schema.Attribute{
-			"organization_id": schema.StringAttribute{
-				MarkdownDescription: "Only return resource classes owned by this organization, as an " +
-					"organization UUID.",
-				Optional: true,
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerOrgIDPattern, "must be an organization UUID"),
-				},
-			},
+			// Only return resource classes owned by this organization. See
+			// org_id_deprecation.go for why it is accepted under two names.
+			"organization_id": runnerOrgIDDataSourceAttribute(
+				deprecatedOrgIDDataSourceAttribute("runner resource classes"),
+			),
+			"org_id": runnerOrgIDDataSourceAttribute(
+				orgIDDataSourceAttribute("runner resource classes"),
+			),
 			"namespace": schema.StringAttribute{
 				MarkdownDescription: "Only return resource classes in this runner namespace.",
 				Optional:            true,
@@ -120,7 +131,7 @@ func (d *runnerResourceClassesDataSource) Read(ctx context.Context, req datasour
 	}
 
 	namespace := config.Namespace.ValueString()
-	organizationId := config.OrganizationId.ValueString()
+	organizationId := effectiveOrgID(config.OrganizationId, config.OrgId)
 
 	classes, err := d.client.ListResourceClasses(ctx, namespace, organizationId)
 	if err != nil {
