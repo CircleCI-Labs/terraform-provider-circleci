@@ -27,48 +27,174 @@ installation does not expose.
 
 ## Example Usage
 
-### GitHub App Trigger
+One endpoint covers four event sources, and which attributes are required — even
+which are *permitted* — depends on which one you pick. Each is shown separately
+below rather than as one configuration with everything in it.
+
+### GitHub App trigger
 
 ```terraform
-resource "circleci_trigger" "github" {
-  project_id                    = "00000000-0000-0000-0000-000000000000"
-  pipeline_definition_id        = "00000000-0000-0000-0000-000000000001"
+# A trigger is created under a pipeline definition but read under the project, so
+# both ids form its address — which is also why import needs all three segments.
+# Referencing them by expression is what orders the graph correctly: the definition
+# is created first, and the trigger is destroyed before it.
+data "circleci_project" "api" {
+  slug = "github/acme/api"
+}
+
+locals {
+  # GitHub's own numeric repository id, which is what CircleCI's GitHub App event
+  # sources are keyed by — not the repository name. The
+  # circleci_github_app_repository data source reports it; so does
+  # `gh api repos/acme/api --jq .id`.
+  repo_external_id = "123456789"
+}
+
+resource "circleci_pipeline_definition" "build" {
+  project_id  = data.circleci_project.api.id
+  name        = "build"
+  description = "Build and test on every push"
+
+  config_source_provider         = "github_app"
+  config_source_file_path        = ".circleci/config.yml"
+  config_source_repo_external_id = local.repo_external_id
+
+  checkout_source_provider         = "github_app"
+  checkout_source_repo_external_id = local.repo_external_id
+}
+
+# GitHub App event source: run the pipeline on every push to the connected
+# repository.
+#
+# `event_preset` selects which GitHub events fire the trigger, and is optional here
+# (required for github_oauth, and rejected for webhook and schedule).
+# `checkout_ref` and `config_ref` are deliberately absent: for a GitHub event source
+# they are only expected when the event source repository differs from the pipeline
+# definition's checkout or config repository, and must otherwise be omitted.
+resource "circleci_trigger" "github_app" {
+  project_id                    = data.circleci_project.api.id
+  pipeline_definition_id        = circleci_pipeline_definition.build.id
   event_source_provider         = "github_app"
+  event_source_repo_external_id = local.repo_external_id
   event_preset                  = "all-pushes"
-  event_source_repo_external_id = "12345678"
+  disabled                      = false
+}
+
+# `pipeline_id` is the deprecated spelling of `pipeline_definition_id` — it always
+# took a pipeline *definition* id. Set exactly one of the two.
+```
+
+### GitHub Server trigger
+
+```terraform
+# GitHub Server (GitHub Enterprise Server) event source. It behaves exactly like
+# `github_app` — same required attributes, same presets — but the repository ids
+# belong to your own GitHub installation rather than to github.com, so they cannot
+# be shared with a github_app pipeline definition. This example therefore stands on
+# its own rather than reusing the one above.
+#
+# This concerns the *event source*, not where CircleCI runs: triggers are CircleCI
+# Cloud only, whichever GitHub the organization is connected to.
+data "circleci_project" "internal" {
+  slug = "github/acme-internal/payments"
+}
+
+locals {
+  # The repository id on the GitHub Server installation. These are small integers
+  # allocated per installation, not github.com ids.
+  internal_repo_external_id = "2259"
+}
+
+resource "circleci_pipeline_definition" "internal_build" {
+  project_id  = data.circleci_project.internal.id
+  name        = "build"
+  description = "Build and test on every push"
+
+  config_source_provider         = "github_server"
+  config_source_file_path        = ".circleci/config.yml"
+  config_source_repo_external_id = local.internal_repo_external_id
+
+  checkout_source_provider         = "github_server"
+  checkout_source_repo_external_id = local.internal_repo_external_id
+}
+
+resource "circleci_trigger" "github_server" {
+  project_id                    = data.circleci_project.internal.id
+  pipeline_definition_id        = circleci_pipeline_definition.internal_build.id
+  event_source_provider         = "github_server"
+  event_source_repo_external_id = local.internal_repo_external_id
+  event_preset                  = "only-build-prs"
+  disabled                      = false
 }
 ```
 
-### Scheduled Trigger
+### Scheduled trigger
 
 ```terraform
-resource "circleci_trigger" "scheduled" {
-  project_id                              = "00000000-0000-0000-0000-000000000000"
-  pipeline_definition_id                  = "00000000-0000-0000-0000-000000000001"
-  event_source_provider                   = "schedule"
-  event_name                              = "nightly-build"
-  checkout_ref                            = "main"
-  config_ref                              = "main"
-  event_source_schedule_cron_expression   = "0 2 * * *"
+# A scheduled trigger is the current way to run a pipeline on a cron schedule, and
+# the migration target for the legacy schedule API and for a community provider's
+# `circleci_schedule`.
+#
+# The required attributes differ from a GitHub event source, because one endpoint
+# covers several contracts: `event_name`, `checkout_ref`, `config_ref` and
+# `event_source_schedule_cron_expression` are all required here, `event_preset` must
+# be omitted, and `parameters` is supported for `schedule` only.
+#
+# `data.circleci_project.api` and `circleci_pipeline_definition.build` are declared
+# in the primary example above.
+resource "circleci_trigger" "nightly" {
+  project_id             = data.circleci_project.api.id
+  pipeline_definition_id = circleci_pipeline_definition.build.id
+
+  event_source_provider = "schedule"
+  event_name            = "nightly-build"
+  checkout_ref          = "main"
+  config_ref            = "main"
+
+  # Five fields, evaluated in UTC. This one is 02:00 every day.
+  event_source_schedule_cron_expression = "0 2 * * *"
+
+  # "system" attributes the runs to CircleCI itself. "current" attributes them to
+  # the user whose API token created the trigger, so the pipeline runs with that
+  # user's permissions — and stops working when they leave the organization.
   event_source_schedule_attribution_actor = "system"
-  parameters                              = {
-    run_nightly_foo = "true"
-    branch          = "main"
+
+  # Pipeline parameters passed to every run. Clearing this map replaces the trigger:
+  # the API has no way to remove parameters from an existing one.
+  parameters = {
+    run_integration_tests = "true"
+    deploy_target         = "staging"
   }
 }
 ```
 
-### Webhook Trigger
+### Webhook trigger
 
 ```terraform
-resource "circleci_trigger" "webhook" {
-  project_id                   = "00000000-0000-0000-0000-000000000000"
-  pipeline_definition_id       = "00000000-0000-0000-0000-000000000001"
+# Webhook event source: CircleCI mints a URL, and any POST to it starts the
+# pipeline. `event_source_web_hook_url` is Computed and Sensitive — read it out of
+# the resource and hand it to whatever should call it; it cannot be set.
+#
+# As with `schedule`, `event_name`, `checkout_ref` and `config_ref` are required and
+# `event_preset` must be omitted. `event_source_web_hook_sender` names who is
+# expected to call the URL; it is a free-form label, not a fixed enumeration.
+#
+# `data.circleci_project.api` and `circleci_pipeline_definition.build` are declared
+# in the primary example above.
+resource "circleci_trigger" "release" {
+  project_id             = data.circleci_project.api.id
+  pipeline_definition_id = circleci_pipeline_definition.build.id
+
   event_source_provider        = "webhook"
-  event_name                   = "my-webhook-event"
+  event_name                   = "release-published"
+  event_source_web_hook_sender = "github"
   checkout_ref                 = "main"
   config_ref                   = "main"
-  event_source_web_hook_sender = "my-sender"
+}
+
+output "circleci_release_webhook_url" {
+  value     = circleci_trigger.release.event_source_web_hook_url
+  sensitive = true
 }
 ```
 

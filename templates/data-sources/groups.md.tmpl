@@ -27,18 +27,6 @@ group.
 
 ## Example Usage
 
-```terraform
-data "circleci_groups" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-}
-
-# Look a group up by name, since the API addresses groups by id.
-output "developers_group_id" {
-  value = one([
-    for group in data.circleci_groups.all.groups : group.id
-    if group.name == "developers"
-  ])
-}
-```
+{{ tffile "examples/data-sources/circleci_groups/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

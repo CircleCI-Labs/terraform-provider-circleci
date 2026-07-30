@@ -55,7 +55,9 @@ type projectSettingsResourceModel struct {
 	SetGithubStatus            types.Bool   `tfsdk:"set_github_status"`
 	SetupWorkflows             types.Bool   `tfsdk:"setup_workflows"`
 	WriteSettingsRequiresAdmin types.Bool   `tfsdk:"write_settings_requires_admin"`
-	PROnlyBranchOverrides      types.List   `tfsdk:"pr_only_branch_overrides"`
+	// PROnlyBranchOverrides is a Set rather than a List because CircleCI does not
+	// preserve the order the branches were sent in. See the schema.
+	PROnlyBranchOverrides types.Set `tfsdk:"pr_only_branch_overrides"`
 }
 
 // projectSettingRequest converts a schema value into an update payload field. A
@@ -103,7 +105,7 @@ func (m projectSettingsResourceModel) payload(ctx context.Context) (circleci.Pro
 		return settings, nil
 	}
 
-	// A configured list is sent even when empty, because sending [] is the only
+	// A configured set is sent even when empty, because sending [] is the only
 	// way to clear the overrides the project already has.
 	branches, diags := branchOverrides(ctx, m.PROnlyBranchOverrides)
 	if diags.HasError() {
@@ -144,11 +146,11 @@ func (m *projectSettingsResourceModel) refresh(ctx context.Context, remote *circ
 		branches = *remote.PROnlyBranchOverrides
 	}
 
-	list, diags := types.ListValueFrom(ctx, types.StringType, branches)
+	overrides, diags := types.SetValueFrom(ctx, types.StringType, branches)
 	if diags.HasError() {
 		return diags
 	}
-	m.PROnlyBranchOverrides = list
+	m.PROnlyBranchOverrides = overrides
 
 	return diags
 }
@@ -263,10 +265,24 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 			"write_settings_requires_admin": toggle(
 				"Require organization administrator permissions to change this project's settings. Enabling this can lock the provider itself out of further changes if its token does not belong to an administrator.",
 			),
-			"pr_only_branch_overrides": schema.ListAttribute{
+			// A Set, not a List. The settings API stores these branches as an
+			// unordered collection and reports them back in an order of its own
+			// choosing — verified live: PATCHing ["zebra","alpha","main","beta"] reads
+			// back as ["zebra","main","alpha","beta"], stably, but never in the order
+			// sent. Declared as a List, Terraform compared configured order against
+			// returned order and planned a change on every run, for ever, with nothing
+			// to apply. The circleci_project_settings data source already reports this
+			// attribute as a Set for the same reason.
+			//
+			// No state upgrade accompanies this change: a list and a set of the same
+			// element type share one JSON encoding and the framework re-reads prior raw
+			// state against the current schema type, so existing state decodes as a set
+			// unchanged. TestListToSetNeedsNoStateUpgrade proves it.
+			"pr_only_branch_overrides": schema.SetAttribute{
 				MarkdownDescription: "Branches that always trigger a build, even when `build_prs_only` is enabled. " +
-					"The list replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. " +
-					"Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches.",
+					"The set replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. " +
+					"Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches. " +
+					"Order is not significant: CircleCI does not preserve the order branches are sent in.",
 				Optional:    true,
 				ElementType: types.StringType,
 			},

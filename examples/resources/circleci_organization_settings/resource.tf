@@ -1,7 +1,7 @@
 # Manage only the toggles you care about. Anything left out of the configuration
 # is not written, so CircleCI keeps whatever value it already has.
 resource "circleci_organization_settings" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 
   # Accepting the runner terms of service is what unlocks self-hosted runners for
   # the organization; runner resource classes and tokens cannot be created until
@@ -20,7 +20,7 @@ resource "circleci_organization_settings" "example" {
 # A second configuration may manage a disjoint set of toggles on the same
 # organization, because each resource only writes what it declares.
 resource "circleci_organization_settings" "ai_features" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 
   enable_ai_agents              = false
   enable_ai_error_summarization = false

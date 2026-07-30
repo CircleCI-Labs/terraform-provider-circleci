@@ -26,27 +26,7 @@ than null, so `length(...) == 0` is the check for "unrestricted".
 
 ## Example Usage
 
-```terraform
-data "circleci_context_restrictions" "deploy" {
-  context_id = "00000000-0000-0000-0000-000000000000"
-}
-
-# Which projects may use the context.
-output "circleci_permitted_project_ids" {
-  value = [
-    for restriction in data.circleci_context_restrictions.deploy.restrictions : restriction.project_id
-    if restriction.type == "project"
-  ]
-}
-
-# Fail the plan if a context that should be locked down is not.
-check "deploy_context_is_restricted" {
-  assert {
-    condition     = length(data.circleci_context_restrictions.deploy.restrictions) > 0
-    error_message = "The deploy context is unrestricted, so every project in the organization can use it."
-  }
-}
-```
+{{ tffile "examples/data-sources/circleci_context_restrictions/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

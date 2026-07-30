@@ -19,6 +19,25 @@ resource "circleci_project_environment_variable" "example" {
 }
 ```
 
+### Keeping the value out of state
+
+`value` is stored in Terraform state in cleartext. `value_wo` is the same argument
+as a [write-only argument](https://developer.hashicorp.com/terraform/language/resources/ephemeral/write-only)
+(Terraform 1.11 or later): it is sent to CircleCI and then discarded, so it appears
+in neither state nor the plan file. Set exactly one of the two.
+
+Because nothing derived from the value is stored, Terraform cannot tell that
+`value_wo` changed. Increment `value_wo_version` to rotate the secret:
+
+```terraform
+resource "circleci_project_environment_variable" "write_only" {
+  project_slug     = "github/my-org/my-repo"
+  name             = "MY_SECRET"
+  value_wo         = ephemeral.some_provider_secret.example.value
+  value_wo_version = 1 # bump to 2 to send a new value
+}
+```
+
 {{ .SchemaMarkdown | trimspace }}
 
 ## Import
@@ -29,4 +48,4 @@ Import is supported using `project_slug/env_var_name`:
 terraform import circleci_project_environment_variable.example "github/my-org/my-repo/MY_SECRET"
 ```
 
-After import, run `terraform plan` to verify state. Since all fields use `RequiresReplace`, any change to `value`, `name`, or `project_slug` will destroy and recreate the resource.
+After import, run `terraform plan` to verify state. The API has no update route, so any change to `value`, `value_wo_version`, `name`, or `project_slug` destroys and recreates the resource.

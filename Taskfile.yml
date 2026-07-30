@@ -76,6 +76,122 @@ tasks:
       # substitute for `task test` before pushing.
       - go tool gotestsum -- -timeout=2m -parallel=10 -race ./internal/circleci/... ./internal/httpcl/...
 
+  validate-examples:
+    desc: Run `terraform validate` over every directory under examples/
+    summary: |
+      Type-checks every example against the provider's real schema.
+
+      The examples are documentation fragments: each declares no provider and is
+      never applied, so nothing else in this repository ever asks Terraform what it
+      thinks of them. `terraform fmt` only parses HCL, and the acceptance tests
+      exercise their own inline configurations, not these files. That leaves the
+      whole examples/ tree unchecked, and it is the part of the documentation a
+      practitioner copies verbatim.
+
+      This target builds the provider, points a temporary CLI configuration at it
+      with dev_overrides, and validates a copy of each example directory as a module
+      of its own. It is hermetic: no network, no credentials, no `terraform init`.
+    deps: [build]
+    cmds:
+      - |
+        set -eu
+
+        command -v terraform >/dev/null 2>&1 || {
+          echo "terraform is not on PATH; this target needs it to validate the examples" >&2
+          exit 1
+        }
+
+        root="$PWD"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+
+        # dev_overrides is what makes this hermetic. Terraform resolves the provider
+        # from this directory instead of the registry, so no `terraform init` is
+        # needed — and must not be run, since init would reach for the network and
+        # fail on a CI runner with no egress. The cost is a warning on stderr about
+        # development overrides being in effect, which is expected and is why the
+        # per-directory output is only shown for a failure.
+        cat >"$work/cli.tfrc" <<TFRC
+        provider_installation {
+          dev_overrides {
+            "CircleCI-Public/circleci" = "$root"
+          }
+          direct {}
+        }
+        TFRC
+
+        export TF_CLI_CONFIG_FILE="$work/cli.tfrc"
+        export TF_IN_AUTOMATION=1
+        export TF_INPUT=0
+        export CHECKPOINT_DISABLE=1
+
+        # Nothing here should be able to talk to CircleCI. validate never calls the
+        # provider's Configure, so these are unused, but unsetting them means a
+        # failure can never be a credential problem in disguise.
+        unset CIRCLE_TOKEN CIRCLE_HOST CIRCLE_DEPLOYMENT CIRCLE_RUNNER_HOST || true
+
+        total=0
+        failed=0
+        : >"$work/failures.txt"
+
+        # examples/provider is included as well: it is the one example that does
+        # declare a provider block, which makes it the one most likely to be wrong
+        # and the least likely to be noticed.
+        for dir in examples/resources/*/ examples/data-sources/*/ examples/ephemeral-resources/*/ examples/functions/*/ examples/provider/; do
+          [ -d "$dir" ] || continue
+          ls "$dir"*.tf >/dev/null 2>&1 || continue
+
+          name="${dir%/}"
+          total=$((total + 1))
+
+          # The whole directory is copied, not just its *.tf. Several examples read a
+          # companion file with `file("${path.module}/...")` — an orb's YAML, a bundle
+          # of Rego policies — and copying only the Terraform makes those examples
+          # fail for a reason the reader would never hit.
+          module="$work/$(echo "$name" | tr '/' '_')"
+          mkdir -p "$module"
+          cp -R "$dir". "$module/"
+
+          # The per-type examples deliberately declare no provider: tfplugindocs
+          # renders them into a page that already documents the provider block, and
+          # repeating it in all 94 would be noise. Supply it here instead, with no
+          # version constraint — dev_overrides ignores one anyway. Skip the injection
+          # where the example brings its own, because two required_providers entries
+          # for the same provider is itself an error.
+          if ! grep -rq 'required_providers' "$module"/*.tf; then
+            cat >"$module/zz_required_providers.tf" <<'TF'
+        terraform {
+          required_providers {
+            circleci = {
+              source = "CircleCI-Public/circleci"
+            }
+          }
+        }
+        TF
+          fi
+
+          if output="$(cd "$module" && terraform validate -no-color 2>&1)"; then
+            echo "ok   $name"
+          else
+            failed=$((failed + 1))
+            echo "FAIL $name"
+            printf '\n=== %s ===\n%s\n' "$name" "$output" >>"$work/failures.txt"
+          fi
+        done
+
+        echo
+        echo "$((total - failed))/$total example directories validate"
+
+        if [ "$failed" -gt 0 ]; then
+          echo >&2
+          echo "$failed example directory/directories do not validate:" >&2
+          cat "$work/failures.txt" >&2
+          echo >&2
+          echo "Every attribute in an example must exist in the schema and every reference must resolve." >&2
+          echo "Fix the files named above, then re-run \`task validate-examples\`." >&2
+          exit 1
+        fi
+
   vulncheck:
     desc: Scan for known vulnerabilities that this code can actually reach
     vars:

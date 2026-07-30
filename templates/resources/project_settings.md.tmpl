@@ -51,32 +51,7 @@ This resource only ever writes what you name, so what a project *starts* from ma
 
 ## Example Usage
 
-```terraform
-# Manage the advanced settings of a project that already exists in CircleCI.
-# Only the settings named here are written; everything else is left as it is.
-resource "circleci_project_settings" "example" {
-  slug = "github/my-org/my-repo"
-
-  auto_cancel_builds            = true
-  build_fork_prs                = false
-  forks_receive_secret_env_vars = false
-  set_github_status             = true
-}
-
-# Build only branches with an open pull request, with exceptions.
-resource "circleci_project_settings" "prs_only" {
-  slug = "github/my-org/my-other-repo"
-
-  build_prs_only           = true
-  pr_only_branch_overrides = ["main", "develop"]
-}
-
-# Adopt a project's settings without managing any of them yet. Useful as a first
-# step: import the resource, then add settings one at a time.
-resource "circleci_project_settings" "adopted" {
-  slug = "circleci/9a1b2c3d-4e5f-6789-abcd-ef0123456789/my-repo"
-}
-```
+{{ tffile "examples/resources/circleci_project_settings/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 
@@ -94,6 +69,6 @@ The import records only the slug and leaves every setting `null`, so the first p
 
 - **`oss` is read-only.** CircleCI reports it but the settings API does not accept it: a request carrying it answers `400 Unexpected field 'advanced.oss'.` and is rejected in full, so a single unwritable field would fail every write. CircleCI derives the value from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application. This resource reports it and never writes it.
 - **`build_fork_prs = true` requires `forks_receive_secret_env_vars` to be set explicitly.** The provider reports an error at validate time otherwise, because the unset default is **`true`** on a private project: fork pull requests would receive the project's environment variables, secrets and build cache, so anyone who can open one could read them.
-- **`pr_only_branch_overrides` replaces the whole list.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches.
+- **`pr_only_branch_overrides` replaces the whole set.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches. It is a set rather than a list because CircleCI does not preserve the order branches are sent in — as a list it produced a plan that never converged.
 - **`write_settings_requires_admin = true` can lock the provider out** of further changes if its token does not belong to an organization administrator.
 - **`terraform destroy` writes nothing.** Settings cannot be deleted or reset, so destroying this resource only drops it from state and the project keeps its current values.

@@ -350,6 +350,14 @@ func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Requ
 
 	a.patches = append(a.patches, body.Advanced)
 	for key, value := range body.Advanced {
+		// pr_only_branch_overrides is unordered on the API and comes back in an
+		// order of its own; see reorderedLikeTheAPI in
+		// webhook_resource_fake_test.go. Reordering it here is what makes an
+		// order-sensitive regression fail rather than pass.
+		if key == "pr_only_branch_overrides" {
+			value = reorderedLikeTheAPI(value)
+		}
+
 		current[key] = value
 	}
 	a.settings[slug] = current

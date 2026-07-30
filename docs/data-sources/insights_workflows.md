@@ -61,8 +61,24 @@ data "circleci_insights_workflows" "api" {
 # A GitLab, GitHub App or GitHub Server project has no VCS-side organization and
 # repository name, so its slug is circleci/<org-uuid>/<project-uuid> instead. Both
 # forms are accepted.
+variable "org_id" {
+  type        = string
+  description = <<-EOT
+    UUID of the CircleCI organization owning the standalone project. The
+    circleci_organization data source reports it for a slug.
+  EOT
+}
+
+variable "project_id" {
+  type        = string
+  description = <<-EOT
+    UUID of the standalone CircleCI project to report on. The circleci_project data
+    source reports it, under `id`.
+  EOT
+}
+
 data "circleci_insights_workflows" "standalone" {
-  project_slug = "circleci/${var.organization_id}/${var.project_id}"
+  project_slug = "circleci/${var.org_id}/${var.project_id}"
   branch       = "main"
 }
 

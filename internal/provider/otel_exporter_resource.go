@@ -60,7 +60,12 @@ type otelExporterResourceModel struct {
 	Protocol       types.String `tfsdk:"protocol"`
 	Insecure       types.Bool   `tfsdk:"insecure"`
 	Headers        types.Map    `tfsdk:"headers"`
-	Issues         types.List   `tfsdk:"issues"`
+	// HeadersWO is always null here. The framework nullifies a write-only
+	// attribute in plan and state, so the field exists only to satisfy the schema;
+	// the value is read from configuration by resolveOTelHeaders.
+	HeadersWO        types.Map   `tfsdk:"headers_wo"`
+	HeadersWOVersion types.Int64 `tfsdk:"headers_wo_version"`
+	Issues           types.List  `tfsdk:"issues"`
 }
 
 // NewOTelExporterResource is a helper function to simplify the provider implementation.
@@ -90,7 +95,12 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 			fmt.Sprintf(
 				"~> **At most %d exporters per organization.** Creating one beyond the limit is rejected.",
 				circleci.OTelExporterLimit,
-			),
+			) + "\n\n" +
+			"Headers usually carry the collector's credentials. `headers` records them in " +
+			"Terraform state in cleartext; `headers_wo` is the same argument as a write-only " +
+			"one, sent to CircleCI and never persisted (Terraform 1.11 or later). Set at most " +
+			"one of the two. See the [Managing secrets](../guides/managing-secrets) guide for " +
+			"how the two compare, including the drift detection the write-only path gives up.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the exporter, assigned by CircleCI.",
@@ -150,6 +160,10 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 			"headers": schema.MapAttribute{
 				MarkdownDescription: "Extra headers sent with each export, typically the collector's " +
 					"credentials. Changing this value forces a new resource to be created.\n\n" +
+					"They are recorded in Terraform state in cleartext. Use `headers_wo` instead to " +
+					"keep them out of state, at the cost of having to bump `headers_wo_version` to " +
+					"rotate them and of losing the drift detection described below. Set at most one " +
+					"of the two; setting neither sends no headers.\n\n" +
 					"~> **Header values cannot be read back.** CircleCI encrypts them at rest and every " +
 					"read answers with the placeholder `" + circleci.OTelRedactedHeaderValue + "`, so " +
 					"Terraform cannot detect a value changed outside Terraform. A header *added or " +
@@ -164,6 +178,10 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 					mapvalidator.KeysAre(stringvalidator.LengthAtLeast(1)),
 				},
 			},
+			// See otel_exporter_write_only.go, including why these two are
+			// Conflicting with `headers` rather than ExactlyOneOf against it.
+			"headers_wo":         otelHeadersWriteOnlyAttribute(),
+			"headers_wo_version": otelHeadersWriteOnlyVersionAttribute(),
 			"issues": schema.ListAttribute{
 				MarkdownDescription: "Validation problems CircleCI has detected with this exporter, such " +
 					"as an endpoint that no longer resolves. Empty when there are none.",
@@ -177,10 +195,12 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 	}
 }
 
-// ConfigValidators requires exactly one of the two organization attribute names.
+// ConfigValidators requires exactly one of the two organization attribute names,
+// and refuses `headers` and `headers_wo` together.
 func (r *otelExporterResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		orgIDConfigValidator(),
+		otelHeadersConfigValidator(),
 	}
 }
 
@@ -192,12 +212,13 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	headers := map[string]string{}
-	if !plan.Headers.IsNull() && !plan.Headers.IsUnknown() {
-		resp.Diagnostics.Append(plan.Headers.ElementsAs(ctx, &headers, false)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
+	// From configuration, because `headers_wo` is null in the plan. See
+	// otel_exporter_write_only.go.
+	headers, ok := resolveOTelHeaders(
+		ctx, req.Config, plan.Headers, plan.HeadersWOVersion, &resp.Diagnostics,
+	)
+	if !ok {
+		return
 	}
 
 	orgID := effectiveOrgID(plan.OrganizationID, plan.OrgID)
@@ -224,8 +245,9 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 	}
 
 	// Everything but the headers comes from the response. The headers stay as
-	// configured: the API answers with redacted values, and writing those into
-	// state would both lose the real values and make the applied state differ
+	// planned — the configured value on the `headers` path, null on the
+	// `headers_wo` one: the API answers with redacted values, and writing those
+	// into state would both lose the real values and make the applied state differ
 	// from the plan.
 	plan.ID = types.StringValue(exporter.ID)
 	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
@@ -281,7 +303,7 @@ func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadReques
 	state.Protocol = types.StringValue(exporter.Protocol)
 	state.Insecure = types.BoolValue(exporter.Insecure)
 
-	headers, diags := otelRefreshHeaders(ctx, state.Headers, exporter.Headers)
+	headers, diags := otelHeadersAfterRead(ctx, state.Headers, state.HeadersWOVersion, exporter.Headers)
 	resp.Diagnostics.Append(diags...)
 
 	issues, diags := otelIssuesValue(ctx, exporter.Issues)

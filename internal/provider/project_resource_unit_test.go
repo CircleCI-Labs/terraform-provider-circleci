@@ -90,7 +90,7 @@ func TestProjectResourceUnit_CreateClassicOrgAppliesSettings(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test",
 						tfjsonpath.New("pr_only_branch_overrides"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("main"),
 							knownvalue.StringExact("release/1.x"),
 						}),
@@ -235,7 +235,7 @@ func TestProjectResourceUnit_CreateOmitsUnconfiguredToggles(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test",
 						tfjsonpath.New("pr_only_branch_overrides"),
-						knownvalue.ListExact([]knownvalue.Check{knownvalue.StringExact("main")}),
+						knownvalue.SetExact([]knownvalue.Check{knownvalue.StringExact("main")}),
 					),
 				},
 			},
@@ -445,7 +445,7 @@ func TestProjectResourceUnit_UpdateSendsUnquotedBranchOverrides(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test",
 						tfjsonpath.New("pr_only_branch_overrides"),
-						knownvalue.ListExact([]knownvalue.Check{knownvalue.StringExact("develop")}),
+						knownvalue.SetExact([]knownvalue.Check{knownvalue.StringExact("develop")}),
 					),
 				},
 			},
@@ -627,7 +627,7 @@ func minimalProjectModel(slug string) projectResourceModel {
 		SetGithubStatus:            types.BoolNull(),
 		SetupWorkflows:             types.BoolNull(),
 		WriteSettingsRequiresAdmin: types.BoolNull(),
-		PROnlyBranchOverrides:      types.ListNull(types.StringType),
+		PROnlyBranchOverrides:      types.SetNull(types.StringType),
 	}
 }
 
@@ -711,7 +711,7 @@ func TestProjectResourceUnit_UpdateRejectsBadSlug(t *testing.T) {
 	badState.SetGithubStatus = types.BoolValue(false)
 	badState.SetupWorkflows = types.BoolValue(false)
 	badState.WriteSettingsRequiresAdmin = types.BoolValue(false)
-	badState.PROnlyBranchOverrides = types.ListValueMust(types.StringType, nil)
+	badState.PROnlyBranchOverrides = types.SetValueMust(types.StringType, nil)
 
 	state := projectResourceStateForTest(t, schema, badState)
 	plan := badState

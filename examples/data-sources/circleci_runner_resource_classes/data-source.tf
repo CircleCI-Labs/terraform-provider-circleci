@@ -1,6 +1,6 @@
 # Every resource class an organization owns.
 data "circleci_runner_resource_classes" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 output "resource_class_names" {

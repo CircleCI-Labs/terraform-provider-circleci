@@ -6,7 +6,7 @@ data "circleci_pipeline_run" "this" {
 }
 
 data "circleci_pipeline_run_config" "this" {
-  pipeline_run_id = data.circleci_pipeline_run.this.id
+  run_id = data.circleci_pipeline_run.this.id
 }
 
 # Assert the compiled config actually contains an expected orb, rather than

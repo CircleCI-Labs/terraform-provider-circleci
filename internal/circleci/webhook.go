@@ -20,6 +20,27 @@ const WebhookScopeTypeProject = "project"
 // reads back as "", so the configured value can never be recovered from a read.
 const WebhookSigningSecretMask = "****"
 
+// The event names the webhook API accepts. The names stay hyphenated even though
+// the surrounding JSON keys do not: the API converts keys to snake_case, not
+// values.
+const (
+	// WebhookEventWorkflowCompleted fires when a workflow finishes, whatever its
+	// outcome.
+	WebhookEventWorkflowCompleted = "workflow-completed"
+	// WebhookEventJobCompleted fires when an individual job finishes, whatever
+	// its outcome.
+	WebhookEventJobCompleted = "job-completed"
+)
+
+// WebhookEvents returns every event name the webhook API accepts.
+//
+// It exists so the provider's schema validator, the attribute description and
+// this client cannot drift from one another. Without it an unrecognized event
+// name costs a round-trip and comes back as an opaque HTTP 400.
+func WebhookEvents() []string {
+	return []string{WebhookEventJobCompleted, WebhookEventWorkflowCompleted}
+}
+
 // WebhookScope identifies what a webhook watches. Today only projects can be
 // watched, so Type is always WebhookScopeTypeProject.
 type WebhookScope struct {

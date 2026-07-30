@@ -12,8 +12,46 @@ Fetches information about a CircleCI organization.
 ## Example Usage
 
 ```terraform
-data "circleci_organization" "example" {
+# Looking an organization up by slug is usually where a configuration starts:
+# every other resource in this provider is keyed by organization UUID, which is
+# otherwise only visible in the CircleCI web application.
+data "circleci_organization" "acme" {
+  slug = "gh/acme" # "gh/<org>" or "bb/<org>" for a VCS organization; "circleci/<uuid>" for a standalone one
+}
+
+# Set exactly one of `slug` and `id`. Look up by `id` when the UUID is what you
+# have and the name, slug or vcs_type is what you need.
+data "circleci_organization" "by_id" {
   id = "00000000-0000-0000-0000-000000000000"
+}
+
+# Feed the resolved UUID to everything else instead of repeating the literal in
+# every resource.
+resource "circleci_context" "build" {
+  org_id = data.circleci_organization.acme.id
+  name   = "build-credentials"
+}
+
+# The runner API accepts an organization UUID only — it rejects a slug — so this
+# lookup is the supported way to get from the slug you know to the value the
+# runner resources need.
+resource "circleci_runner_resource_class" "builders" {
+  org_id         = data.circleci_organization.acme.id
+  resource_class = "acme/builders" # "<namespace>/<class>"; the namespace is created by circleci_orb_namespace
+  description    = "Self-hosted Linux build runners"
+}
+
+# `vcs_type` gates whole features rather than just labelling the organization:
+# CircleCI RBAC groups, project role grants and the GitHub App data sources all
+# require a "circleci" type (standalone) organization, and a CircleCI Server
+# installation is always "github".
+output "acme" {
+  value = {
+    id       = data.circleci_organization.acme.id
+    name     = data.circleci_organization.acme.name
+    slug     = data.circleci_organization.acme.slug
+    vcs_type = data.circleci_organization.acme.vcs_type
+  }
 }
 ```
 

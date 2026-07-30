@@ -1,14 +1,14 @@
 # Manage the complete membership of a group. Users not listed here are removed
 # from the group on the next apply.
 resource "circleci_group" "developers" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  name            = "developers"
-  description     = "Engineers who deploy to staging"
+  org_id      = "00000000-0000-0000-0000-000000000000"
+  name        = "developers"
+  description = "Engineers who deploy to staging"
 }
 
 resource "circleci_group_membership" "developers" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  group_id        = circleci_group.developers.id
+  org_id   = "00000000-0000-0000-0000-000000000000"
+  group_id = circleci_group.developers.id
 
   # Users are addressed by UUID. A login or email address is not accepted.
   user_ids = [
@@ -19,7 +19,7 @@ resource "circleci_group_membership" "developers" {
 
 # An empty set empties the group.
 resource "circleci_group_membership" "contractors" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  group_id        = "33333333-3333-3333-3333-333333333333"
-  user_ids        = []
+  org_id   = "00000000-0000-0000-0000-000000000000"
+  group_id = "33333333-3333-3333-3333-333333333333"
+  user_ids = []
 }

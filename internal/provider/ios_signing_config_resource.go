@@ -50,6 +50,12 @@ type iosSigningConfigResourceModel struct {
 	CertificateFileName  types.String                   `tfsdk:"certificate_file_name"`
 	CertificateType      types.String                   `tfsdk:"certificate_type"`
 	ProvisioningProfiles []iosSigningConfigProfileModel `tfsdk:"provisioning_profiles"`
+	// ProvisioningProfilesWO is always empty here. The framework nullifies a
+	// write-only attribute in plan and state, so the field exists only to satisfy
+	// the schema; the value is read from configuration by
+	// resolveIOSSigningProfiles. See ios_signing_config_write_only.go.
+	ProvisioningProfilesWO        []iosSigningConfigProfileModel `tfsdk:"provisioning_profiles_wo"`
+	ProvisioningProfilesWOVersion types.Int64                    `tfsdk:"provisioning_profiles_wo_version"`
 }
 
 // iosSigningConfigProfileModel maps one provisioning profile in the config.
@@ -91,14 +97,20 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 			"configuration, or repointing it at a different certificate are all a new resource. " +
 			"Every attribute is therefore `RequiresReplace`.\n\n" +
 			"## Security\n\n" +
-			"`provisioning_profiles[*].blob` is write-only, for the same reason and with the same " +
-			"consequences as `circleci_ios_signing_certificate`'s `certificate_blob`: CircleCI " +
-			"never returns a profile's content, so the only copy this provider can compare " +
-			"against on the next `terraform plan` lives in Terraform state, in cleartext. See " +
-			"that resource's \"Security\" section for how to source it and protect state " +
-			"accordingly. A provisioning profile is less sensitive than a certificate's private " +
-			"key -- it authorizes rather than signs -- but it still identifies devices and app " +
-			"identifiers and is not intended to be public.",
+			"CircleCI never returns a provisioning profile's content, so with " +
+			"`provisioning_profiles` the only copy this provider can compare against on the next " +
+			"`terraform plan` lives in Terraform state, in cleartext. See " +
+			"`circleci_ios_signing_certificate`'s \"Security\" section for how to source it and " +
+			"protect state accordingly. A provisioning profile is less sensitive than a " +
+			"certificate's private key -- it authorizes rather than signs -- but it still " +
+			"identifies devices and app identifiers and is not intended to be public.\n\n" +
+			"`provisioning_profiles_wo` is the same list as a write-only argument (Terraform " +
+			"1.11 or later): it is sent to CircleCI and then discarded, so nothing about it " +
+			"reaches state or a plan file. Set exactly one of the two. The framework requires " +
+			"every child of a write-only nested attribute to be write-only too, so `file_name` " +
+			"leaves state along with `blob` on that path; nothing depends on it being there. " +
+			"See the [Managing secrets](../guides/managing-secrets) guide for how the two " +
+			"compare.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the signing configuration.",
@@ -155,8 +167,19 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 			"provisioning_profiles": schema.ListNestedAttribute{
 				MarkdownDescription: "The provisioning profiles paired with the certificate. " +
 					"Changing this list in any way -- adding, removing or reordering a profile -- " +
-					"forces a new resource to be created, since there is no update route.",
-				Required: true,
+					"forces a new resource to be created, since there is no update route.\n\n" +
+					"Each `blob` is recorded in Terraform state in cleartext. Use " +
+					"`provisioning_profiles_wo` instead to keep the list out of state, at " +
+					"the cost of having to bump `provisioning_profiles_wo_version` to " +
+					"change it. Set exactly one of the two.",
+				// Optional, not Required as it once was, so that
+				// `provisioning_profiles_wo` can be used instead. Nothing about an
+				// existing configuration changes: iosSigningProfilesConfigValidator
+				// requires exactly one of the two, so a configuration that sets
+				// `provisioning_profiles` is still valid and one that sets neither is
+				// still refused -- with a different diagnostic than before, but at the
+				// same point in the run. `provisioning_profiles` is not deprecated.
+				Optional: true,
 				Validators: []validator.List{
 					listvalidator.SizeAtLeast(1),
 				},
@@ -185,6 +208,11 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 					},
 				},
 			},
+			// See ios_signing_config_write_only.go, including why the framework
+			// forces `file_name` to be write-only here too and why one version
+			// covers the whole list.
+			"provisioning_profiles_wo":         iosSigningProfilesWriteOnlyAttribute(),
+			"provisioning_profiles_wo_version": iosSigningProfilesWriteOnlyVersionAttribute(),
 		},
 	}
 }
@@ -199,10 +227,12 @@ func (r *iosSigningConfigResource) Configure(_ context.Context, req resource.Con
 	r.client = client
 }
 
-// ConfigValidators requires exactly one of the two organization attribute names.
+// ConfigValidators requires exactly one of the two organization attribute names,
+// and exactly one of the two provisioning profile list attribute names.
 func (r *iosSigningConfigResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		orgIDConfigValidator(),
+		iosSigningProfilesConfigValidator(),
 	}
 }
 
@@ -218,12 +248,13 @@ func (r *iosSigningConfigResource) Create(ctx context.Context, req resource.Crea
 		return
 	}
 
-	profiles := make([]circleci.CreateSigningProvisioningProfile, len(plan.ProvisioningProfiles))
-	for i, p := range plan.ProvisioningProfiles {
-		profiles[i] = circleci.CreateSigningProvisioningProfile{
-			FileName: p.FileName.ValueString(),
-			Blob:     p.Blob.ValueString(),
-		}
+	// From configuration, because `provisioning_profiles_wo` is null in the plan.
+	// See ios_signing_config_write_only.go.
+	profiles, ok := resolveIOSSigningProfiles(
+		ctx, req.Config, plan.ProvisioningProfiles, plan.ProvisioningProfilesWOVersion, &resp.Diagnostics,
+	)
+	if !ok {
+		return
 	}
 
 	cfg, err := r.client.CreateSigningConfig(ctx, circleci.CreateSigningConfigRequest{

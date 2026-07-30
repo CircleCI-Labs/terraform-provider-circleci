@@ -11,10 +11,6 @@ Fetches information about a CircleCI project and its settings.
 
 ## Example Usage
 
-```terraform
-data "circleci_project" "example" {
-  slug = "github/my-org/my-repo"
-}
-```
+{{ tffile "examples/data-sources/circleci_project/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

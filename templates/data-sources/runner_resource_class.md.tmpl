@@ -11,11 +11,6 @@ Fetches information about a CircleCI self-hosted runner resource class.
 
 ## Example Usage
 
-```terraform
-data "circleci_runner_resource_class" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  resource_class  = "my-namespace/my-runner"
-}
-```
+{{ tffile "examples/data-sources/circleci_runner_resource_class/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

@@ -13,21 +13,7 @@ Use this for a project Terraform creates. For a project that **already exists**,
 
 ## Example Usage
 
-```terraform
-resource "circleci_project" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  name            = "my-repo"
-
-  auto_cancel_builds            = true
-  build_fork_prs                = false
-  disable_ssh                   = true
-  forks_receive_secret_env_vars = false
-  set_github_status             = true
-  setup_workflows               = false
-  write_settings_requires_admin = false
-  pr_only_branch_overrides      = ["main", "develop"]
-}
-```
+{{ tffile "examples/resources/circleci_project/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

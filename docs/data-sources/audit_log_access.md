@@ -17,7 +17,7 @@ Check this before creating a `circleci_audit_log_config`: creating one against a
 
 ```terraform
 data "circleci_audit_log_access" "org" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # Fail the plan with a clear message instead of letting a

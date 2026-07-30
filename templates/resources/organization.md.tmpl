@@ -38,12 +38,7 @@ re-adopt.
 
 ## Example Usage
 
-```terraform
-resource "circleci_organization" "example" {
-  name     = "my-org"
-  vcs_type = "github"
-}
-```
+{{ tffile "examples/resources/circleci_organization/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

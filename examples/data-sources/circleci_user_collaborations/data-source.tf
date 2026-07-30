@@ -21,7 +21,7 @@ output "standalone_organization_ids" {
 
 # Look one up by name and use its UUID directly.
 data "circleci_organization_settings" "acme" {
-  organization_id = local.standalone_orgs["acme"]
+  org_id = local.standalone_orgs["acme"]
 }
 
 # The slug is what the Insights data sources take, and it is not the same shape as

@@ -16,11 +16,15 @@ Works against both **CircleCI Cloud and CircleCI Server** — config policies ar
 ## Example Usage
 
 ```terraform
+data "circleci_organization" "acme" {
+  slug = "gh/acme"
+}
+
 # One resource owns the whole bundle: every policy for the organization's config
 # policy context lives in this map. Reading the Rego from files keeps it
-# reviewable and testable with `circleci policy test`.
+# reviewable and testable with `circleci policy test ./policies`.
 resource "circleci_config_policy_bundle" "config" {
-  owner_id = "00000000-0000-0000-0000-000000000000"
+  owner_id = data.circleci_organization.acme.id
 
   policies = {
     "allow-docker.rego"     = file("${path.module}/policies/allow-docker.rego")
@@ -29,31 +33,139 @@ resource "circleci_config_policy_bundle" "config" {
 }
 
 # Inline Rego works too, for a single short policy.
-resource "circleci_config_policy_bundle" "custom" {
-  owner_id       = "00000000-0000-0000-0000-000000000000"
-  policy_context = "custom"
+#
+# Note this is a *different* organization. There is exactly one bundle per
+# organization, because `policy_context` accepts only "config" — a second
+# circleci_config_policy_bundle for the same owner_id would delete this one's
+# policies on every apply, and the other would put them back on the next.
+data "circleci_organization" "sandbox" {
+  slug = "gh/acme-sandbox"
+}
+
+resource "circleci_config_policy_bundle" "sandbox" {
+  owner_id = data.circleci_organization.sandbox.id
 
   policies = {
     "deny-all.rego" = <<-EOT
-      package custom
+      package org
 
       policy_name["deny_all"]
 
       enable_rule["deny_all"]
 
-      deny_all = "nothing is permitted in this context"
+      hard_fail["deny_all"]
+
+      deny_all["the sandbox organization does not run pipelines"]
     EOT
   }
 }
 
 # Uploading policies does not enforce them; this is the switch that does.
 resource "circleci_config_policy_settings" "config" {
-  owner_id = "00000000-0000-0000-0000-000000000000"
+  owner_id = data.circleci_organization.acme.id
   enabled  = true
 
   # Enable enforcement only once the bundle is in place.
   depends_on = [circleci_config_policy_bundle.config]
 }
+```
+
+The two policies the example reads from disk:
+
+```rego
+# Restricts docker executors to an allow-list of registries: CircleCI's
+# convenience images and the organization's own Artifactory. A config policy is the
+# only place this can be enforced, because a pull request that adds an unapproved
+# image can also edit any check that lives in .circleci/config.yml.
+#
+# Run `circleci policy test ./policies` before applying: an uploaded policy takes
+# effect for the whole organization the moment enforcement is enabled.
+package org
+
+policy_name["allow_docker"]
+
+# Prefixes an image may start with. A bare "postgres:14" matches neither and is
+# therefore denied — pin it through the mirror instead.
+allowed_prefixes := ["cimg/", "acme.jfrog.io/ci/"]
+
+# Every docker image the compiled configuration asks for, paired with the job that
+# asked for it, so the denial message can name the job.
+images[[job_name, image]] {
+	some job_name
+	image := input.jobs[job_name].docker[_].image
+}
+
+approved(image) {
+	startswith(image, allowed_prefixes[_])
+}
+
+deny_unapproved_images[reason] {
+	[job_name, image] := images[_]
+	not approved(image)
+	reason := sprintf("job %q uses unapproved docker image %q", [job_name, image])
+}
+
+# Uploading the policy does not evaluate it and evaluating it does not block
+# anything: enable_rule opts the rule into evaluation, and hard_fail makes a
+# violation stop the pipeline rather than only annotate it.
+enable_rule["deny_unapproved_images"]
+
+hard_fail["deny_unapproved_images"]
+```
+
+```rego
+# Requires every workflow job that deploys to production to wait on a manual
+# approval job. Without a policy this is unenforceable: the commit that removes the
+# approval gate is the same commit that would need to be reviewed for removing it.
+package org
+
+policy_name["require_approval"]
+
+# Jobs whose name marks them as touching production. Matching on the name is crude,
+# but the compiled configuration is what a policy sees, and a naming convention is
+# cheaper to hold to than a job-level annotation.
+production(job_name) {
+	startswith(job_name, "deploy-production")
+}
+
+# A workflow entry is either a bare string or a single-key object carrying
+# `requires`, `context` and friends, so both shapes have to be handled.
+workflow_jobs[[workflow_name, job_name, job]] {
+	job_name := input.workflows[workflow_name].jobs[_]
+	is_string(job_name)
+	job := {}
+}
+
+workflow_jobs[[workflow_name, job_name, job]] {
+	entry := input.workflows[workflow_name].jobs[_]
+	is_object(entry)
+	some job_name
+	job := entry[job_name]
+}
+
+# An approval job is one declared with `type: approval` in the same workflow.
+approval_job(workflow_name, job_name) {
+	[workflow_name, job_name, job] := workflow_jobs[_]
+	job.type == "approval"
+}
+
+require_production_approval[reason] {
+	[workflow_name, job_name, job] := workflow_jobs[_]
+	production(job_name)
+	not gated(workflow_name, job)
+	reason := sprintf(
+		"workflow %q runs %q with no approval job in its requires",
+		[workflow_name, job_name],
+	)
+}
+
+gated(workflow_name, job) {
+	approval_job(workflow_name, job.requires[_])
+}
+
+enable_rule["require_production_approval"]
+
+hard_fail["require_production_approval"]
 ```
 
 <!-- schema generated by tfplugindocs -->

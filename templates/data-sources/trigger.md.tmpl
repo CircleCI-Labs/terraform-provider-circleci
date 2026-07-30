@@ -15,11 +15,6 @@ installation does not expose.
 
 ## Example Usage
 
-```terraform
-data "circleci_trigger" "example" {
-  id         = "00000000-0000-0000-0000-000000000000"
-  project_id = "00000000-0000-0000-0000-000000000001"
-}
-```
+{{ tffile "examples/data-sources/circleci_trigger/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

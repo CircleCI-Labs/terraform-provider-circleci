@@ -167,6 +167,14 @@ func (f *fakeProjectSettingsAPI) patch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for key, value := range body.Advanced {
+		// pr_only_branch_overrides is unordered on the API and comes back in an
+		// order of its own; see reorderedLikeTheAPI in
+		// webhook_resource_fake_test.go. Reordering it here is what makes an
+		// order-sensitive regression fail rather than pass.
+		if key == "pr_only_branch_overrides" {
+			value = reorderedLikeTheAPI(value)
+		}
+
 		f.current[key] = value
 	}
 
@@ -271,7 +279,7 @@ func projectSettingsState(t *testing.T, schema rschema.Schema, model projectSett
 func projectSettingsModel(slug string) projectSettingsResourceModel {
 	return projectSettingsResourceModel{
 		Slug:                  types.StringValue(slug),
-		PROnlyBranchOverrides: types.ListNull(types.StringType),
+		PROnlyBranchOverrides: types.SetNull(types.StringType),
 	}
 }
 
@@ -356,7 +364,7 @@ func TestProjectSettingsResourceCreateSendsEveryConfiguredSetting(t *testing.T) 
 
 	api, client := newFakeProjectSettingsAPI(t)
 
-	overrides, diags := types.ListValueFrom(t.Context(), types.StringType, []string{"main", "develop"})
+	overrides, diags := types.SetValueFrom(t.Context(), types.StringType, []string{"main", "develop"})
 	if diags.HasError() {
 		t.Fatalf("could not build the branch override list: %+v", diags)
 	}
@@ -422,7 +430,7 @@ func TestProjectSettingsResourceCreateWithEmptyBranchOverrides(t *testing.T) {
 	api, client := newFakeProjectSettingsAPI(t)
 	api.set("pr_only_branch_overrides", []any{"main"})
 
-	overrides, diags := types.ListValueFrom(t.Context(), types.StringType, []string{})
+	overrides, diags := types.SetValueFrom(t.Context(), types.StringType, []string{})
 	if diags.HasError() {
 		t.Fatalf("could not build the branch override list: %+v", diags)
 	}
@@ -945,9 +953,14 @@ func TestAccProjectSettingsResource(t *testing.T) {
 				},
 			},
 			{
+				// Two branches, not one: the fake answers with them in a different
+				// order (see reorderedLikeTheAPI in webhook_resource_fake_test.go), the
+				// way the real API does, so this step is what proves
+				// pr_only_branch_overrides being a Set rather than a List. With a single
+				// branch there is no order to get wrong and the step passes either way.
 				Config: testProjectSettingsResourceConfig(host, `  auto_cancel_builds       = true
   build_prs_only           = true
-  pr_only_branch_overrides = ["main"]`),
+  pr_only_branch_overrides = ["main", "develop"]`),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"circleci_project_settings.test",
@@ -957,9 +970,25 @@ func TestAccProjectSettingsResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project_settings.test",
 						tfjsonpath.New("pr_only_branch_overrides"),
-						knownvalue.ListExact([]knownvalue.Check{knownvalue.StringExact("main")}),
+						knownvalue.SetExact([]knownvalue.Check{
+							knownvalue.StringExact("main"),
+							knownvalue.StringExact("develop"),
+						}),
 					),
 				},
+			},
+			{
+				// The identical configuration, replanned: the plan must be empty.
+				//
+				// This is the shape of test the permanent diff needed and did not have.
+				// While pr_only_branch_overrides was a List, Terraform compared the
+				// configured order against the order CircleCI answered with and planned a
+				// change on every run, for ever, with nothing to apply.
+				Config: testProjectSettingsResourceConfig(host, `  auto_cancel_builds       = true
+  build_prs_only           = true
+  pr_only_branch_overrides = ["main", "develop"]`),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
 			},
 			{
 				ResourceName:  "circleci_project_settings.test",

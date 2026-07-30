@@ -11,10 +11,6 @@ Fetches information about a CircleCI context, including its restrictions.
 
 ## Example Usage
 
-```terraform
-data "circleci_context" "example" {
-  id = "00000000-0000-0000-0000-000000000000"
-}
-```
+{{ tffile "examples/data-sources/circleci_context/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

@@ -9,7 +9,7 @@ output "runner_hostnames" {
 
 # Every runner agent in an organization, across all of its namespaces.
 data "circleci_runners" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # Agents left behind on an older release, so they can be upgraded.

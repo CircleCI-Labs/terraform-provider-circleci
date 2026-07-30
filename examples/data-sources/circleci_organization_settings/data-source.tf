@@ -1,5 +1,5 @@
 data "circleci_organization_settings" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # Runner onboarding is gated on the terms of service, so check before creating

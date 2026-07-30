@@ -37,26 +37,7 @@ Note also that `is_running_disabled = true` stops the organization from running 
 
 ## Example Usage
 
-```terraform
-# Manage only the toggles you care about. Anything left out of the configuration
-# is not written, so CircleCI keeps whatever value it already has.
-resource "circleci_organization_settings" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-
-  # Accepting the runner terms of service is what unlocks self-hosted runners for
-  # the organization; runner resource classes and tokens cannot be created until
-  # this is true.
-  is_runner_terms_of_service_accepted = true
-
-  # Private orbs must be enabled before the organization can publish or reference
-  # one.
-  enable_private_orbs = true
-
-  # Tighten up credentials and context usage.
-  is_user_checkout_keys_disabled        = true
-  is_context_group_restriction_required = true
-}
-```
+{{ tffile "examples/resources/circleci_organization_settings/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

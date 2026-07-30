@@ -19,8 +19,8 @@ Creating an orb publishes no source. Use `circleci_orb_version` to publish versi
 
 ```terraform
 resource "circleci_orb_namespace" "example" {
-  name            = "acme"
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  name   = "acme"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # An orb is a named container in a namespace. Creating it publishes no source;

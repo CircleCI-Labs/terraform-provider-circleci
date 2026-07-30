@@ -31,13 +31,7 @@ attached to the old group are lost with it.
 
 ## Example Usage
 
-```terraform
-resource "circleci_group" "developers" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  name            = "developers"
-  description     = "Engineers who deploy to staging"
-}
-```
+{{ tffile "examples/resources/circleci_group/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

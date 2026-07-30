@@ -38,9 +38,19 @@ An installation configured for selected repositories reports only what it was gr
 ## Example Usage
 
 ```terraform
+variable "org_id" {
+  type        = string
+  description = <<-EOT
+    UUID of the CircleCI organization whose GitHub App installation is listed. This
+    is CircleCI's own organization id, not a GitHub id — the circleci_organization
+    data source reports it for a slug, and it is also in the URL of the
+    organization's settings page in the CircleCI web application.
+  EOT
+}
+
 # List every repository the CircleCI GitHub App can reach for an organization.
 data "circleci_github_app_repositories" "all" {
-  organization_id = var.organization_id
+  org_id = var.org_id
 }
 
 # Keyed by full name, this becomes a lookup table for external IDs.

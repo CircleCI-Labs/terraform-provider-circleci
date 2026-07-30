@@ -1,5 +1,5 @@
 data "circleci_audit_log_configs" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # There is at most one config per target_type, so this is a reasonable way to

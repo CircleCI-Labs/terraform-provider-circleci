@@ -27,7 +27,7 @@ data "circleci_webhook" "example" {
 ### Read-Only
 
 - `created_at` (String) The timestamp when the webhook was created.
-- `events` (List of String) The events that will trigger the webhook.
+- `events` (Set of String) The events that will trigger the webhook. Unordered: CircleCI does not preserve the order events were configured in.
 - `name` (String) The name of the webhook.
 - `scope_id` (String) The ID of the scope (project) for which the webhook is configured.
 - `scope_type` (String) The type of the scope.

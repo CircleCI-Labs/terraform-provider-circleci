@@ -21,7 +21,7 @@ var (
 
 // pipelineConfigDataSourceModel maps the data source schema.
 type pipelineConfigDataSourceModel struct {
-	PipelineRunId       types.String `tfsdk:"pipeline_run_id"`
+	RunID               types.String `tfsdk:"run_id"`
 	Source              types.String `tfsdk:"source"`
 	Compiled            types.String `tfsdk:"compiled"`
 	SetupConfig         types.String `tfsdk:"setup_config"`
@@ -59,7 +59,7 @@ func (d *pipelineConfigDataSource) Schema(_ context.Context, _ datasource.Schema
 			"Available on both CircleCI Cloud and CircleCI Server: this route is implemented directly in " +
 			"the same API application on both.",
 		Attributes: map[string]schema.Attribute{
-			"pipeline_run_id": schema.StringAttribute{
+			"run_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the pipeline run, as returned by " +
 					"[`circleci_pipeline_run`](pipeline_run).",
 				Required: true,
@@ -97,12 +97,12 @@ func (d *pipelineConfigDataSource) Read(ctx context.Context, req datasource.Read
 		return
 	}
 
-	pipelineRunID := config.PipelineRunId.ValueString()
+	runID := config.RunID.ValueString()
 
-	result, err := d.client.PipelineRuns().GetConfig(ctx, pipelineRunID)
+	result, err := d.client.PipelineRuns().GetConfig(ctx, runID)
 	if err != nil {
 		resp.Diagnostics.AddError(
-			"Unable to read configuration for CircleCI pipeline run "+pipelineRunID,
+			"Unable to read configuration for CircleCI pipeline run "+runID,
 			circleci.Detail(err),
 		)
 
@@ -110,7 +110,7 @@ func (d *pipelineConfigDataSource) Read(ctx context.Context, req datasource.Read
 	}
 
 	state := pipelineConfigDataSourceModel{
-		PipelineRunId:       config.PipelineRunId,
+		RunID:               config.RunID,
 		Source:              types.StringValue(result.Source),
 		Compiled:            types.StringValue(result.Compiled),
 		SetupConfig:         optionalString(result.SetupConfig),

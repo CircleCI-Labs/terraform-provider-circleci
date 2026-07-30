@@ -6,6 +6,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -31,7 +32,13 @@ type otelAPI struct {
 	mu        sync.Mutex
 	exporters []map[string]any
 	requests  []string
-	created   int
+	// createBodies holds every create request body, decoded generically. The
+	// write-only tests compare them across the `headers` and `headers_wo` paths:
+	// the two spellings must reach the API identically, and comparing the whole
+	// body means a difference in any key fails rather than only a difference in
+	// the one being looked at.
+	createBodies []map[string]any
+	created      int
 	// limit caps the number of exporters, standing in for the API's own limit.
 	limit int
 }
@@ -81,6 +88,11 @@ func newOTelServer(t *testing.T, api *otelAPI) *httptest.Server {
 func (a *otelAPI) handleCreate(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	t.Helper()
 
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("could not read the create body: %v", err)
+	}
+
 	var body struct {
 		OrgID    string            `json:"org_id"`
 		Endpoint string            `json:"endpoint"`
@@ -88,9 +100,21 @@ func (a *otelAPI) handleCreate(t *testing.T, w http.ResponseWriter, r *http.Requ
 		Insecure bool              `json:"insecure"`
 		Headers  map[string]string `json:"headers"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Errorf("create body is not JSON: %v", err)
 	}
+
+	// Recorded generically as well as decoded, so a test can compare two request
+	// bodies key for key without the comparison being limited to the fields this
+	// struct happens to name.
+	generic := map[string]any{}
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Errorf("create body is not a JSON object: %v", err)
+	}
+
+	a.mu.Lock()
+	a.createBodies = append(a.createBodies, generic)
+	a.mu.Unlock()
 	if body.OrgID == "" {
 		t.Error("create body omitted org_id; the create route has no org-id query parameter")
 	}

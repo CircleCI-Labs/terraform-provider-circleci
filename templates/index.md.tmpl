@@ -7,30 +7,117 @@ description: |-
 
 # circleci Provider
 
-Manage CircleCI organizations, projects, pipelines and settings with Terraform,
-using the same infrastructure-as-code patterns you already use for your VCS
-repositories. For large organizations this enables automated project onboarding
-for new teams.
+Manage CircleCI as code: organizations and projects, pipeline definitions and the
+triggers that run them, contexts and secrets, groups and access, self-hosted
+runners, orbs, config policies and organization settings.
+
+For a large organization the payoff is onboarding — a new team's project, its
+pipeline definition, its triggers and its context restrictions become a module
+you apply, rather than a checklist somebody works through in the UI.
 
 ## Example Usage
+
+A complete, working setup: a project, the pipeline definition that tells CircleCI
+where to find its configuration, a trigger so it actually runs, and a context
+holding a secret the jobs can use.
 
 ```terraform
 terraform {
   required_providers {
     circleci = {
       source  = "CircleCI-Public/circleci"
-      version = "~> 0.4"
+      version = "~> 0.5"
     }
   }
 }
 
-# CircleCI Cloud (the default).
-provider "circleci" {
-  # key is best supplied with the CIRCLE_TOKEN environment variable
+# The token is best supplied with the CIRCLE_TOKEN environment variable.
+provider "circleci" {}
+
+data "circleci_organization" "example" {
+  slug = "circleci/AaBbCcDdEeFfGg"
+}
+
+# GitHub App projects are addressed by a numeric VCS repository id, not by name.
+# This resolves one from owner/repo so you never paste a magic number.
+data "circleci_github_app_repository" "example" {
+  org_id    = data.circleci_organization.example.id
+  full_name = "example-org/example-repo"
+}
+
+resource "circleci_project" "example" {
+  name   = "example-repo"
+  org_id = data.circleci_organization.example.id
+}
+
+# A pipeline *definition* says where to check out and where the config lives.
+# It is not an execution — see the "CircleCI object model" guide.
+resource "circleci_pipeline_definition" "build" {
+  project_id  = circleci_project.example.id
+  name        = "build"
+  description = "Build and test on every push"
+
+  config_source_provider         = "github_app"
+  config_source_file_path        = ".circleci/config.yml"
+  config_source_repo_external_id = data.circleci_github_app_repository.example.external_id
+
+  checkout_source_provider         = "github_app"
+  checkout_source_repo_external_id = data.circleci_github_app_repository.example.external_id
+}
+
+# Without a trigger, a definition never runs.
+resource "circleci_trigger" "on_push" {
+  project_id             = circleci_project.example.id
+  pipeline_definition_id = circleci_pipeline_definition.build.id
+
+  event_source_provider         = "github_app"
+  event_source_repo_external_id = data.circleci_github_app_repository.example.external_id
+  event_preset                  = "all-pushes"
+}
+
+resource "circleci_context" "build" {
+  name   = "build-secrets"
+  org_id = data.circleci_organization.example.id
+}
+
+# value_wo is a write-only argument: it is never written to Terraform state.
+# Bump value_wo_version to rotate the secret. Plain `value` also works and is
+# stored in state; see the "Managing secrets" guide for the trade-off.
+resource "circleci_context_environment_variable" "registry_token" {
+  context_id       = circleci_context.build.id
+  name             = "REGISTRY_TOKEN"
+  value_wo         = var.registry_token
+  value_wo_version = 1
+}
+
+# Restrict the context so only this project can use it.
+resource "circleci_context_restriction" "build" {
+  context_id = circleci_context.build.id
+  type       = "project"
+  value      = circleci_project.example.id
 }
 ```
 
-### CircleCI Server
+## Where to start
+
+| If you want to | Read |
+|---|---|
+| Go from nothing to a running pipeline | [Getting started](guides/getting-started) |
+| Understand how CircleCI's objects relate | [CircleCI object model](guides/object-model) |
+| Keep secrets out of Terraform state | [Managing secrets](guides/managing-secrets) |
+| Onboard self-hosted runners | [Self-hosted runners](guides/self-hosted-runners) |
+| Move off a community provider | [Migrating from community providers](guides/migrating-from-community-providers) |
+| Replace a legacy scheduled pipeline | [Migrating scheduled pipelines](guides/migrating-scheduled-pipelines) |
+| Update names deprecated in 0.5.0 | [Renaming pipeline resources and data sources](guides/renaming-pipeline-types) |
+
+-> **The one distinction worth learning first.** A pipeline **definition** is
+configuration — where to check out, where the config file is. A pipeline **run**
+is one execution of a definition, and it spawns workflows and jobs. Terraform
+manages definitions and reads runs. The
+[object model](guides/object-model) guide covers this properly, because getting
+it backwards is the most common source of confusion.
+
+## CircleCI Server
 
 ```terraform
 provider "circleci" {
@@ -54,6 +141,12 @@ export CIRCLE_TOKEN="..."
 Some resources need a token belonging to a user with organization admin
 permissions. Notably, creating a `user-key` checkout key requires a personal
 token rather than a project token.
+
+~> **The token is a person's.** CircleCI has no organization-scoped API token, so
+whatever runs `terraform apply` holds one specific human's credential: it stops
+working when they leave, and every change Terraform makes is attributed to them
+in the audit log. Plan for a dedicated machine user rather than discovering this
+later.
 
 ## Environment variables
 
@@ -83,7 +176,6 @@ Each resource's documentation states its availability. In summary:
 | Contexts, context restrictions, context environment variables | yes | yes |
 | Projects, project settings, project environment variables | yes | yes |
 | Checkout keys | yes[^ckeyvcs] | yes |
-| Context restrictions (`project`, `expression`) | yes | yes |
 | Groups, group membership, project role grants | yes[^standalone] | **no** |
 | Webhooks | yes | yes |
 | Plural list data sources (contexts, webhooks, env vars) | yes | yes |
@@ -91,7 +183,7 @@ Each resource's documentation states its availability. In summary:
 | URL orb allow list | yes | yes |
 | Config policies | yes[^policyplan] | yes[^policyplan] |
 | OIDC custom claims | yes | yes[^oidcserver2] |
-| OpenTelemetry exporters | yes | ? |
+| OpenTelemetry exporters | yes | unverified[^otelserver] |
 | Pipeline definitions and triggers | yes | **no** |
 | Organization settings | yes | **no** |
 | Orb namespaces, orbs, orb versions | yes | **no** |
@@ -100,6 +192,14 @@ Each resource's documentation states its availability. In summary:
 on CircleCI Server. The `pipeline-definitions` and `triggers` endpoints they
 depend on are not exposed by a Server installation. Pipeline *run* data sources —
 `circleci_pipeline_run` and the run-scoped data sources beside it — work on both.
+
+~> **Server behaviour is reasoned, not measured.** No CircleCI Server
+installation has been available to test against, so every entry in the Server
+column above is derived from which routes a Server installation exposes rather
+than from a run against one. Note that "the route is v2" is *not* on its own
+sufficient — `circleci_pipeline_definition` is v2 and still unavailable — so
+treat a `yes` in that column as well-founded but unconfirmed, and please report
+anything that disagrees.
 
 ### The `host` attribute
 
@@ -119,3 +219,4 @@ suffix is stripped automatically — but the provider emits a warning. Remove th
 
 [^policyplan]: Requires the Scale plan on CircleCI Cloud, or CircleCI Server 4.2 and later.
 [^oidcserver2]: CircleCI Server 4.4 and later. Not available in air-gapped installations.
+[^otelserver]: The route is v2, which Server serves in general, but a Server installation only forwards a subset of paths to the service behind this endpoint. Unconfirmed either way.

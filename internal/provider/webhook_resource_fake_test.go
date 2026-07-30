@@ -18,6 +18,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // This file backs `circleci_webhook` (webhook_resource.go) and its singular
@@ -113,10 +115,53 @@ func (a *fakeWebhookAPI) lastRequest(t *testing.T, method, path string) fakeReco
 	return last
 }
 
+// reorderedLikeTheAPI returns an unordered collection in a DIFFERENT order from
+// the one it was given.
+//
+// This is not gratuitous. CircleCI stores `events` and
+// `pr_only_branch_overrides` as unordered collections and reports them back in an
+// order of its own choosing. Verified against the live API:
+//
+//	PATCH pr_only_branch_overrides ["zebra","alpha","main","beta"]
+//	→ GET  pr_only_branch_overrides ["zebra","main","alpha","beta"]
+//
+// stable across subsequent reads, but not the order it was given. Declared as
+// Terraform lists, both attributes therefore showed a change on every plan with
+// nothing to apply.
+//
+// The whole fake-backed suite missed that because every fake here echoed the
+// submitted order straight back, which is the one behaviour the real API does not
+// have. A fake that cannot be wrong in the way the API is wrong cannot catch the
+// bug the API causes. Reversing is the cheapest order that differs for any
+// collection of two or more elements, so an order-sensitive regression — reverting
+// either attribute to a ListAttribute, say — fails the suite immediately with
+// "Provider produced inconsistent result after apply".
+//
+// A collection of one element is returned unchanged, which is unavoidable and
+// harmless: the tests that must detect ordering all submit two or more.
+func reorderedLikeTheAPI(collection any) any {
+	values, ok := collection.([]any)
+	if !ok {
+		return collection
+	}
+
+	// A copy, never a reversal in place: the same slice is held by the recorded
+	// request bodies the tests assert the *sent* order on.
+	reordered := make([]any, 0, len(values))
+	for index := len(values) - 1; index >= 0; index-- {
+		reordered = append(reordered, values[index])
+	}
+
+	return reordered
+}
+
 // buildRecord answers exactly like the real API would: verify_tls defaults to
 // true when absent, and signing_secret is stored only when the REAL key
 // ("signing_secret") is present in the body — never the SDK's misspelled
 // "signing-secret".
+//
+// The stored events are deliberately in a different order from the submitted
+// ones; see reorderedLikeTheAPI.
 func (a *fakeWebhookAPI) buildRecord(id string, body map[string]any) map[string]any {
 	verifyTLS := true
 	if v, ok := body["verify_tls"].(bool); ok {
@@ -132,7 +177,9 @@ func (a *fakeWebhookAPI) buildRecord(id string, body map[string]any) map[string]
 		masked = "****"
 	}
 
-	events := body["events"]
+	// Not body["events"] as submitted: the API returns the events in an order of
+	// its own. See reorderedLikeTheAPI.
+	events := reorderedLikeTheAPI(body["events"])
 
 	scope := map[string]any{"id": "", "type": ""}
 	if s, ok := body["scope"].(map[string]any); ok {
@@ -307,14 +354,32 @@ func TestWebhookResourceUnit_CRUD(t *testing.T) {
 			},
 			{
 				// Update events and url in place.
+				//
+				// Two events, in an order the fake will not echo back: the fake returns
+				// them reversed, the way the real API returns them in an order of its
+				// own (see reorderedLikeTheAPI). That is what makes this step exercise
+				// `events` being a Set rather than a List.
 				Config: webhookFakeResourceConfig(host, "hook-1", "https://example.com/hook-2", "s3cr3t", []string{"workflow-completed", "job-completed"}),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("circleci_webhook.test", tfjsonpath.New("url"), knownvalue.StringExact("https://example.com/hook-2")),
-					statecheck.ExpectKnownValue("circleci_webhook.test", tfjsonpath.New("events"), knownvalue.ListExact([]knownvalue.Check{
+					statecheck.ExpectKnownValue("circleci_webhook.test", tfjsonpath.New("events"), knownvalue.SetExact([]knownvalue.Check{
 						knownvalue.StringExact("workflow-completed"),
 						knownvalue.StringExact("job-completed"),
 					})),
 				},
+			},
+			{
+				// The identical configuration, replanned: the plan must be empty.
+				//
+				// This is the shape of test the original bug needed and did not have.
+				// `events` was a ListAttribute, and the API returns the events in an
+				// order of its own choosing, so Terraform compared the configured order
+				// against the returned order and planned a change on every run for ever,
+				// with nothing to apply. Now that it is a Set the order is not part of
+				// the value, so a re-plan against unchanged state is empty.
+				Config:             webhookFakeResourceConfig(host, "hook-1", "https://example.com/hook-2", "s3cr3t", []string{"workflow-completed", "job-completed"}),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
 			},
 			{
 				// Rename in place. `name` is updatable on this resource, so a rename
@@ -342,6 +407,128 @@ func TestWebhookResourceUnit_CRUD(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestFakeAPIsDoNotEchoCollectionOrder guards the guard.
+//
+// Requirement for every test above that proves `events` and
+// `pr_only_branch_overrides` are order-insensitive: the fakes must answer in a
+// different order from the one they were given, because the real API does. A fake
+// that quietly goes back to echoing the submitted order would make every one of
+// those tests pass whatever the attribute's type is, which is precisely the state
+// this suite was in while the permanent diff shipped.
+func TestFakeAPIsDoNotEchoCollectionOrder(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reorderedLikeTheAPI reverses", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := reorderedLikeTheAPI([]any{"a", "b", "c"}).([]any)
+		if !ok {
+			t.Fatalf("reorderedLikeTheAPI returned %T, want []any", got)
+		}
+		if len(got) != 3 || got[0] != "c" || got[1] != "b" || got[2] != "a" {
+			t.Errorf("reorderedLikeTheAPI([a b c]) = %v, want [c b a]", got)
+		}
+
+		// Anything that is not a JSON array passes straight through, so an absent
+		// key stays absent rather than becoming an empty array.
+		if got := reorderedLikeTheAPI(nil); got != nil {
+			t.Errorf("reorderedLikeTheAPI(nil) = %v, want nil", got)
+		}
+	})
+
+	t.Run("the webhook fake stores events reordered", func(t *testing.T) {
+		t.Parallel()
+
+		api, _ := newFakeWebhookAPI(t)
+
+		submitted := []any{"workflow-completed", "job-completed"}
+		record := api.buildRecord("id", map[string]any{"events": submitted})
+
+		stored, ok := record["events"].([]any)
+		if !ok {
+			t.Fatalf("the fake stored events as %T, want []any", record["events"])
+		}
+		if len(stored) != 2 || stored[0] != "job-completed" {
+			t.Errorf("the fake stored events as %v, want them reordered relative to the submitted %v — "+
+				"a fake that echoes the submitted order cannot catch the permanent diff on events",
+				stored, submitted)
+		}
+		// The submitted slice must be untouched: tests assert on the order the
+		// provider *sent*.
+		if submitted[0] != "workflow-completed" {
+			t.Errorf("the fake reversed the submitted slice in place (%v), corrupting the recorded "+
+				"request body", submitted)
+		}
+	})
+
+	t.Run("the project settings fake stores branch overrides reordered", func(t *testing.T) {
+		t.Parallel()
+
+		api, client := newFakeProjectSettingsAPI(t)
+
+		branches := []string{"zebra", "alpha", "main", "beta"}
+		if _, err := client.UpdateProjectSettings(t.Context(), "github", "acme", "repo",
+			circleci.ProjectSettings{PROnlyBranchOverrides: &branches},
+		); err != nil {
+			t.Fatalf("could not write the branch overrides: %v", err)
+		}
+
+		read, err := client.GetProjectSettings(t.Context(), "github", "acme", "repo")
+		if err != nil {
+			t.Fatalf("could not read the branch overrides back: %v", err)
+		}
+
+		got := derefBranches(read.PROnlyBranchOverrides)
+		if len(got) != len(branches) {
+			t.Fatalf("read back %v, want the same four branches as %v", got, branches)
+		}
+		if got[0] == branches[0] && got[1] == branches[1] {
+			t.Errorf("the fake read back %v, the order it was given — it must answer in an order of "+
+				"its own, the way the real API does, or no test here can catch the permanent diff on "+
+				"pr_only_branch_overrides", got)
+		}
+
+		// The sent order must still be recorded as sent.
+		sent, ok := api.onlyPatch(t)["pr_only_branch_overrides"].([]any)
+		if !ok {
+			t.Fatalf("the fake recorded pr_only_branch_overrides as %T, want a list",
+				api.onlyPatch(t)["pr_only_branch_overrides"])
+		}
+		if sent[0] != "zebra" || sent[1] != "alpha" {
+			t.Errorf("the recorded PATCH body says %v was sent, but %v was: the fake reordered the "+
+				"recorded body rather than a copy", sent, branches)
+		}
+	})
+}
+
+// TestWebhookResourceUnit_RejectsUnknownEventName covers the schema-level
+// validator on `events`.
+//
+// The attribute's description has always claimed the valid values are
+// workflow-completed and job-completed, but nothing enforced it, so a typo cost a
+// round-trip and came back as an opaque HTTP 400 from the API. The valid names
+// come from circleci.WebhookEvents so the validator, the description and the
+// client cannot drift apart.
+func TestWebhookResourceUnit_RejectsUnknownEventName(t *testing.T) {
+	api, host := newFakeWebhookAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: webhookFakeResourceConfig(host, "hook-1", "https://example.com/hook", "s3cr3t",
+				[]string{"workflow-completed", "worfklow-completed"}),
+			ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Match.*worfklow-completed`),
+		}},
+	})
+
+	// Validation happens before anything is written, so the invalid name must never
+	// have reached the API at all.
+	if requests := api.recorded(); len(requests) != 0 {
+		t.Errorf("the provider made %d request(s) for a configuration that fails validation, want 0: %+v",
+			len(requests), requests)
+	}
 }
 
 // TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire is the money test for

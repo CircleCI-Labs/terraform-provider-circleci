@@ -1,7 +1,7 @@
 # Lists every context in the organization, following pagination internally.
 # Available on both CircleCI Cloud and CircleCI Server.
 data "circleci_contexts" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 output "circleci_context_names" {

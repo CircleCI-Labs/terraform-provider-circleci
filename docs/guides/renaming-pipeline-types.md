@@ -146,7 +146,8 @@ version, update them directly; there is no compatibility shim.
 | `circleci_pipeline_config` | `circleci_pipeline_run_config` |
 | `circleci_pipeline_values` | `circleci_pipeline_run_values` |
 | `circleci_pipeline_workflows` | `circleci_pipeline_run_workflows` |
-| `pipeline_id` on the two data sources above | `run_id` |
+| `pipeline_id` on `circleci_pipeline_run_values` and `circleci_pipeline_run_workflows` | `run_id` |
+| `pipeline_run_id` on `circleci_pipeline_run_config` | `run_id` |
 | `pipelines` on `circleci_pipeline_definitions` | `pipeline_definitions` |
 | `pipeline_id` on `circleci_triggers` | `pipeline_definition_id` |
 | nested `pipeline_id` on `circleci_deploy_component` | `run_id` |

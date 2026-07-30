@@ -28,7 +28,7 @@ func TestPipelineConfigDataSourceSchema(t *testing.T) {
 		t.Fatalf("schema validation returned diagnostics: %v", diags)
 	}
 
-	if !resp.Schema.Attributes["pipeline_run_id"].IsRequired() {
+	if !resp.Schema.Attributes["run_id"].IsRequired() {
 		t.Error("pipeline_run_id is not required, but it is the lookup key")
 	}
 }
@@ -42,7 +42,7 @@ func TestAccPipelineConfigDataSource(t *testing.T) {
 			{
 				Config: observabilityProviderConfig(host, "cloud") + fmt.Sprintf(`
 data "circleci_pipeline_run_config" "test" {
-  pipeline_run_id = %[1]q
+  run_id          = %[1]q
 }
 `, testRunID),
 				ConfigStateChecks: []statecheck.StateCheck{
@@ -76,7 +76,7 @@ func TestAccPipelineConfigDataSource_availableOnServer(t *testing.T) {
 			{
 				Config: observabilityProviderConfig(host, "server") + fmt.Sprintf(`
 data "circleci_pipeline_run_config" "test" {
-  pipeline_run_id = %[1]q
+  run_id          = %[1]q
 }
 `, testRunID),
 				ConfigStateChecks: []statecheck.StateCheck{

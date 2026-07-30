@@ -20,17 +20,20 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &projectEnvironmentVariableResource{}
-	_ resource.ResourceWithConfigure   = &projectEnvironmentVariableResource{}
-	_ resource.ResourceWithImportState = &projectEnvironmentVariableResource{}
+	_ resource.Resource                     = &projectEnvironmentVariableResource{}
+	_ resource.ResourceWithConfigure        = &projectEnvironmentVariableResource{}
+	_ resource.ResourceWithImportState      = &projectEnvironmentVariableResource{}
+	_ resource.ResourceWithConfigValidators = &projectEnvironmentVariableResource{}
 )
 
 // projectEnvironmentVariableResourceModel maps the resource schema.
 type projectEnvironmentVariableResourceModel struct {
-	Name        types.String `tfsdk:"name"`
-	Value       types.String `tfsdk:"value"`
-	ProjectSlug types.String `tfsdk:"project_slug"`
-	CreatedAt   types.String `tfsdk:"created_at"`
+	Name           types.String `tfsdk:"name"`
+	Value          types.String `tfsdk:"value"`
+	ValueWO        types.String `tfsdk:"value_wo"`
+	ValueWOVersion types.Int64  `tfsdk:"value_wo_version"`
+	ProjectSlug    types.String `tfsdk:"project_slug"`
+	CreatedAt      types.String `tfsdk:"created_at"`
 }
 
 // NewProjectEnvironmentVariableResource is a helper function to simplify the provider implementation.
@@ -61,13 +64,20 @@ func (r *projectEnvironmentVariableResource) Schema(_ context.Context, _ resourc
 				},
 			},
 			"value": schema.StringAttribute{
-				MarkdownDescription: "The value of the environment variable. Changing this value forces a new resource to be created.",
-				Required:            true,
-				Sensitive:           true,
+				MarkdownDescription: "The value of the environment variable. Changing this value " +
+					"forces a new resource to be created, because CircleCI has no route that " +
+					"updates a project environment variable in place.\n\n" +
+					"It is recorded in Terraform state in cleartext. Use `value_wo` instead to keep " +
+					"it out of state, at the cost of having to bump `value_wo_version` to rotate it. " +
+					"Set exactly one of the two.",
+				Optional:  true,
+				Sensitive: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
+			"value_wo":         writeOnlyValueAttribute(true),
+			"value_wo_version": writeOnlyValueVersionAttribute(true),
 			"project_slug": schema.StringAttribute{
 				MarkdownDescription: "The project slug in the format `vcs-type/org-name/repo-name`. Changing this value forces a new resource to be created.",
 				Required:            true,
@@ -83,6 +93,11 @@ func (r *projectEnvironmentVariableResource) Schema(_ context.Context, _ resourc
 	}
 }
 
+// ConfigValidators requires exactly one of `value` and `value_wo`.
+func (r *projectEnvironmentVariableResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{envVarValueConfigValidator()}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *projectEnvironmentVariableResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	// Retrieve values from plan
@@ -93,13 +108,18 @@ func (r *projectEnvironmentVariableResource) Create(ctx context.Context, req res
 		return
 	}
 
+	value, ok := resolveEnvVarValue(ctx, req.Config, plan.Value, plan.ValueWOVersion, &resp.Diagnostics)
+	if !ok {
+		return
+	}
+
 	// Create new project environment variable. The returned Value is masked (the
 	// create response is read back through the same masking view as the list and
 	// single-get routes), so it is never mapped back onto plan.Value here.
 	newEnvVar, err := r.client.CreateProjectEnvironmentVariable(ctx, plan.ProjectSlug.ValueString(),
 		circleci.ProjectEnvironmentVariableInput{
 			Name:  plan.Name.ValueString(),
-			Value: plan.Value.ValueString(),
+			Value: value,
 		},
 	)
 	if err != nil {
@@ -161,7 +181,11 @@ func (r *projectEnvironmentVariableResource) Read(ctx context.Context, req resou
 	}
 }
 
-// Update updates the resource and sets the updated Terraform state on success.
+// Update is unreachable and deliberately empty: the API has POST and DELETE
+// only, so every attribute that can change carries RequiresReplace — `value`
+// directly, and `value_wo` through `value_wo_version`, since a write-only
+// attribute cannot carry the modifier itself (see
+// environment_variable_write_only.go).
 func (r *projectEnvironmentVariableResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 }
 

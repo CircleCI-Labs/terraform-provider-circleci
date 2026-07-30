@@ -102,7 +102,7 @@ Leave this unset to let CircleCI manage it; the provider only writes settings th
 - `forks_receive_secret_env_vars` (Boolean) Run forked pull requests with this project's configuration, environment variables and secrets. The build cache is also shared between the original repository and all forks, so enabling this exposes both to anyone who can open a pull request.
 
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
-- `pr_only_branch_overrides` (List of String) Branches that always trigger a build, even when `build_prs_only` is enabled. The list replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches.
+- `pr_only_branch_overrides` (Set of String) Branches that always trigger a build, even when `build_prs_only` is enabled. The set replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches. Order is not significant: CircleCI does not preserve the order branches are sent in.
 - `set_github_status` (Boolean) Report the status of every pushed commit to GitHub's status API. Updates are reported per job.
 
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
@@ -133,6 +133,6 @@ The import records only the slug and leaves every setting `null`, so the first p
 
 - **`oss` is read-only.** CircleCI reports it but the settings API does not accept it: a request carrying it answers `400 Unexpected field 'advanced.oss'.` and is rejected in full, so a single unwritable field would fail every write. CircleCI derives the value from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application. This resource reports it and never writes it.
 - **`build_fork_prs = true` requires `forks_receive_secret_env_vars` to be set explicitly.** The provider reports an error at validate time otherwise, because the unset default is **`true`** on a private project: fork pull requests would receive the project's environment variables, secrets and build cache, so anyone who can open one could read them.
-- **`pr_only_branch_overrides` replaces the whole list.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches.
+- **`pr_only_branch_overrides` replaces the whole set.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches. It is a set rather than a list because CircleCI does not preserve the order branches are sent in — as a list it produced a plan that never converged.
 - **`write_settings_requires_admin = true` can lock the provider out** of further changes if its token does not belong to an organization administrator.
 - **`terraform destroy` writes nothing.** Settings cannot be deleted or reset, so destroying this resource only drops it from state and the project keeps its current values.

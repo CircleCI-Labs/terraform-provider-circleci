@@ -25,7 +25,8 @@ resource "circleci_checkout_key" "deploy" {
 }
 
 # A user key: carries the permissions of the user whose API token created it, so
-# it can also check out other repositories such as private submodules.
+# it can also check out other repositories such as private submodules. Creating
+# one requires a user API token rather than a project token.
 resource "circleci_checkout_key" "user" {
   project_slug = "github/my-org/my-repo"
   type         = "user-key"

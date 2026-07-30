@@ -11,15 +11,33 @@ Manages an environment variable stored in a CircleCI context.
 
 ## Example Usage
 
-```terraform
-resource "circleci_context_environment_variable" "example" {
-  context_id = "00000000-0000-0000-0000-000000000000"
-  name       = "MY_SECRET"
-  value      = "my-secret-value"
-}
-```
+{{ tffile "examples/resources/circleci_context_environment_variable/resource.tf" }}
+
+### Keeping the value out of state
+
+`value` is stored in Terraform state in cleartext. `value_wo` is the same argument
+as a [write-only argument](https://developer.hashicorp.com/terraform/language/resources/ephemeral/write-only)
+(Terraform 1.11 or later): it is sent to CircleCI and then discarded, so it appears
+in neither state nor the plan file. Set exactly one of the two.
+
+Because nothing derived from the value is stored, Terraform cannot tell that
+`value_wo` changed. Increment `value_wo_version` to rotate the secret — the
+`registry_token` resource in the example above shows the pair in use, fed from an
+ephemeral input variable so that the secret is never written to disk either.
 
 {{ .SchemaMarkdown | trimspace }}
+
+## Detecting changes made outside Terraform
+
+The API never returns a context environment variable's value, so the provider
+compares timestamps instead. `updated_at` records what CircleCI reported the last
+time Terraform wrote the variable; `remote_updated_at` records what it reports now.
+When the second is later than the first, something else wrote the variable, and the
+next apply re-asserts the configured value.
+
+Note that CircleCI bumps its timestamp on every write, including one that stores an
+identical value — so any external write, even a harmless one, produces one
+corrective apply.
 
 ## Import
 

@@ -13,6 +13,9 @@ output "uuid_slug" {
   )
 }
 
+# The usual reason to want the function: the data source's `slug` is a single
+# string, so building it by hand means an interpolation with two slashes in it that
+# nothing checks. The function validates each part instead.
 data "circleci_project" "example" {
-  project_slug = provider::circleci::project_slug("gh", "my-org", "my-repo")
+  slug = provider::circleci::project_slug("gh", "my-org", "my-repo")
 }

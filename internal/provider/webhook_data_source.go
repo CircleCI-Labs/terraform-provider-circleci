@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -29,7 +28,7 @@ type webhookDataSourceModel struct {
 	SigningSecret types.String `tfsdk:"signing_secret"`
 	ScopeId       types.String `tfsdk:"scope_id"`
 	ScopeType     types.String `tfsdk:"scope_type"`
-	Events        types.List   `tfsdk:"events"`
+	Events        types.Set    `tfsdk:"events"`
 	CreatedAt     types.String `tfsdk:"created_at"`
 	UpdatedAt     types.String `tfsdk:"updated_at"`
 }
@@ -94,10 +93,14 @@ func (d *WebhookDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "The type of the scope.",
 				Computed:            true,
 			},
-			"events": schema.ListAttribute{
-				MarkdownDescription: "The events that will trigger the webhook.",
-				Computed:            true,
-				ElementType:         types.StringType,
+			// A Set, matching `circleci_webhook`'s own `events`: CircleCI returns a
+			// webhook's events in an order of its own choosing rather than the order
+			// they were submitted in, so there is no order here worth reporting.
+			"events": schema.SetAttribute{
+				MarkdownDescription: "The events that will trigger the webhook. Unordered: CircleCI " +
+					"does not preserve the order events were configured in.",
+				Computed:    true,
+				ElementType: types.StringType,
 			},
 			"created_at": schema.StringAttribute{
 				MarkdownDescription: "The timestamp when the webhook was created.",
@@ -141,12 +144,8 @@ func (d *WebhookDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 
-	// Convert events to types.List
-	eventsAttributeValues := make([]attr.Value, len(webhookData.Events))
-	for i, event := range webhookData.Events {
-		eventsAttributeValues[i] = types.StringValue(event)
-	}
-	eventsList, diags := types.ListValue(types.StringType, eventsAttributeValues)
+	// Convert events to types.Set
+	events, diags := types.SetValueFrom(ctx, types.StringType, webhookData.Events)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -164,7 +163,7 @@ func (d *WebhookDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		VerifyTls: types.BoolValue(webhookData.VerifyTLS),
 		ScopeId:   types.StringValue(webhookData.Scope.ID),
 		ScopeType: types.StringValue(webhookData.Scope.Type),
-		Events:    eventsList,
+		Events:    events,
 		CreatedAt: types.StringValue(webhookData.CreatedAt),
 		UpdatedAt: types.StringValue(webhookData.UpdatedAt),
 	}

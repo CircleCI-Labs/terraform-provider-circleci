@@ -1,7 +1,7 @@
 # Lists every deploy/release environment in the organization.
 # Available on CircleCI Cloud only.
 data "circleci_deploy_environments" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 output "circleci_deploy_environment_names" {

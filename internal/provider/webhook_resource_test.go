@@ -60,7 +60,7 @@ func TestAccWebhookResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_webhook.test_webhook",
 						tfjsonpath.New("events"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("workflow-completed"),
 						}),
 					),
@@ -114,7 +114,7 @@ func TestAccWebhookResourceUpdate(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_webhook.test_webhook",
 						tfjsonpath.New("events"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("workflow-completed"),
 						}),
 					),
@@ -137,7 +137,7 @@ func TestAccWebhookResourceUpdate(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_webhook.test_webhook",
 						tfjsonpath.New("events"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("workflow-completed"),
 							knownvalue.StringExact("job-completed"),
 						}),

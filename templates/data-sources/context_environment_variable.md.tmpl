@@ -13,11 +13,6 @@ Fetches metadata about a CircleCI context environment variable.
 
 ## Example Usage
 
-```terraform
-data "circleci_context_environment_variable" "example" {
-  context_id = "00000000-0000-0000-0000-000000000000"
-  name       = "MY_SECRET"
-}
-```
+{{ tffile "examples/data-sources/circleci_context_environment_variable/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

@@ -50,6 +50,27 @@ jobs:
             # Verifies that generated documentation, formatting and go.mod are
             # committed. This regenerates docs, so it needs terraform on PATH.
             - run: task ci:diff
+            # Type-checks every example in examples/ against the provider's
+            # real schema. This is here because nothing else looks at those
+            # files: they declare no provider and are never applied, so the
+            # only check they had was `terraform fmt`, which parses HCL and
+            # stops there.
+            #
+            # Three broken examples were found by three separate routes in a
+            # single day — a reader trying one, a docs review, and an ad-hoc
+            # script — and every one of them was plausible-looking HCL that
+            # only failed at plan time: an attribute that does not exist in the
+            # schema, a `file()` pointing at a path nobody had created, and a
+            # reference to a resource the example never declared. `terraform
+            # fmt` cannot catch any of those, because all three are
+            # syntactically fine. Examples are the part of the documentation
+            # people copy verbatim, so a broken one is worse than none.
+            #
+            # Hermetic by construction: dev_overrides points Terraform at the
+            # locally built provider, so there is no `terraform init`, no
+            # registry call and no credential. It therefore runs on every
+            # build rather than behind a flag.
+            - run: task validate-examples
             # Reachability-based vulnerability scan. This is here because it
             # actually caught something: 14 reachable vulnerabilities, most of
             # them standard library issues fixed by a Go patch release, plus a

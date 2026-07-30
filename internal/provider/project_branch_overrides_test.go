@@ -13,6 +13,9 @@ import (
 
 // TestBranchOverrides is the regression test for pr_only_branch_overrides.
 //
+// The attribute is a Set rather than a List because CircleCI reports the branches
+// back in an order of its own choosing; see the schema in project_resource.go.
+//
 // The Create and Update paths previously built this slice with
 // attr.Value.String(), which renders a value the way Terraform displays it. A
 // branch therefore arrived at the API as `"main"` — including the quote
@@ -23,19 +26,19 @@ func TestBranchOverrides(t *testing.T) {
 
 	tests := []struct {
 		name string
-		list types.List
+		set  types.Set
 		want []string
 	}{
 		{
 			name: "single branch is unquoted",
-			list: types.ListValueMust(types.StringType, []attr.Value{
+			set: types.SetValueMust(types.StringType, []attr.Value{
 				types.StringValue("main"),
 			}),
 			want: []string{"main"},
 		},
 		{
 			name: "multiple branches",
-			list: types.ListValueMust(types.StringType, []attr.Value{
+			set: types.SetValueMust(types.StringType, []attr.Value{
 				types.StringValue("main"),
 				types.StringValue("develop"),
 				types.StringValue("release/1.x"),
@@ -43,23 +46,23 @@ func TestBranchOverrides(t *testing.T) {
 			want: []string{"main", "develop", "release/1.x"},
 		},
 		{
-			name: "empty list",
-			list: types.ListValueMust(types.StringType, []attr.Value{}),
+			name: "empty set",
+			set:  types.SetValueMust(types.StringType, []attr.Value{}),
 			want: []string{},
 		},
 		{
-			name: "null list",
-			list: types.ListNull(types.StringType),
+			name: "null set",
+			set:  types.SetNull(types.StringType),
 			want: nil,
 		},
 		{
-			name: "unknown list",
-			list: types.ListUnknown(types.StringType),
+			name: "unknown set",
+			set:  types.SetUnknown(types.StringType),
 			want: nil,
 		},
 		{
 			name: "branch containing a quote is not double-escaped",
-			list: types.ListValueMust(types.StringType, []attr.Value{
+			set: types.SetValueMust(types.StringType, []attr.Value{
 				types.StringValue(`odd"name`),
 			}),
 			want: []string{`odd"name`},
@@ -70,7 +73,7 @@ func TestBranchOverrides(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, diags := branchOverrides(context.Background(), tt.list)
+			got, diags := branchOverrides(context.Background(), tt.set)
 			if diags.HasError() {
 				t.Fatalf("branchOverrides returned diagnostics: %v", diags)
 			}

@@ -25,24 +25,7 @@ not try to read a receiver credential back out of it.
 
 ## Example Usage
 
-```terraform
-data "circleci_webhooks" "project" {
-  project_id = "00000000-0000-0000-0000-000000000000"
-}
-
-output "circleci_webhook_urls" {
-  value = [for webhook in data.circleci_webhooks.project.webhooks : webhook.url]
-}
-
-# Webhooks that would deliver payloads without verifying the receiver's
-# certificate, or without signing the payload at all.
-output "circleci_insecure_webhooks" {
-  value = [
-    for webhook in data.circleci_webhooks.project.webhooks : webhook.name
-    if !webhook.verify_tls || !webhook.has_signing_secret
-  ]
-}
-```
+{{ tffile "examples/data-sources/circleci_webhooks/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

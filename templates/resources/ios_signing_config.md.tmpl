@@ -21,17 +21,70 @@ Pairs a [`circleci_ios_signing_certificate`](./ios_signing_certificate) with one
 
 {{ tffile "examples/resources/circleci_ios_signing_config/resource.tf" }}
 
+### Keeping the provisioning profiles out of state
+
+`provisioning_profiles_wo` is a write-only alternative to `provisioning_profiles`, available with Terraform 1.11 or later. Set exactly one of the two.
+
+Because a write-only argument is never persisted, it is the only kind of argument an `ephemeral` value may be assigned to, which is what lets the profile come straight from a secret manager without passing through a `.tfvars` file:
+
+```terraform
+ephemeral "vault_kv_secret_v2" "ios_signing" {
+  mount = "secret"
+  name  = "ios/signing"
+}
+
+resource "circleci_ios_signing_config" "release" {
+  org_id         = "00000000-0000-0000-0000-000000000000"
+  name           = "release-signing"
+  certificate_id = circleci_ios_signing_certificate.distribution.id
+
+  provisioning_profiles_wo = [
+    {
+      file_name = "release.mobileprovision"
+      blob      = ephemeral.vault_kv_secret_v2.ios_signing.data["release_mobileprovision"]
+    },
+  ]
+  provisioning_profiles_wo_version = 1
+}
+```
+
+The trade between the two is a real one, in both directions:
+
+* `provisioning_profiles` records every `blob` in Terraform state in cleartext, and changing a profile is just editing the list — Terraform sees the change and replaces the resource.
+* `provisioning_profiles_wo` is sent to CircleCI and then discarded: nothing about it appears in state or the plan file. But because nothing derived from it is stored, Terraform cannot see that it changed, so **`provisioning_profiles_wo_version` must be incremented every time anything in the list changes**. Editing `provisioning_profiles_wo` on its own produces no diff and is never sent.
+
+**One counter covers the whole list**, because the list is one rotatable unit rather than a collection of independently rotatable ones: adding, removing, renewing or reordering a profile already replaces the resource (see "Immutability" below), so there is nothing a per-entry counter could express.
+
+#### `file_name` is write-only on that path too
+
+This is a constraint of the plugin framework rather than a design choice: every child attribute of a write-only nested attribute must itself be write-only, so `file_name` leaves state along with `blob`.
+
+Nothing depends on it being there:
+
+* CircleCI never returns a profile's content, and this resource's `Read` deliberately does not fold the API's list of profile *names* back into state either — on the `provisioning_profiles` path that would contradict the configured, non-null `blob` beside each name.
+* Importing has never recovered either field, on either path.
+* `certificate_file_name` and `certificate_type` come from the paired certificate, not from a profile.
+* The [`circleci_ios_signing_configs`](../data-sources/ios_signing_configs) data source does report profile names, but it reads them from CircleCI rather than from this resource's state, so it is unaffected by which spelling created the configuration.
+
+See [Managing secrets](../guides/managing-secrets) for the whole picture.
+
 {{ .SchemaMarkdown | trimspace }}
 
 ## Immutability
 
-The CircleCI API has no update endpoint for a signing configuration: the routes served is `GET`/`POST /signing/configs` and `DELETE /signing/configs/{id}` — there is not even a `GET /signing/configs/{id}` to read one back by itself (see "No singular data source" below). Every attribute is therefore `RequiresReplace`: adding, removing or renewing a provisioning profile, renaming the configuration, or repointing it at a different certificate are all a new resource, not an update.
+The CircleCI API has no update endpoint for a signing configuration: the routes served is `GET`/`POST /signing/configs` and `DELETE /signing/configs/{id}` — there is not even a `GET /signing/configs/{id}` to read one back by itself (see "No singular data source" below). Every attribute is therefore `RequiresReplace`, `provisioning_profiles_wo_version` included: adding, removing or renewing a provisioning profile, renaming the configuration, or repointing it at a different certificate are all a new resource, not an update.
+
+`provisioning_profiles_wo` itself carries no such marker, and could not usefully: a write-only attribute is null in both the plan and the state, so a plan modifier comparing the two never fires. `provisioning_profiles_wo_version` is what Terraform can see, so it is what drives the replacement.
+
+One consequence of there being no update route is that this resource cannot reproduce `hashicorp/terraform-provider-vault#2900`, where a write-only value sent only on the apply that bumped its version was omitted from an unrelated update and a full-replace endpoint then wiped the credential. Here every write is a create. The provider still sends the profiles on every write rather than gating them on the version, so the guarantee does not depend on the API staying that way.
 
 ## Security
 
-`provisioning_profiles[*].blob` is write-only, for the same reason and with the same consequences as `circleci_ios_signing_certificate`'s `certificate_blob`: CircleCI never returns a profile's content, so the only copy this provider can compare against on the next `terraform plan` lives in Terraform state, in cleartext. See that resource's "Security" section for how to source it and protect state accordingly.
+CircleCI never returns a provisioning profile's content. With `provisioning_profiles` that means the only copy this provider can compare against on the next `terraform plan` lives in Terraform state, in cleartext — the same position and the same consequences as `circleci_ios_signing_certificate`'s state-backed attributes. See that resource's "Security" section for how to source a credential and protect state accordingly.
 
 A provisioning profile is less sensitive than a certificate's private key — it authorizes devices and app identifiers rather than signing anything itself — but it is still not intended to be public, and the same practices apply: source it from a secret manager, and use an encrypted state backend.
+
+`provisioning_profiles_wo` removes the state copy entirely; see "Keeping the provisioning profiles out of state" above. It is the better option wherever Terraform 1.11 is available.
 
 ## No singular data source
 

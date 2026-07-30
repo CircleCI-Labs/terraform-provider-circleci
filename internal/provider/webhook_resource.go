@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -19,15 +19,17 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 
 	"terraform-provider-circleci/internal/circleci"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &webhookResource{}
-	_ resource.ResourceWithConfigure   = &webhookResource{}
-	_ resource.ResourceWithImportState = &webhookResource{}
+	_ resource.Resource                     = &webhookResource{}
+	_ resource.ResourceWithConfigure        = &webhookResource{}
+	_ resource.ResourceWithConfigValidators = &webhookResource{}
+	_ resource.ResourceWithImportState      = &webhookResource{}
 )
 
 // webhookResourceModel maps the resource schema.
@@ -37,11 +39,18 @@ type webhookResourceModel struct {
 	Url           types.String `tfsdk:"url"`
 	VerifyTls     types.Bool   `tfsdk:"verify_tls"`
 	SigningSecret types.String `tfsdk:"signing_secret"`
-	ScopeId       types.String `tfsdk:"scope_id"`
-	ScopeType     types.String `tfsdk:"scope_type"`
-	Events        types.List   `tfsdk:"events"`
-	CreatedAt     types.String `tfsdk:"created_at"`
-	UpdatedAt     types.String `tfsdk:"updated_at"`
+	// SigningSecretWO is always null here. The framework nullifies a write-only
+	// attribute in plan and state, so the field exists only to satisfy the schema;
+	// the value is read from configuration by resolveWebhookSigningSecret.
+	SigningSecretWO        types.String `tfsdk:"signing_secret_wo"`
+	SigningSecretWOVersion types.Int64  `tfsdk:"signing_secret_wo_version"`
+	ScopeId                types.String `tfsdk:"scope_id"`
+	ScopeType              types.String `tfsdk:"scope_type"`
+	// Events is a Set rather than a List because the API does not preserve the
+	// order the events were submitted in. See the schema for the whole story.
+	Events    types.Set    `tfsdk:"events"`
+	CreatedAt types.String `tfsdk:"created_at"`
+	UpdatedAt types.String `tfsdk:"updated_at"`
 }
 
 // NewWebhookResource is a helper function to simplify the provider implementation.
@@ -92,11 +101,23 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
 			},
+			// Optional, not Required as it once was, so that `signing_secret_wo` can
+			// be used instead. Nothing about an existing configuration changes:
+			// webhookSigningSecretConfigValidator requires exactly one of the two, so
+			// a configuration that sets `signing_secret` is still valid and one that
+			// sets neither is still refused — with a different diagnostic than
+			// before, but at the same point in the run. `signing_secret` is not
+			// deprecated.
 			"signing_secret": schema.StringAttribute{
-				MarkdownDescription: "The secret used to sign webhook payloads.",
-				Required:            true,
-				Sensitive:           true,
+				MarkdownDescription: "The secret used to sign webhook payloads.\n\n" +
+					"It is recorded in Terraform state in cleartext. Use `signing_secret_wo` " +
+					"instead to keep it out of state, at the cost of having to bump " +
+					"`signing_secret_wo_version` to rotate it. Set exactly one of the two.",
+				Optional:  true,
+				Sensitive: true,
 			},
+			"signing_secret_wo":         webhookSigningSecretWriteOnlyAttribute(),
+			"signing_secret_wo_version": webhookSigningSecretWriteOnlyVersionAttribute(),
 			"scope_id": schema.StringAttribute{
 				MarkdownDescription: "The ID of the scope (project) for which the webhook is configured. Changing this value forces a new resource to be created.",
 				Required:            true,
@@ -111,10 +132,37 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
-			"events": schema.ListAttribute{
-				MarkdownDescription: "The events that will trigger the webhook. Valid values are: workflow-completed, job-completed.",
-				Required:            true,
-				ElementType:         types.StringType,
+			// A Set, not a List. The webhook API treats events as an unordered
+			// collection and returns them in an order of its own choosing, which is
+			// stable across reads but is not the order they were submitted in —
+			// verified against the live API. Declared as a List, Terraform compared
+			// the configured order against the returned order and planned a change on
+			// every run, for ever, with nothing to apply.
+			//
+			// The same bug was reported against the community provider
+			// kelvintaywl/terraform-provider-circleci as issue #45 ("events attribute
+			// changed on terraform plan even though there is no changes") and fixed
+			// the same way.
+			//
+			// No state upgrade accompanies this change: a list and a set of the same
+			// element type share one JSON encoding, and the framework re-reads prior
+			// raw state against the current schema type, so existing state decodes as
+			// a set unchanged. TestListToSetNeedsNoStateUpgrade proves it rather than
+			// assuming it.
+			"events": schema.SetAttribute{
+				MarkdownDescription: fmt.Sprintf(
+					"The events that will trigger the webhook. Valid values are: %s. "+
+						"Order is not significant: CircleCI returns the events in an order of its own, "+
+						"so this is a set rather than a list.",
+					strings.Join(circleci.WebhookEvents(), ", "),
+				),
+				Required:    true,
+				ElementType: types.StringType,
+				Validators: []validator.Set{
+					setvalidator.ValueStringsAre(
+						stringvalidator.OneOf(circleci.WebhookEvents()...),
+					),
+				},
 			},
 			"created_at": schema.StringAttribute{
 				MarkdownDescription: "The timestamp when the webhook was created.",
@@ -131,6 +179,12 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
+// ConfigValidators requires exactly one of `signing_secret` and
+// `signing_secret_wo`.
+func (r *webhookResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{webhookSigningSecretConfigValidator()}
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan webhookResourceModel
@@ -140,11 +194,20 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// Convert events list to []string
+	// Convert the event set to []string
 	var events []string
 	diags = plan.Events.ElementsAs(ctx, &events, false)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// From configuration, because `signing_secret_wo` is null in the plan. See
+	// webhook_write_only.go.
+	signingSecret, ok := resolveWebhookSigningSecret(
+		ctx, req.Config, plan.SigningSecret, plan.SigningSecretWOVersion, &resp.Diagnostics,
+	)
+	if !ok {
 		return
 	}
 
@@ -159,7 +222,7 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 		Name:          plan.Name.ValueString(),
 		URL:           plan.Url.ValueString(),
 		VerifyTLS:     plan.VerifyTls.ValueBool(),
-		SigningSecret: plan.SigningSecret.ValueString(),
+		SigningSecret: signingSecret,
 		Scope: circleci.WebhookScope{
 			ID:   plan.ScopeId.ValueString(),
 			Type: plan.ScopeType.ValueString(),
@@ -231,12 +294,21 @@ func (r *webhookResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	// Convert events to types.List
-	eventsAttributeValues := make([]attr.Value, len(webhookData.Events))
-	for i, event := range webhookData.Events {
-		eventsAttributeValues[i] = types.StringValue(event)
+	// A tripwire, not a behavior: signing_secret is left alone below because the
+	// API only ever returns a mask, and this is what notices if that stops being
+	// true. Nothing about the secret is logged beyond its length.
+	if webhookSecretLooksUnmasked(webhookData.SigningSecret) {
+		tflog.Warn(ctx, "CircleCI returned a webhook signing_secret that is not masked", map[string]any{
+			"webhook_id": webhookData.ID,
+			"length":     len(webhookData.SigningSecret),
+			"note": "this resource assumes the API never discloses the signing secret, and does " +
+				"not refresh signing_secret from a read; please report this",
+		})
 	}
-	eventsList, diags := types.ListValue(types.StringType, eventsAttributeValues)
+
+	// Convert events to types.Set. The order the API reports is deliberately not
+	// preserved anywhere: a set has none, which is the whole point of the type.
+	events, diags := types.SetValueFrom(ctx, types.StringType, webhookData.Events)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -249,7 +321,7 @@ func (r *webhookResource) Read(ctx context.Context, req resource.ReadRequest, re
 	state.VerifyTls = types.BoolValue(webhookData.VerifyTLS)
 	state.ScopeId = types.StringValue(webhookData.Scope.ID)
 	state.ScopeType = types.StringValue(webhookData.Scope.Type)
-	state.Events = eventsList
+	state.Events = events
 	// Note: created_at, updated_at, and signing_secret may not be returned by Get, preserve from state
 	if webhookData.CreatedAt != "" {
 		state.CreatedAt = types.StringValue(webhookData.CreatedAt)
@@ -282,11 +354,25 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// Convert events list to []string
+	// Convert the event set to []string
 	var events []string
 	diags = plan.Events.ElementsAs(ctx, &events, false)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// The signing secret is resolved and sent on EVERY update, whatever triggered
+	// it, and nothing here is conditional on `signing_secret_wo_version` having
+	// changed. That is not an oversight — see webhook_write_only.go. UpdateWebhook
+	// is a full-replace PUT, so a body with no signing_secret deletes the live
+	// secret; gating the send on the version is
+	// hashicorp/terraform-provider-vault#2900, where exactly that silently wiped a
+	// credential whenever an unrelated field changed.
+	signingSecret, ok := resolveWebhookSigningSecret(
+		ctx, req.Config, plan.SigningSecret, plan.SigningSecretWOVersion, &resp.Diagnostics,
+	)
+	if !ok {
 		return
 	}
 
@@ -296,7 +382,7 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 		Name:          plan.Name.ValueString(),
 		URL:           plan.Url.ValueString(),
 		VerifyTLS:     plan.VerifyTls.ValueBool(),
-		SigningSecret: plan.SigningSecret.ValueString(),
+		SigningSecret: signingSecret,
 		Events:        events,
 	}
 

@@ -1,5 +1,5 @@
 data "circleci_ios_signing_certificates" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # Find the distribution certificate expiring soonest, to build an alert on.

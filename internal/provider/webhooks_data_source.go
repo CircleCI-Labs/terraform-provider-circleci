@@ -32,7 +32,7 @@ type webhookItemModel struct {
 	ID               types.String `tfsdk:"id"`
 	Name             types.String `tfsdk:"name"`
 	URL              types.String `tfsdk:"url"`
-	Events           types.List   `tfsdk:"events"`
+	Events           types.Set    `tfsdk:"events"`
 	VerifyTLS        types.Bool   `tfsdk:"verify_tls"`
 	ScopeID          types.String `tfsdk:"scope_id"`
 	ScopeType        types.String `tfsdk:"scope_type"`
@@ -90,9 +90,15 @@ func (d *webhooksDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 							MarkdownDescription: "URL webhook payloads are delivered to.",
 							Computed:            true,
 						},
-						"events": schema.ListAttribute{
-							MarkdownDescription: "Events that trigger delivery, such as `workflow-completed` " +
-								"and `job-completed`.",
+						// A Set, matching `circleci_webhook`'s own `events`: CircleCI
+						// returns a webhook's events in an order of its own choosing
+						// rather than the order they were submitted in, so there is no
+						// order here worth reporting.
+						"events": schema.SetAttribute{
+							MarkdownDescription: "Events that trigger delivery, such as `" +
+								circleci.WebhookEventWorkflowCompleted + "` and `" +
+								circleci.WebhookEventJobCompleted + "`. Unordered: CircleCI does not " +
+								"preserve the order events were configured in.",
 							ElementType: types.StringType,
 							Computed:    true,
 						},
@@ -155,7 +161,7 @@ func (d *webhooksDataSource) Read(ctx context.Context, req datasource.ReadReques
 	// project that has no webhooks yet.
 	state.Webhooks = make([]webhookItemModel, 0, len(webhooks))
 	for _, hook := range webhooks {
-		events, diags := types.ListValueFrom(ctx, types.StringType, hook.Events)
+		events, diags := types.SetValueFrom(ctx, types.StringType, hook.Events)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return

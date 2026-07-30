@@ -11,13 +11,7 @@ Manages a restriction on a CircleCI context. Restrictions control which projects
 
 ## Example Usage
 
-```terraform
-resource "circleci_context_restriction" "example" {
-  context_id = "00000000-0000-0000-0000-000000000000"
-  type       = "project"
-  value      = "00000000-0000-0000-0000-000000000001"
-}
-```
+{{ tffile "examples/resources/circleci_context_restriction/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

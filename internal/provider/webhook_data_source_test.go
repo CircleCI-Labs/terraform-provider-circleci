@@ -54,7 +54,7 @@ func TestAccWebhookDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_webhook.test_webhook_data",
 						tfjsonpath.New("events"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("workflow-completed"),
 						}),
 					),

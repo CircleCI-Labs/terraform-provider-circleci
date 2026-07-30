@@ -173,6 +173,14 @@ const (
 // returned by UpsertContextEnvironmentVariable, because the PUT route's own
 // response struct (the API's EnvVarResponse) carries no such field at
 // all — only the list route does.
+//
+// It must not be used to detect that a value changed. Rotating a secret while
+// keeping its last four characters leaves TruncatedValue identical, so any
+// comparison of it silently misses that class of rotation. UpdatedAt is the
+// usable signal — but note that it bumps on every write, including one that
+// stores a byte-identical value, so it means "last written", not "last
+// changed". Only a comparison against a timestamp the caller recorded after
+// its own write says anything (see contextEnvironmentVariableResource.Read).
 type ContextEnvironmentVariable struct {
 	Variable       string `json:"variable"`
 	ContextID      string `json:"context_id"`

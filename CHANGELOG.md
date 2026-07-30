@@ -227,6 +227,23 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   the check fires for exactly that combination and nothing else. Set the value you want;
   `false` keeps secrets out of fork builds.
 
+* **Three attributes holding unordered collections are now sets rather than lists:**
+  `events` on `circleci_webhook`, and `pr_only_branch_overrides` on `circleci_project`
+  and `circleci_project_settings`. The matching data source attributes changed with
+  them (`circleci_webhook`, `circleci_webhooks`).
+
+  **No state migration is needed and nothing already in state changes.** A list and a
+  set of the same element type share one JSON encoding, so existing state decodes as a
+  set untouched; the schema version stays at 0 and no `UpgradeState` was added.
+  `TestListToSetNeedsNoStateUpgrade` drives the provider's real
+  `UpgradeResourceState` RPC with prior list-shaped state to prove it rather than
+  assert it.
+
+  What does break is a configuration that treats either attribute as ordered:
+  `events[0]`, `element(...)`, or anything relying on the order surviving. It never
+  did survive — see BUG FIXES — so such a configuration was already producing a plan
+  that never converged. Use `for` / `contains` / `tolist(...)` instead.
+
 Nothing else in this release is breaking. In particular, the renames required by
 CircleCI's v3 API conventions (`organization_id` → `org_id`, `pipeline` → `run`) are
 deliberately **not** here; they are batched into a planned 1.0 with a state migration
@@ -320,6 +337,57 @@ and returning empty lists:
 
 ### ENHANCEMENTS
 
+* **Documentation is now verified rather than hoped for.** The registry renders the
+  `docs/` directory from the release tag, so a wrong example ships until the next
+  version. Nothing checked them before this release: the test suite never touched
+  `examples/`, and `terraform fmt` only proves HCL parses.
+
+  Five independent checks each found broken examples on the same day — an attribute
+  that does not exist on `circleci_trigger`, a `policy_context` value the schema
+  rejects, `file()` calls reading absent files, a data source attribute renamed
+  months ago. Every one was syntactically perfect.
+
+  So the examples are now checked by machine:
+
+  * `task validate-examples` builds the provider and runs `terraform validate`
+    against all 96 example directories, in CI, hermetically — no network, no
+    credentials, and the CircleCI environment variables explicitly unset so a
+    failure cannot be a missing token in disguise.
+  * Four guard tests in `internal/provider/examples_test.go`: every example
+    directory has the entry filename `tfplugindocs` actually reads; every
+    `{{ tffile }}` path resolves; every registered type has an example; and every
+    example file is referenced by a template.
+
+  That last guard was written before the fix it motivated, and reported exactly the
+  21 files that were affected — a useful reminder that a guard nobody has watched
+  fail is not yet a guard.
+
+  Fixed along the way: **29 example files that were never rendered** (wrong filename,
+  or no template referenced them, so pages showed an unvalidated inline copy while
+  the good file sat unused), **45 attribute assignments still using the deprecated
+  `organization_id`** so every copied example warned immediately, and four examples
+  that could not have worked at all.
+
+* **Four new guides**, joining the three migration guides:
+  [Getting started](docs/guides/getting-started.md) walks from nothing to a running
+  pipeline in dependency order; [CircleCI object model](docs/guides/object-model.md)
+  maps how the objects relate and why a pipeline definition is not a pipeline run;
+  [Managing secrets](docs/guides/managing-secrets.md) covers what reaches Terraform
+  state and how to keep secrets out of it; and
+  [Self-hosted runners](docs/guides/self-hosted-runners.md) covers namespace →
+  resource class → token.
+
+  The provider index now opens with a complete working configuration rather than
+  provider boilerplate, and every page has a hand-written template — two previously
+  rendered as bare attribute lists.
+
+  Also corrected: `circleci_otel_exporter` claimed it worked on CircleCI Server
+  because its route is v2. That inference is disproven inside this provider —
+  `circleci_pipeline_definition` is v2 and unavailable on Server — so the page now
+  says unverified. The Cloud/Server matrix carries a new note that **the whole Server
+  column is reasoned rather than measured**, since no Server installation has been
+  available to test against. That caveat was missing everywhere.
+
 * **New provider attribute `deployment`** (`cloud` | `server`, default `cloud`).
   CircleCI Server does not route the v3 API, so resources that require it are
   unavailable there. They now fail at **plan** time with an explicit diagnostic
@@ -342,6 +410,139 @@ and returning empty lists:
   provider implemented it".
 * Two migration guides: from the community providers (`mrolla`, `kelvintaywl`,
   `SectorLabs`), and from legacy scheduled pipelines to schedule triggers.
+* **`circleci_context_environment_variable` and
+  `circleci_project_environment_variable` accept `value_wo`**, a write-only
+  alternative to `value` (Terraform 1.11 or later): the secret is sent to CircleCI
+  and then discarded, appearing in neither state nor the plan file. Set exactly one
+  of the two; `value` is unchanged and not deprecated. Because nothing derived from
+  the value is stored, `value_wo_version` is required alongside it and must be
+  incremented to rotate the secret — a change to `value_wo` on its own is not a
+  change Terraform can see.
+* **`circleci_webhook` accepts `signing_secret_wo`**, the same write-only treatment
+  for the webhook signing secret (Terraform 1.11 or later), with
+  `signing_secret_wo_version` required alongside it. Set exactly one of
+  `signing_secret` and `signing_secret_wo`; `signing_secret` is unchanged and not
+  deprecated (it becomes `Optional` rather than `Required`, so a configuration
+  setting neither is still refused, now by a validator rather than by the schema). A
+  rotation updates the webhook in place — it is not recreated.
+
+  One detail is worth stating because getting it wrong is a live bug in another
+  provider: the write-only secret is sent on **every** write the resource makes, not
+  only on the one that bumped the version. CircleCI's update route is a full-replace
+  PUT, so a body without `signing_secret` deletes the secret server-side, and there
+  is nothing to recover it from — the API only ever returns a mask. Gating the send
+  on the version is `hashicorp/terraform-provider-vault#2900`, where exactly that
+  wiped `token_reviewer_jwt` whenever an unrelated field changed and broke
+  Kubernetes auth logins.
+  `TestWebhookWriteOnly_UnrelatedUpdateStillSendsTheSecret` renames a webhook and
+  asserts the resulting PUT still carried the secret, so it cannot regress quietly.
+* **`circleci_ios_signing_certificate` accepts `certificate_blob_wo` and
+  `certificate_password_wo`** (Terraform 1.11 or later), which is the most valuable
+  of these three: `certificate_blob` is the private half of an Apple code-signing
+  identity, and on the state-backed path it sits in Terraform state in cleartext, so
+  anyone who can read the state file can sign iOS builds as the organization. On the
+  write-only path nothing is persisted, and the pair can be fed from an `ephemeral`
+  block so the certificate never lands in a `.tfvars` file either. Set exactly one
+  of `certificate_blob` and `certificate_blob_wo`; both spellings keep their
+  password, and neither is deprecated (`certificate_blob` and
+  `certificate_password` become `Optional` rather than `Required`, so a
+  configuration setting neither blob is still refused, now by a validator).
+
+  Rotation is driven by a single `certificate_wo_version` covering both write-only
+  values, rather than one counter per attribute as AWS and Azure spell it. A `.p12`
+  and its password are one rotatable unit — the password decrypts that specific
+  file, so re-exporting a certificate always produces a new pair — and two counters
+  would make an invalid combination expressible: bump the blob's and not the
+  password's, and the provider would upload a new certificate with the old password,
+  which CircleCI accepts and every later build fails on. The convention is really
+  one trigger per rotatable unit; the Kubernetes provider's separate
+  `data_wo_revision` and `binary_data_wo_revision` exist because those *are*
+  independent secrets.
+
+  Bumping the version replaces the resource rather than rewriting it in place,
+  unlike the other two write-only pairs. That introduces no new concept: the
+  certificate API has no update route, so every configurable attribute already
+  forced replacement. It is also load-bearing — `Update` on this resource is a
+  no-op, so an in-place plan would report success having uploaded nothing.
+  `TestIOSSigningWriteOnly_SameRequestAsCertificateBlob` compares what the API
+  received on both paths field by field, and
+  `TestIOSSigningWriteOnly_RotationNeedsAVersionBump` covers both halves of the
+  version contract.
+* **`circleci_ios_signing_config` accepts `provisioning_profiles_wo`** (Terraform
+  1.11 or later), a write-only alternative to the whole `provisioning_profiles`
+  list, with `provisioning_profiles_wo_version` required alongside it. Set exactly
+  one of the two; `provisioning_profiles` is unchanged and not deprecated (it
+  becomes `Optional` rather than `Required`, so a configuration setting neither is
+  still refused, now by a validator rather than by the schema).
+
+  It is a parallel list rather than a write-only `blob` inside the existing one
+  because the framework does not allow the latter: from
+  `resource/schema/list_nested_attribute.go` in terraform-plugin-framework v1.19.0,
+  a write-only nested attribute whose children are not all write-only is rejected at
+  `GetProviderSchema` time with "Every child attribute of a WriteOnly nested
+  attribute must also have WriteOnly set to true". The other way round is the same
+  problem from the other side: Terraform Core requires every write-only value to be
+  null in the response, and a nested object cannot be half-nulled. The alternative
+  workaround — hoisting `file_name` and `blob` out of the nested block into
+  top-level attributes — is breaking and caps the resource at one profile, so it was
+  not taken.
+
+  Consequently **`file_name` is write-only on that path too** and leaves state
+  alongside `blob`. Nothing depends on it being there: `Read` never set it (the
+  API's list response reports only profile names, which the resource deliberately
+  does not fold back in), importing never recovered it, `certificate_file_name` and
+  `certificate_type` come from the paired certificate, and the
+  `circleci_ios_signing_configs` data source reads profile names from CircleCI
+  rather than from this resource's state.
+
+  One counter covers the whole list, following the same "one trigger per rotatable
+  unit" rule as `certificate_wo_version` above: `provisioning_profiles` already
+  carries `RequiresReplace` and a minimum size of 1, so adding, removing, renewing
+  or reordering a profile is one indivisible change. A per-entry counter would have
+  to live inside the nested object, where it would itself be write-only and
+  therefore useless — nothing would persist it to compare against. Bumping the
+  version replaces the resource, because there is no update route.
+* **`circleci_otel_exporter` accepts `headers_wo`** (Terraform 1.11 or later), a
+  write-only alternative to `headers`, which typically carries the OTLP collector's
+  credentials, with `headers_wo_version` required alongside it. `WriteOnly` is
+  permitted on a map attribute — only *set* nested attributes and set blocks are
+  prohibited — so this one needed no restructuring. Bumping the version replaces the
+  exporter, exactly as editing `headers` already did, since there is no update
+  route.
+
+  **Set at most one of `headers` and `headers_wo`, not exactly one**, unlike the
+  other four pairs. `headers` has always been `Optional` and an exporter with no
+  headers at all is ordinary — two of the exporters in this resource's own
+  documented example have none — so `ExactlyOneOf` would have started rejecting
+  working configurations. The validator is `Conflicting` instead.
+
+  **The write-only path gives up the one kind of drift this resource could detect.**
+  CircleCI answers every read with the placeholder `xxxx` for each header value but
+  returns the header *names* in full, and on the `headers` path the provider
+  compares the returned names against the names in state, so a header added or
+  removed outside Terraform is visible even though a changed value is not. On the
+  `headers_wo` path there are no names in state to compare against and a refresh has
+  no access to configuration, so neither is detected. The provider therefore leaves
+  `headers` null after a read on that path rather than adopting the API's map:
+  adopting it would write the placeholder into a state-backed attribute that forces
+  replacement, and every later plan would want to recreate the exporter forever.
+  `TestOTelExporterWriteOnly_RefreshLeavesHeadersNull` and
+  `TestOTelExporterWriteOnly_HeaderAddedOutsideTerraformIsInvisible` pin both halves
+  of that, so the documentation cannot drift away from the behaviour.
+
+  Neither of these two resources can reproduce
+  `hashicorp/terraform-provider-vault#2900` — the bug described under
+  `circleci_webhook` above — because neither has an update route at all: every write
+  is a create. The secret is still sent on every write rather than being gated on the
+  version, so that safety does not depend on the API staying that way.
+* **`circleci_context_environment_variable` now detects a value changed outside
+  Terraform.** The API returns no value on any route and its `truncated_value` is
+  unusable for the purpose (rotating a secret while keeping its last four characters
+  leaves it identical), so the resource compares timestamps: `updated_at` records
+  what CircleCI reported the last time Terraform wrote the variable, the new
+  `remote_updated_at` records what it reports now, and the next apply re-asserts the
+  configured value when the second is later. Both paths, `value` and `value_wo`, are
+  covered.
 
 ### BUG FIXES
 
@@ -379,6 +580,37 @@ and returning empty lists:
   resource used `attr.Value.String()`, which renders Terraform's *display* form, so
   `main` reached the API as `"main"` — with the quotes. Likely the cause of the
   reported branch-override failures.
+
+* **`events` and `pr_only_branch_overrides` showed a change on every plan, for ever,
+  with nothing to apply.** Both are unordered collections on the CircleCI side, and
+  the API answers with them in an order of its own choosing. Verified live:
+
+  ```
+  PATCH pr_only_branch_overrides ["zebra","alpha","main","beta"]
+  → GET  pr_only_branch_overrides ["zebra","main","alpha","beta"]
+  ```
+
+  stable across subsequent reads, but not the order it was given. Declared as
+  Terraform *lists*, the provider compared the configured order against the returned
+  order and planned an update every single run — and on `circleci_project`, where the
+  attribute is `Computed`, the apply failed outright with "Provider produced
+  inconsistent result after apply".
+
+  Both are now sets, on `circleci_webhook`, `circleci_project` and
+  `circleci_project_settings`. See BREAKING CHANGES for what that means for a
+  configuration, and note that `circleci_project_settings`'s data source already
+  reported the attribute as a set — the resources had simply drifted from it.
+
+  The whole fake-backed test suite passed throughout, because every fake echoed the
+  submitted order straight back: the one behaviour the real API does not have. The
+  fakes now answer in a different order, deliberately, so an order-sensitive
+  regression fails immediately.
+
+* **`circleci_webhook` did not validate event names.** The attribute's description
+  has always claimed the valid values are `workflow-completed` and `job-completed`,
+  but nothing enforced it, so a typo cost a round-trip and came back as an opaque
+  HTTP 400. The names now come from one list in the API client, shared by the
+  validator and the generated documentation.
 * **`circleci_project` could not create a project on CircleCI Server.**
   `circleci-sdk-go` sent the required v1.1 follow request to a hardcoded
   `https://circleci.com`, ignoring the configured host, so creation against a Server

@@ -19,8 +19,8 @@ Read the [Lifecycle](#lifecycle) section before using this resource. Its behavio
 
 ```terraform
 resource "circleci_orb_namespace" "example" {
-  name            = "acme"
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  name   = "acme"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 resource "circleci_orb" "example" {

@@ -13,18 +13,7 @@ Manages a token for a CircleCI self-hosted runner resource class. Tokens are use
 
 ## Example Usage
 
-```terraform
-resource "circleci_runner_token" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  resource_class  = "my-namespace/my-runner"
-  nickname        = "my-runner-token"
-}
-
-output "runner_token" {
-  value     = circleci_runner_token.example.token
-  sensitive = true
-}
-```
+{{ tffile "examples/resources/circleci_runner_token/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

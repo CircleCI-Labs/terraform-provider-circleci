@@ -17,14 +17,6 @@ Related organization settings: `enable_private_orbs`, `enable_certified_public_o
 
 ## Example Usage
 
-```terraform
-data "circleci_url_orb_allow_list" "example" {
-  organization = "gh/acme"
-}
-
-output "allowed_orb_prefixes" {
-  value = [for entry in data.circleci_url_orb_allow_list.example.entries : entry.prefix]
-}
-```
+{{ tffile "examples/data-sources/circleci_url_orb_allow_list/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

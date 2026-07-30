@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -49,7 +48,9 @@ type projectResourceModel struct {
 	SetGithubStatus            types.Bool   `tfsdk:"set_github_status"`
 	SetupWorkflows             types.Bool   `tfsdk:"setup_workflows"`
 	WriteSettingsRequiresAdmin types.Bool   `tfsdk:"write_settings_requires_admin"`
-	PROnlyBranchOverrides      types.List   `tfsdk:"pr_only_branch_overrides"`
+	// PROnlyBranchOverrides is a Set rather than a List because CircleCI does not
+	// preserve the order the branches were sent in. See the schema.
+	PROnlyBranchOverrides types.Set `tfsdk:"pr_only_branch_overrides"`
 }
 
 // NewProjectResource is a helper function to simplify the provider implementation.
@@ -168,11 +169,26 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:            true,
 				Computed:            true,
 			},
-			"pr_only_branch_overrides": schema.ListAttribute{
-				MarkdownDescription: "List of branches that override the PR-only build setting.",
-				Optional:            true,
-				Computed:            true,
-				ElementType:         types.StringType,
+			// A Set, not a List. The settings API stores these branches as an
+			// unordered collection and reports them back in an order of its own
+			// choosing — verified live: PATCHing
+			// ["zebra","alpha","main","beta"] reads back as
+			// ["zebra","main","alpha","beta"], stably, but never in the order sent.
+			// Declared as a List, Terraform compared configured order against
+			// returned order and planned a change on every run, for ever, with
+			// nothing to apply. The circleci_project_settings data source already reports
+			// this attribute as a Set for the same reason.
+			//
+			// No state upgrade accompanies this change: a list and a set of the same
+			// element type share one JSON encoding and the framework re-reads prior
+			// raw state against the current schema type, so existing state decodes as
+			// a set unchanged. TestListToSetNeedsNoStateUpgrade proves it.
+			"pr_only_branch_overrides": schema.SetAttribute{
+				MarkdownDescription: "Branches that override the PR-only build setting. " +
+					"Order is not significant: CircleCI does not preserve the order branches are sent in.",
+				Optional:    true,
+				Computed:    true,
+				ElementType: types.StringType,
 			},
 		},
 	}
@@ -298,16 +314,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.SetupWorkflows = types.BoolPointerValue(newProjectSettings.SetupWorkflows)
 	plan.WriteSettingsRequiresAdmin = types.BoolPointerValue(newProjectSettings.WriteSettingsRequiresAdmin)
 
-	nBranchLength := len(derefBranches(newProjectSettings.PROnlyBranchOverrides))
-	listStringValuesBanches := make([]attr.Value, nBranchLength)
-	for index, elem := range derefBranches(newProjectSettings.PROnlyBranchOverrides) {
-		listStringValuesBanches[index] = types.StringValue(elem)
-	}
-	plan.PROnlyBranchOverrides, diags = types.ListValue(
-		types.StringType,
-		listStringValuesBanches,
-	)
-
+	plan.PROnlyBranchOverrides, diags = branchOverrideSet(ctx, newProjectSettings.PROnlyBranchOverrides)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -389,12 +396,12 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 	projectState.SetupWorkflows = types.BoolPointerValue(projectSettings.SetupWorkflows)
 	projectState.WriteSettingsRequiresAdmin = types.BoolPointerValue(projectSettings.WriteSettingsRequiresAdmin)
 
-	pROnlyBranchOverridesAttributeValues := make([]attr.Value, len(derefBranches(projectSettings.PROnlyBranchOverrides)))
-	for index, elem := range derefBranches(projectSettings.PROnlyBranchOverrides) {
-		pROnlyBranchOverridesAttributeValues[index] = types.StringValue(elem)
+	overrides, overrideDiags := branchOverrideSet(ctx, projectSettings.PROnlyBranchOverrides)
+	resp.Diagnostics.Append(overrideDiags...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
-	PROnlyBranchOverridesListValue, _ := types.ListValue(types.StringType, pROnlyBranchOverridesAttributeValues)
-	projectState.PROnlyBranchOverrides = PROnlyBranchOverridesListValue
+	projectState.PROnlyBranchOverrides = overrides
 
 	// Set state
 	diags = resp.State.Set(ctx, &projectState)
@@ -487,12 +494,12 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	state.WriteSettingsRequiresAdmin = types.BoolPointerValue(updatedProject.WriteSettingsRequiresAdmin)
 
 	if len(derefBranches(projectSettings.PROnlyBranchOverrides)) > 0 {
-		pROnlyBranchOverridesAttributeValues := make([]attr.Value, len(derefBranches(updatedProject.PROnlyBranchOverrides)))
-		for index, elem := range derefBranches(projectSettings.PROnlyBranchOverrides) {
-			pROnlyBranchOverridesAttributeValues[index] = types.StringValue(elem)
+		overrides, overrideDiags := branchOverrideSet(ctx, projectSettings.PROnlyBranchOverrides)
+		resp.Diagnostics.Append(overrideDiags...)
+		if resp.Diagnostics.HasError() {
+			return
 		}
-		PROnlyBranchOverridesListValue, _ := types.ListValue(types.StringType, pROnlyBranchOverridesAttributeValues)
-		state.PROnlyBranchOverrides = PROnlyBranchOverridesListValue
+		state.PROnlyBranchOverrides = overrides
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -545,21 +552,36 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 }
 
-// branchOverrides converts a Terraform list of branch names into plain strings.
+// branchOverrides converts a Terraform set of branch names into plain strings.
 //
 // It exists because attr.Value.String() renders a value the way Terraform
 // displays it, so a branch name comes back quoted (`"main"` rather than `main`).
 // Sending that to the API set literally-quoted branch names, which is why
 // pr_only_branch_overrides did not work.
-func branchOverrides(ctx context.Context, list types.List) ([]string, diag.Diagnostics) {
-	if list.IsNull() || list.IsUnknown() {
+func branchOverrides(ctx context.Context, branchSet types.Set) ([]string, diag.Diagnostics) {
+	if branchSet.IsNull() || branchSet.IsUnknown() {
 		return nil, nil
 	}
 
-	branches := make([]string, 0, len(list.Elements()))
-	diags := list.ElementsAs(ctx, &branches, false)
+	branches := make([]string, 0, len(branchSet.Elements()))
+	diags := branchSet.ElementsAs(ctx, &branches, false)
 
 	return branches, diags
+}
+
+// branchOverrideSet is the other direction: the branch list the API reported,
+// folded back into a Terraform set.
+//
+// A branch list the API omitted becomes an empty set rather than a null one,
+// because pr_only_branch_overrides is Computed on circleci_project and a Computed
+// attribute has to hold a known value once an apply is finished.
+func branchOverrideSet(ctx context.Context, branches *[]string) (types.Set, diag.Diagnostics) {
+	reported := derefBranches(branches)
+	if reported == nil {
+		reported = []string{}
+	}
+
+	return types.SetValueFrom(ctx, types.StringType, reported)
 }
 
 // parseProjectSlug splits a project slug into its VCS provider, organization and

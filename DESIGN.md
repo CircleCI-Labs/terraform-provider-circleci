@@ -318,6 +318,59 @@ compare equal to the `1h30m0s` the API stores. Normalizing in the provider alone
 insufficient: after `terraform import` there is no configuration to normalize
 towards.
 
+### An unordered collection is a `SetAttribute`, and no state upgrade is needed to become one
+
+CircleCI stores several collections without an order and answers with them in an order
+of its own choosing. Verified live:
+
+```
+PATCH pr_only_branch_overrides ["zebra","alpha","main","beta"]
+→ GET  pr_only_branch_overrides ["zebra","main","alpha","beta"]
+```
+
+stable across subsequent reads, but never the order it was given. A `ListAttribute`
+over such a collection produces a plan that never converges: Terraform compares the
+configured order against the returned order and plans a change on every run, and where
+the attribute is also `Computed` the apply fails with "Provider produced inconsistent
+result after apply". `circleci_webhook.events` and `pr_only_branch_overrides` on both
+project resources were in exactly that state.
+
+**Changing an existing attribute from a list to a set needs no `SchemaVersion` bump and
+no `UpgradeState`.** A list and a set of the same element type share one JSON encoding —
+both are a JSON array — and the framework answers `UpgradeResourceState` by re-reading
+the stored raw JSON against the *current* schema type whenever the stored version matches
+the current one. So state written by an older provider decodes as a set untouched. This
+is checked rather than assumed: `TestListToSetNeedsNoStateUpgrade` feeds prior
+list-shaped state through the provider's real `UpgradeResourceState` RPC for all three
+resources, asserts the value comes back typed as a set, and asserts the schema version is
+still 0 so that a future bump has to come with a deliberate decision.
+
+The change *is* breaking for a configuration that indexes the attribute (`events[0]`),
+which is why it appears in the changelog's BREAKING CHANGES.
+
+### A fake must reorder what the API reorders
+
+The permanent diff above survived a passing suite of 80-plus fake-backed tests, for one
+reason: every fake echoed the collection back in the order it was submitted. That is the
+one behaviour the real API does not have, so no test could fail for the only bug the
+attribute had ever had.
+
+`reorderedLikeTheAPI` (in `webhook_resource_fake_test.go`) reverses any JSON array a
+fake is about to store, and the webhook and both project-settings fakes route
+`events` and `pr_only_branch_overrides` through it. Reversal is the cheapest order that
+differs for any collection of two or more, so reverting either attribute to a
+`ListAttribute` now fails immediately with "Provider produced inconsistent result after
+apply" rather than passing. It reverses a *copy*, because the recorded request bodies
+are what tests assert the *sent* order on.
+
+Two consequences worth stating, because both are easy to undo by accident:
+
+- A test that means to exercise ordering must configure **two or more** elements. A
+  single-element collection reverses to itself and passes whatever the attribute's type
+  is; `TestAccProjectSettingsResource` used one branch and was silent for that reason.
+- `TestFakeAPIsDoNotEchoCollectionOrder` guards the guard, failing if a fake goes back
+  to echoing.
+
 ### A fake-backed test uses `resource.UnitTest`, never `resource.Test`
 
 `resource.Test` **skips unless `TF_ACC=1`**. That is right for a test that talks to a

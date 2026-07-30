@@ -17,7 +17,7 @@ Works against both **CircleCI Cloud and CircleCI Server** — OTLP exporters are
 
 ```terraform
 data "circleci_otel_exporters" "all" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
+  org_id = "00000000-0000-0000-0000-000000000000"
 }
 
 # Every configured endpoint, including exporters created outside Terraform.

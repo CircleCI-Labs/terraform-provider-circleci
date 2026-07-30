@@ -11,12 +11,7 @@ Manages a CircleCI context. Contexts provide a mechanism for securing and sharin
 
 ## Example Usage
 
-```terraform
-resource "circleci_context" "example" {
-  organization_id = "00000000-0000-0000-0000-000000000000"
-  name            = "my-context"
-}
-```
+{{ tffile "examples/resources/circleci_context/resource.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

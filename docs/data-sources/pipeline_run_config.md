@@ -37,7 +37,7 @@ data "circleci_pipeline_run" "this" {
 }
 
 data "circleci_pipeline_run_config" "this" {
-  pipeline_run_id = data.circleci_pipeline_run.this.id
+  run_id = data.circleci_pipeline_run.this.id
 }
 
 # Assert the compiled config actually contains an expected orb, rather than
@@ -55,7 +55,7 @@ check "orb_was_expanded" {
 
 ### Required
 
-- `pipeline_run_id` (String) Unique identifier (UUID) of the pipeline run, as returned by [`circleci_pipeline_run`](pipeline_run).
+- `run_id` (String) Unique identifier (UUID) of the pipeline run, as returned by [`circleci_pipeline_run`](pipeline_run).
 
 ### Read-Only
 
