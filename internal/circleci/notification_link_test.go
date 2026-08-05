@@ -12,11 +12,10 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// linkEntity mirrors the v3 data-entity envelope
-// notifications/the CircleCI API's the API
-// renders: attributes carry the link fields, references.user.id carries the
-// owning CircleCI user, and there is no "id" key at all (DataEntity.ID uses
-// json:"id,omitzero" and the handler never sets it).
+// linkEntity mirrors the v3 data-entity envelope the API renders:
+// attributes carry the link fields, references.user.id carries the owning
+// CircleCI user, and there is no "id" key at all (the entity ID field uses
+// json:"id,omitzero" and the API never sets it).
 const testNotificationLinkResponse = `{
   "data": [
     {
@@ -108,9 +107,8 @@ func TestListNotificationLinksDefaultsUserIDToMe(t *testing.T) {
 func TestListNotificationLinksForbidden(t *testing.T) {
 	t.Parallel()
 
-	// filter[user_id] set to another user's UUID is rejected with 403 upstream
-	// (resolveUserID in the notifications service), never with a partial or
-	// empty result.
+	// filter[user_id] set to another user's UUID is rejected with 403 upstream,
+	// never with a partial or empty result.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)

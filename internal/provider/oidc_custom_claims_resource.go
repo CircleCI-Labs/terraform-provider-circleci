@@ -130,15 +130,24 @@ func (r *oidcCustomClaimsResource) Schema(_ context.Context, _ resource.SchemaRe
 			"ttl": schema.StringAttribute{
 				CustomType: durationType{},
 				MarkdownDescription: "How long an identity token stays valid, as a duration string: one or " +
-					"more unit-suffixed integers with no separator, for example `1h`, `90m` or `1h30m`. " +
-					"The accepted units are `ms`, `s`, `m`, `h`, `d` and `w`. Note that fractional values " +
-					"such as `1.5h` are rejected even though Go accepts them.",
+					"more unit-suffixed numbers with no separator, for example `1h`, `90m` or `1h30m`. " +
+					"The accepted units are `ns`, `us`, `ms`, `s`, `m` and `h`.\n\n" +
+					"~> **`d` and `w` are not accepted, despite appearing in CircleCI's OpenAPI " +
+					"document.** That document gives this field the pattern " +
+					"`^([0-9]+(ms|s|m|h|d|w)){1,7}$`, but nothing enforces it and the API parses the " +
+					"value with Go's duration parser, which has no unit longer than an hour. `7d` is " +
+					"rejected with `400`; write `168h` instead. This provider rejects it at plan time " +
+					"rather than letting the apply fail.\n\n" +
+					"The API rewrites whatever it is given into its own canonical form, so `90m` is " +
+					"stored and reported as `1h30m0s`. That is not a change: the three spellings compare " +
+					"equal, and no diff is planned for one.",
 				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(
 						circleci.OIDCTTLPattern,
-						"must be a duration of unit-suffixed integers such as \"1h\", \"90m\" or \"1h30m\", "+
-							"using only the units ms, s, m, h, d and w",
+						"must be a duration of unit-suffixed numbers such as \"1h\", \"90m\" or \"1h30m\", "+
+							"using only the units ns, us, ms, s, m and h. The units d and w appear in "+
+							"CircleCI's OpenAPI document but the API rejects them: use hours instead",
 					),
 				},
 			},

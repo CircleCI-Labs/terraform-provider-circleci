@@ -5,7 +5,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -52,8 +55,12 @@ func NewURLOrbAllowListEntryResource() resource.Resource {
 // urlOrbAllowListEntryResource manages one entry in an organization's URL orb
 // allow list.
 //
-// This is a v2 API, so unlike the organization settings it works on CircleCI
-// Server as well as Cloud and must not be gated on requireCloud.
+// These are v2 routes owned by CircleCI's own v2 organization API rather than by
+// a service behind the public API proxy, and a CircleCI Server installation
+// forwards unmatched API paths there, so they work on Server as well as Cloud and
+// must not be gated on requireCloud. See urlOrbAllowListRoute for the evidence,
+// and contrast circleci_otel_exporter, which is also v2 and is gated because its
+// backend is absent from Server.
 type urlOrbAllowListEntryResource struct {
 	client *circleci.Client
 }
@@ -69,9 +76,16 @@ func (r *urlOrbAllowListEntryResource) Schema(_ context.Context, _ resource.Sche
 		MarkdownDescription: "Manages one entry in a CircleCI organization's URL orb allow list. " +
 			"Each entry permits pipelines in the organization to reference URL orbs whose source " +
 			"URL starts with the entry's prefix.\n\n" +
-			"**Available on CircleCI Cloud and CircleCI Server.** This resource uses the v2 API, " +
-			"which both serve.\n\n" +
-			"The API has no update route for an entry, so changing any attribute replaces the entry.",
+			"Available on CircleCI Cloud **and on CircleCI Server**. Being a v2 route is not " +
+			"evidence of that on its own — `circleci_pipeline_definition` is v2 and unavailable on " +
+			"Server — but the owner is: these are v2 organization routes served by CircleCI itself " +
+			"rather than by a separate service, and a Server installation's gateway sends every API " +
+			"path it does not route elsewhere to exactly that component. Nothing gates this " +
+			"resource.\n\n" +
+			"The API has no update route for an entry, so changing any attribute replaces the entry.\n\n" +
+			"~> **An organization's allow list is capped at five entries.** Creating a sixth fails " +
+			"with an error naming the limit. Duplicate prefixes are permitted on purpose, so the " +
+			"same prefix may be listed more than once under different `auth` values.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The UUID of the allow list entry.",
@@ -100,8 +114,14 @@ func (r *urlOrbAllowListEntryResource) Schema(_ context.Context, _ resource.Sche
 				MarkdownDescription: "The URL prefix to allow, for example " +
 					"`https://raw.githubusercontent.com/CircleCI-Public/orbs/refs/heads/main/`. " +
 					"A URL orb reference is permitted when it starts with this prefix, so keep the " +
-					"prefix as narrow as possible. Changing this value forces a new resource to be created.",
+					"prefix as narrow as possible. Changing this value forces a new resource to be created.\n\n" +
+					"The API requires the `https` scheme and a path that ends in `/`, so " +
+					"`https://example.com/orbs/` is accepted and `https://example.com/orbs` is not. " +
+					"That is checked at plan time here rather than left to fail at apply time.",
 				Required: true,
+				Validators: []validator.String{
+					urlOrbAllowListPrefix(),
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
@@ -182,10 +202,31 @@ func (r *urlOrbAllowListEntryResource) Read(ctx context.Context, req resource.Re
 
 	entry, err := r.client.GetURLOrbAllowListEntry(ctx, org, state.Id.ValueString())
 	if err != nil {
-		// IsNotFound covers both a 404 on the organization and an entry that is
-		// simply absent from the listing, which is how a deleted entry shows up.
-		if circleci.IsNotFound(err) {
+		// Only an entry absent from a successful listing — the ErrNotFound sentinel —
+		// means the entry is gone.
+		if errors.Is(err, circleci.ErrNotFound) {
 			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
+		// A transport 404 is a statement about the organization, not the entry: the
+		// list handler throws not-found both when the organization cannot be resolved
+		// and when the token may not view it. IsNotFound would say yes to it, and
+		// dropping state on it would recreate a live entry on the next apply — a
+		// duplicate, against a limit of five per organization.
+		if circleci.HasStatus(err, http.StatusNotFound) {
+			resp.Diagnostics.AddError(
+				"Unable to read CircleCI URL orb allow list entry "+state.Id.ValueString(),
+				fmt.Sprintf(
+					"CircleCI answered 404 for organization %s. An entry is read by listing the "+
+						"organization's allow list, so this is about the organization rather than the "+
+						"entry: either %s does not exist, or the API token may not view it.\n\n"+
+						"The entry has been left in Terraform state, because removing it would add a "+
+						"duplicate entry on the next apply while the original is still there.",
+					org, org,
+				),
+			)
 
 			return
 		}
@@ -283,4 +324,82 @@ func (r *urlOrbAllowListEntryResource) ImportState(ctx context.Context, req reso
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization"), req.ID[:slash])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID[slash+1:])...)
+}
+
+var _ validator.String = urlOrbAllowListPrefixValidator{}
+
+// urlOrbAllowListPrefixValidator enforces the two rules the API applies to an
+// allow list prefix, so that a typo fails at plan time instead of after a
+// half-applied change.
+//
+// The API parses the prefix as a URL and requires the https scheme and a path
+// that ends in "/". The trailing slash is what stops a prefix from matching more
+// than it names: "https://example.com/org" would also permit
+// "https://example.com/org-evil/...", so the API refuses it. Both checks mirror
+// the server rule exactly rather than guessing at a stricter shape, so a prefix
+// carrying a query string — whose path can still end in "/" — is still accepted.
+type urlOrbAllowListPrefixValidator struct{}
+
+// urlOrbAllowListPrefix returns the prefix validator.
+func urlOrbAllowListPrefix() validator.String { return urlOrbAllowListPrefixValidator{} }
+
+// Description describes the validation in plain text formatting.
+func (urlOrbAllowListPrefixValidator) Description(_ context.Context) string {
+	return `must be an https URL whose path ends in "/"`
+}
+
+// MarkdownDescription describes the validation in Markdown formatting.
+func (v urlOrbAllowListPrefixValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+// ValidateString performs the validation.
+func (urlOrbAllowListPrefixValidator) ValidateString(
+	_ context.Context,
+	req validator.StringRequest,
+	resp *validator.StringResponse,
+) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+
+	value := req.ConfigValue.ValueString()
+
+	parsed, err := url.Parse(value)
+	if err != nil {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid URL orb allow list prefix",
+			fmt.Sprintf("Expected an https URL, but %q could not be parsed as one: %s.", value, err),
+		)
+
+		return
+	}
+
+	if parsed.Scheme != "https" {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid URL orb allow list prefix",
+			fmt.Sprintf(
+				"The CircleCI API accepts only https prefixes, and %q uses %q. Orb source is "+
+					"fetched over the network, so an unencrypted prefix is rejected.",
+				value, parsed.Scheme,
+			),
+		)
+
+		return
+	}
+
+	if !strings.HasSuffix(parsed.Path, "/") {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid URL orb allow list prefix",
+			fmt.Sprintf(
+				"The CircleCI API requires the prefix path to end in \"/\", and %q does not. "+
+					"Without it the prefix would also match sibling paths that merely start with "+
+					"the same characters. Add a trailing slash, for example %q.",
+				value, value+"/",
+			),
+		)
+	}
 }

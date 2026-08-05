@@ -68,6 +68,20 @@ func (s *GroupService) Get(ctx context.Context, orgID, groupID string) (*Group, 
 
 // List fetches every group in an organization, following pagination to the last
 // page. The result is nil when the organization has no groups.
+//
+// This route advertises pagination it does not implement: it answers with a
+// next_page_token, and the published schema gives it limit and page-token
+// parameters, but the handler reads no inbound token and the service behind it
+// answers {"items": [...]} with no token of its own, so next_page_token is
+// always null. Draining is kept here anyway, because a token that never arrives
+// costs one request either way, and DrainV2's ErrPaginationDidNotAdvance guard
+// means that if the route ever starts returning a token without honouring the
+// one it is given, this fails loudly instead of looping.
+//
+// The membership list (formerly group_membership.go, removed — see
+// CHANGELOG.md) had the same advertised-but-unimplemented pagination, but for a
+// different reason it could not stay in this package: those routes 404 on the
+// public host entirely, unlike this one.
 func (s *GroupService) List(ctx context.Context, orgID string) ([]Group, error) {
 	return DrainV2(ctx, func(ctx context.Context, pageToken string) (PaginatedResponse[Group], error) {
 		var page PaginatedResponse[Group]

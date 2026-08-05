@@ -201,10 +201,10 @@ func TestContextEnvVarResourceUnit_ReadAPIError(t *testing.T) {
 
 // TestContextEnvVarResourceUnit_ForbiddenIsNotSilentlyRemoved mirrors
 // context_resource_unit_test.go's test of the same name: the context
-// environment variable list route sits behind the same the context-resolution step
-// middleware, so a context this token cannot resolve answers 403 and must
-// surface a diagnostic rather than silently dropping (and later recreating a
-// possibly-live) variable the way a genuine 404 does.
+// environment variable list route resolves the context id the same way a
+// context read does, so a context this token cannot resolve answers 403 and
+// must surface a diagnostic rather than silently dropping (and later
+// recreating a possibly-live) variable the way a genuine 404 does.
 func TestContextEnvVarResourceUnit_ForbiddenIsNotSilentlyRemoved(t *testing.T) {
 	api, host := newContextFakeAPI(t)
 	api.seedContext(contextEnvVarUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")

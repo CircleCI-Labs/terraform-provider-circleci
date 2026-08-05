@@ -21,8 +21,8 @@ type deployRequest struct {
 	query  string
 }
 
-// newDeployServer serves the API-shaped deploy routes from handler and
-// records every request, so tests can assert on the exact paths and query
+// newDeployServer serves deploy routes shaped like the real API from handler
+// and records every request, so tests can assert on the exact paths and query
 // strings sent.
 func newDeployServer(t *testing.T, handler http.HandlerFunc) (*circleci.Client, *[]deployRequest) {
 	t.Helper()

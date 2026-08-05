@@ -12,17 +12,18 @@ asserted: if a route is missing here, nobody has looked at it.
 Routes were taken from **what the API actually serves**, not only from the published
 OpenAPI spec, because the two do not match in either direction:
 
-- The spec **omits routes that exist** — group membership and the GitHub App repository
- routes are both absent from it, which is why earlier research wrongly concluded group
- membership could not be managed as code.
+- The spec **omits routes that exist** — the GitHub App repository routes are absent
+ from it despite being served. Group membership looked like the same story — its
+ routes are absent from the spec too — but turned out to be the opposite case: see
+ "Groups and access" below.
 - The spec **describes routes that are never served** — `.../projects/{project_id}/groups/{group_id}`
  is specified, and implemented, but not reachable. That is why
  `circleci_project_group`'s Delete drops state with a warning instead of erroring.
 
-Coverage was therefore checked against the routes CircleCI's API services actually
-register, cross-checked against the published v2 spec (79 unique paths, 114
-method+path combinations, none marked deprecated) and against each API's own
-behaviour for status codes and field names.
+Coverage was therefore checked against the routes CircleCI actually serves,
+cross-checked against the published v2 spec (79 unique paths, 114 method+path
+combinations, none marked deprecated) and against the API's real behaviour for status
+codes and field names.
 
 Note that the service fronting the public API is a *proxy* and does not own the whole v2
 surface: contexts, checkout keys, project environment variables, insights, policies,
@@ -48,16 +49,32 @@ omission, reason given · **gap** known, not yet built
 | `GET /organizations/:org_id/groups/:group_id` | `circleci_group` |
 | `POST /organizations/:org_id/groups` | `circleci_group` |
 | `DELETE /organizations/:org_id/groups/:group_id` | `circleci_group` |
-| `POST /organizations/:org_id/groups/:group_id/users` | `circleci_group_membership` |
-| `POST /organizations/:org_id/groups/:group_id/remove_users` | `circleci_group_membership` |
-| `GET /organizations/:org_id/groups/:group_id/users` | `circleci_group_membership` (data source) |
+| `POST /organizations/:org_id/groups/:group_id/users` | not exposed on the public host — see below |
+| `POST /organizations/:org_id/groups/:group_id/remove_users` | not exposed on the public host — see below |
+| `GET /organizations/:org_id/groups/:group_id/users` | not exposed on the public host — see below |
 | `GET /organizations/:org_id/projects/:project_id/groups` | `circleci_project_groups` |
 | `POST /organizations/:org_id/projects/:project_id/groups` | `circleci_project_group` |
 | `POST /organizations/:org_id/projects/:project_id/groups/:group_id/update-role` | `circleci_project_group` |
 
-Group membership was originally documented as web-UI-only and impossible to express
-as IaC. That was wrong — the routes exist, they are just absent from the published
-spec. See `DESIGN.md`.
+Group membership was briefly implemented as `circleci_group_membership` against
+these public-looking routes, then removed (see `CHANGELOG.md`). All three
+membership routes exist, but only the four anchored group and project-group
+patterns above are reachable on the public host — the membership paths
+(`.../groups/:group_id/users`, `.../groups/:group_id/remove_users`) answer only on a
+separate
+ingress and answer 404 on the public host, even for a group that demonstrably
+exists. This was verified live: creating a group (200), then `GET`ting its
+membership (404), then deleting the same group cleanly (204). Groups themselves
+and project-group role grants are unaffected — both go through routes that are
+anchored in the public table — so groups remain creatable and grantable through
+this (public) API regardless.
+
+`circleci_group_membership` is since **restored**, but against a different route
+family entirely: CircleCI's private origin (`/private/ciam/orgs/{org_id}/groups/
+{group_id}/users`, `add-users`, `delete-users` — see
+`internal/circleci/group_membership.go` and `private.go`), not this one. Nothing
+above changes — the public `.../groups/:group_id/users` family is still
+unreachable, and still not what the resource uses.
 
 ### Projects
 
@@ -96,8 +113,57 @@ slug-based route above cannot address a standalone (`circleci/<uuid>`) organizat
 | `GET /insights/{project-slug}/branches` | **gap** — "all branches for a project". Bounded and arguably useful for iterating branches, unlike the rest of insights |
 | `GET`/`POST /owner/{id}/context/{ctx}/decision`, `/decision/{id}`, `/decision/{id}/policy-bundle` | **no** — decision audit logs and ad-hoc policy evaluation. `circleci_config_policy_settings` covers `/decision/settings`, which is the part that is configuration |
 
-Pipeline definitions and triggers are **not available on CircleCI Server**: its gateway
-routes served does not forward them.
+Pipeline definitions and triggers are **not available on CircleCI Server**: a Server
+installation's gateway does not forward those routes.
+
+### Users, pipeline runs, workflows and jobs
+
+**Correction:** these were previously listed under the "v3 — complete" heading below,
+mapped to plural, v3-styled paths (`/users`, `/jobs/:id`, `/workflows/:id`, `/runs/:id`).
+That was wrong. `internal/circleci/user.go`, `pipeline_run.go`, `workflow.go` and
+`job.go` each say plainly, in their own doc comments, that they call v2 — and every
+one of them calls `Client.GetV2`, never `GetV3`. `job.go`'s comment gives the reason
+for one of the four directly: the v2 UUID route (`GET /api/v2/jobs/{id}`) has no
+CircleCI Server equivalent, so the provider uses the slug-and-number route
+(`GET /api/v2/project/{slug}/job/{job-number}`) instead — a real, documented v2 route,
+just not the one the API reference leads with. This was found while cross-checking
+this file against the Go source; see the note on the
+same finding.
+
+| Route | Provider |
+|---|---|
+| `GET /me`, `GET /user/:id` | `circleci_user` |
+| `GET /me/collaborations` | `circleci_user_collaborations` |
+| `GET /pipeline/:id` | `circleci_pipeline_run` |
+| `GET /project/:slug/pipeline/:number` | `circleci_pipeline_run` (lookup by project and pipeline number) |
+| `GET /pipeline/:id/config` | `circleci_pipeline_run` (`config`/`compiled_config` attributes) |
+| `GET /project/:slug/job/:job-number` | `circleci_job` |
+| `GET /workflow/:id` | `circleci_workflow` |
+| `GET /workflow/:id/job` | `circleci_workflow_jobs` |
+
+**Second correction, same section:** `GET /jobs/:id/artifacts` was listed as
+implemented, backing `circleci_job`'s `artifacts` attribute. `circleci_job` has no
+such attribute — `job.go`'s own comment on `JobParallelRun` says artifacts and test
+results are deliberately not exposed, "per-build detail that would make this data
+source read as a partial build log rather than a job summary," and the data source's
+own schema documentation says the same thing. There is no `artifacts` field on `Job`
+to attach a route to. Removed rather than corrected to a different route, because
+the capability itself doesn't exist in the provider today.
+
+Not independently re-verified in this pass, so kept separate rather than folded into
+the corrected table above: the "gap"/"no" rows for per-run test results, unbounded
+log streaming, workflow cancel/rerun, and run search/facet-values. They plausibly
+belong to the same v2 family — test results in particular are addressed the same way
+(`GET /api/v2/project/{slug}/job/{job-number}/tests` is a real, documented v2 route)
+— but that was not checked against source for this correction, only the four routes
+this provider actually calls were.
+
+| Route | Provider |
+|---|---|
+| `GET /project/:slug/job/:job-number/tests` | **gap** — per-run test results; reporting rather than state, same reasoning as the omitted insights endpoints |
+| Job log streaming (stdout/stderr, condensed) | **no** — unbounded log output would churn state on every refresh |
+| Workflow cancel, rerun | **no** — runtime actions, not desired state |
+| Run search, facet-values | **gap** — faceted search over run history; reporting |
 
 ### GitHub App
 
@@ -133,20 +199,8 @@ maintainer, and the documentation says so on the page.
 
 ## v3 — complete
 
-### Users, jobs and workflows
-
-| Route | Provider |
-|---|---|
-| `GET /users` | `circleci_user`, `circleci_user_collaborations` |
-| `GET /jobs`, `GET /jobs/:id` | `circleci_job` |
-| `GET /jobs/:id/artifacts` | `circleci_job` (`artifacts` attribute) |
-| `GET /jobs/:id/tests` | **gap** — per-run test results; reporting rather than state, same reasoning as the omitted insights endpoints |
-| `GET /jobs/:id/stdout`, `/stderr`, `/stdout/condensed` | **no** — unbounded log output would churn state on every refresh |
-| `POST /workflows/:id/cancel`, `/rerun` | **no** — runtime actions, not desired state |
-| `GET /workflows`, `GET /workflows/:id` | `circleci_workflow`, `circleci_workflow_jobs` |
-| `GET /runs`, `GET /runs/:id` | `circleci_pipeline_run` |
-| `POST /runs` | **no** — triggering a run is a runtime action |
-| `POST /runs/search`, `GET /runs/facet-values`, `POST /runs/facet-values/search` | **gap** — faceted search over run history; reporting |
+Users, pipeline runs, workflows and jobs were previously listed here and are not:
+see the corrected "Users, pipeline runs, workflows and jobs" section under v2 above.
 
 ### Orbs
 
@@ -177,22 +231,59 @@ maintainer, and the documentation says so on the page.
 | `GET/POST/DELETE /projects/:id/environment-variables` | `circleci_project_environment_variable` |
 | `DELETE /projects/:id/dlc` | **no** — purges the Docker layer cache. A one-shot side effect with nothing to read back, so it cannot be a resource; Terraform has no primitive for "run this once". |
 
-### Contexts
-
-| Route | Provider |
-|---|---|
-| `GET/POST /contexts`, `GET/DELETE /contexts/:id` | `circleci_context`, `circleci_contexts` |
-| `GET /contexts/:id/env-vars`, `POST /contexts/:id/env-vars/set`, `DELETE /contexts/:id/env-vars` | `circleci_context_environment_variable` |
-| `GET/POST /context-restrictions`, `DELETE /context-restrictions/:id` | `circleci_context_restriction`, `circleci_context_restrictions` |
-
 ### Runners
 
+The runner admin API serves **two competing surfaces** for resource classes and
+tokens: a legacy, flat one, and a newer JSON:API-style one mounted at
+`/runner/resource-classes`, `/runner/tokens` and `/runner/agents`. **The provider
+deliberately stays on the legacy surface** — this is a decision, not an oversight:
+
 | Route | Provider |
 |---|---|
-| `GET /runner/resource-classes`, `GET /runner/resource-classes/:id` | `circleci_runner_resource_class`, `circleci_runner_resource_classes` |
-| `POST /runner/resource-classes`, `POST /runner/resource-classes/:id/update`, `DELETE …/:id` | `circleci_runner_resource_class` |
-| `GET /runner/tokens`, `GET /runner/tokens/:id`, `POST`, `DELETE` | `circleci_runner_token`, `circleci_runner_tokens`, `circleci_runner_token` (ephemeral) |
-| `GET /runner/agents` | `circleci_runners` |
+| `GET/POST /runner/resource`, `GET/DELETE /runner/resource/:id` | `circleci_runner_resource_class`, `circleci_runner_resource_classes` |
+| `GET/POST /runner/token`, `GET/DELETE /runner/token/:id` | `circleci_runner_token`, `circleci_runner_tokens`, `circleci_runner_token` (ephemeral) |
+| `GET /runner` | `circleci_runners` |
+
+**Correction:** this previously said neither surface has an update route at all.
+That is wrong for the resource-class half. The newer JSON:API-style surface
+registers `POST /runner/resource-classes/{id}/update`, a partial update of the
+one mutable field a resource class has (`description`) — a real, in-place update,
+not a resource re-creation. It does not exist on the legacy `/runner/resource`
+surface this provider actually calls, and it does not exist for tokens on
+*either* surface: a token is create/list/delete only regardless of which surface
+serves it, so `circleci_runner_token` having no `Update` still stands. Only
+`circleci_runner_resource_class` is affected by the correction.
+
+**Consequence: this does not change which surface the provider uses.** The three
+reasons below for staying on the legacy surface are about `circleci_runners` and
+about CircleCI Server, and none of them are about resource classes specifically —
+moving just the resource-class family to the newer surface for `Update`'s sake
+would still drop Server support for it (Server serves only the legacy surface,
+update route included), so `circleci_runner_resource_class` correctly keeps
+`RequiresReplace` on `resource_class` and has no `Update` today. Worth revisiting
+only alongside a full migration to the newer surface, not on its own — and even
+then, the update this route offers is narrow: it can rename a resource class's
+`description`, never its `resource_class` value, so replacement would still be
+required for the one attribute practitioners are most likely to want to change in
+place.
+
+Why the legacy surface rather than the newer one:
+
+- **Both are served by the same API**, so this is not a
+ matter of one being deprecated infrastructure — the newer routes are the
+ *canonical* surface going forward, and the legacy ones are explicitly the older
+ shape.
+- **CircleCI Server serves only the legacy surface.** Moving would either drop
+ Server support or require maintaining both.
+- **Migrating would be breaking and lossy for `circleci_runners`.** The newer
+ `/runner/agents` route drops `hostname`, `ip` and `last_used` — all three are
+ attributes on `Runner` today — and swaps the `status` string (`"busy"`/`"idle"`)
+ for a boolean `is_busy`. Adopting it would remove attributes and change a type,
+ with no way to reconstruct the dropped fields from the new response.
+
+If the legacy surface is ever withdrawn, this needs revisiting; until then, staying
+on it is the only option that does not regress `circleci_runners` or drop Server
+support.
 
 ### Notifications
 
@@ -243,13 +334,24 @@ same time.
 | `GET /deploy/environments/{id}` | `circleci_deploy_environment` |
 | `GET /deploy/projects/{id}/settings` | `circleci_deploy_settings` |
 
-A management surface does exist, but it is served only to the CircleCI web
-application, authenticated with a browser session rather than an API token — so **a
-Terraform provider cannot call any of it.** This is a missing public API, not an
-unimplemented provider feature.
+A larger management surface does exist behind the CircleCI web application,
+authenticated with a browser session rather than an API token, and most of it is
+correctly described as unreachable from a Terraform provider. **One piece of it is
+not**, though, and it is worth being precise about which: `PATCH
+/api/v2/deploy/projects/{id}/settings`, the write half of the one settings route
+already read above, answers `404` on the public path but `400` — not `404`, not
+`401` — for an empty body on the service's own private origin. A route that parses
+and rejects an empty body is a route that exists and authenticated the token; it is
+simply not forwarded publicly the way the `GET` on the same path already is. See
+the client source for the full evidence.
+**This provider cannot call it today, through the path CircleCI publishes** — which
+is a narrower, more actionable claim than "cannot call any of it," and the fix is
+correspondingly small.
 
-What sits behind that boundary and would be worth building the moment it is reachable
-with a token:
+The rest of the management surface is the bigger claim, and that one still holds —
+nothing found while researching the deploy-settings write path suggests release
+integrations, integration tokens, environment hierarchies or component writes are
+reachable by any route, public or private, with a personal token:
 
 | Capability | Would become |
 |---|---|
@@ -257,28 +359,29 @@ with a token:
 | Integration tokens, create/list/revoke | analogous to `circleci_runner_token` |
 | Environment hierarchies and their assignments | pure configuration, a natural resource |
 | Component update and archive | write access to components the provider can only read |
-| Deploy settings at project and organization scope | writable `circleci_deploy_settings` |
+| Deploy settings write access at organization scope, if that turns out to be a separate route from the project-scope one above | writable `circleci_deploy_settings` at that scope too |
 
 Correctly out of scope even if they were reachable: deploy, rollback, cancel, retry,
 promote, restart, scale and version-restore are runtime actions; release, status,
 insights and failed-release listings are reporting; and the agent and in-job APIs
 authenticate as something other than a user.
 
-`circleci_deploy_settings` being read-only follows directly from this: no public write
-route exists. It is also why a customer request for centrally managed rollback
-configuration cannot be satisfied today — the provider already reads
-`rollback_pipeline_definition_id` and needs only a public write route to manage it. See
-`NEEDS-FROM-MAINTAINER.md`.
+`circleci_deploy_settings` being read-only today follows directly from this: the
+public proxy forwards `GET` but not `PATCH`. That is also why a customer request for
+centrally managed rollback configuration cannot be satisfied today — the provider
+already reads `rollback_pipeline_definition_id` and needs only the existing `PATCH`
+forwarded publicly to manage it.
 
 ---
 
-## Beyond the public API service
+## Beyond the routes above
 
-These are served by the v2 API and other services, so they are absent from the
-route tables above. Each was confirmed against its own handler.
+These are served elsewhere in the API, so they are absent from the tables above.
+Each was confirmed individually.
 
 | Area | Provider | Version |
 |---|---|---|
+| Contexts — see below | `circleci_context`, `circleci_contexts`, `circleci_context_environment_variable`, `circleci_context_restriction`, `circleci_context_restrictions` | v2 |
 | Checkout keys | `circleci_checkout_key`, `circleci_checkout_keys` | v2 |
 | Webhooks | `circleci_webhook`, `circleci_webhooks` | v2 |
 | Config policies | `circleci_config_policy_bundle`, `circleci_config_policy_settings` | v2 |
@@ -290,20 +393,33 @@ route tables above. Each was confirmed against its own handler.
 | Audit log configs | `circleci_audit_log_config`, `circleci_audit_log_configs`, `circleci_audit_log_access` — see `DESIGN.md` | v2 |
 | Follow a project | internal to `circleci_project` | **v1.1** |
 | Legacy scheduled pipelines | **no** — superseded by a schedule trigger; a migration guide exists | v2 |
-| Raw project SSH keys | **no** — v1.1 only and absent from the gateway inventory; checkout keys are the supported mechanism | v1.1 |
+| Raw project SSH keys | **no** — v1.1 only, and not served on CircleCI Server; checkout keys are the supported mechanism | v1.1 |
 | Test suite, impact analysis, selection data | **no** — `/api/v2/tests/*`, `/api/v2/impact-analysis`, `/api/v2/selection-data` authenticate with TaskAuth and are meant to be called *from inside a running job*, not by an operator. `GET /api/v2/projects/{id}/impact-analysis` does accept a PAT, but it reports per-run analysis | v2 |
 | LLM agents, LLM gateway proxy | **no** — `/api/v2/agents/*`, undocumented, and not infrastructure to declare | v2 |
 | Dev sandboxes | **no** — `/api/v2/sandbox/*` provisions ephemeral dev environments; a developer inner-loop tool | v2 |
 
 7 of the 10 insights endpoints are omitted: they answer "what happened in this run"
 with unbounded row counts that would churn state on every refresh, and two are marked
-deprecated in the v2 API routes served.
+deprecated.
 
-### Served directly, bypassing the public API service
+### Contexts
 
-Some routes are in the v2 spec but are not served by the service that fronts the public
-API — the gateway sends them straight to their API. They are easy to miss for
-exactly that reason: looking only at what fronts the public API finds nothing.
+Contexts are **v2**, not v3 — a previous version of this document had them under the
+v3 heading. Both `/api/v2/context*` and a v3 contexts surface exist and are
+registered separately; the provider calls the v2 family, singular ("context", not
+"contexts") and nested rather than flat:
+
+| Route | Provider |
+|---|---|
+| `GET/POST /context`, `GET/DELETE /context/:id` | `circleci_context`, `circleci_contexts` |
+| `GET /context/:id/environment-variable`, `PUT/DELETE /context/:id/environment-variable/:name` | `circleci_context_environment_variable` |
+| `GET/POST /context/:id/restrictions`, `DELETE /context/:id/restrictions/:id` | `circleci_context_restriction`, `circleci_context_restrictions` |
+
+### In the spec, but served on a different path than the rest of v2
+
+Some routes are in the v2 spec but are not reached the same way as most of v2. They are
+easy to miss for exactly that reason: checking only where the bulk of v2 lives finds
+nothing.
 
 | Route | Provider |
 |---|---|
@@ -318,7 +434,7 @@ exactly that reason: looking only at what fronts the public API finds nothing.
 listing members, inviting them with a role, changing a role and removing a member — but
 they are served on a host reserved for internal use rather than through CircleCI's public
 API, so the provider does not depend on them. Revisit if they are ever exposed publicly
-with token auth. See `NEEDS-FROM-MAINTAINER.md`.
+with token auth.
 
 ### No API exists
 

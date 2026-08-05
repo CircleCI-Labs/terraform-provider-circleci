@@ -138,7 +138,11 @@ func (r *orbVersionResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"orb_name": schema.StringAttribute{
 				MarkdownDescription: "Fully qualified name of the orb this version belongs to, " +
-					"`<namespace>/<orb>`.",
+					"`<namespace>/<orb>`.\n\n" +
+					"No orb version route reports this, so it is resolved with a second request " +
+					"against the orb itself. That lookup is best effort: if it fails the version is " +
+					"still recorded, with this attribute empty, rather than a just-published " +
+					"version being lost.",
 				Computed: true,
 			},
 			"created_at": schema.StringAttribute{

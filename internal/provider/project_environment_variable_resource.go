@@ -241,4 +241,15 @@ func (r *projectEnvironmentVariableResource) ImportState(ctx context.Context, re
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_slug"), projectSlug)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
+	resp.Diagnostics.AddWarning(
+		"Project environment variable value cannot be read from API",
+		"CircleCI never returns a project environment variable's value, on any route, so this import "+
+			"leaves it unset. Set 'value' (or 'value_wo' plus 'value_wo_version', to keep the secret out "+
+			"of state) in your Terraform configuration before running plan or apply: the resource "+
+			"requires exactly one of the two, and there is nothing to fall back on. Because the API's "+
+			"only route for this value is create-then-delete, applying a configuration whose value "+
+			"differs from the current secret destroys and recreates the resource, so this is also the "+
+			"one case here where a mismatch cannot be silently papered over the way a context "+
+			"environment variable's in-place upsert can.",
+	)
 }

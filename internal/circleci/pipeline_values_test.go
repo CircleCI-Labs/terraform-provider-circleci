@@ -11,15 +11,14 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// The fixture below mirrors
-// the CircleCI API's "200 response with
-// pipeline values" case: a flat object mixing string and JSON-number values
-// (pipeline.number is a number, not a string), which is exactly what
-// GetValues has to render to strings for Terraform's map attributes.
+// The fixture below matches what the API actually returns: a flat object
+// mixing string and JSON-number values (pipeline.number is a number, not a
+// string), which is exactly what GetValues has to render to strings for
+// Terraform's map attributes.
 const testPipelineValuesBody = `{
   "pipeline.id": "5034460f-c7c4-4c43-9457-de07e2029e7b",
   "pipeline.number": 42,
-  "pipeline.project.git_url": "https://github.com/circleci/example",
+  "pipeline.project.git_url": "https://github.com/example-org/example-repo",
   "pipeline.project.type": "github",
   "pipeline.git.tag": "",
   "pipeline.git.branch": "main",
@@ -108,8 +107,7 @@ func TestPipelineRunServiceGetValuesNotFound(t *testing.T) {
 func TestPipelineRunServiceGetValuesInvalidID(t *testing.T) {
 	t.Parallel()
 
-	// Mirrors handler_get_values_test.go's "400 response for invalid pipeline ID"
-	// case: the server validates the id is a UUID before proxying anywhere, so
+	// The server validates the id is a UUID before proxying anywhere, so
 	// the client must surface that 400 rather than treating it as IsNotFound.
 	client, _ := newV2Server(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

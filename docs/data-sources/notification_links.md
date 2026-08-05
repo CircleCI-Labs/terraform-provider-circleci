@@ -16,8 +16,8 @@ drive. A resource whose `Create` could never run would be worse than no resource
 route also takes no ID — it unlinks by criteria — so even destroy-only management would not map onto a
 Terraform resource cleanly.
 
-~> **Experimental upstream.** The API's own documentation states that field names, request
-and response shapes, and pagination semantics are not yet stable, and asks clients not to depend on the
+~> **Experimental upstream.** This is an experimental upstream API: field names, request and response
+shapes, and pagination semantics are not yet stable, and CircleCI asks clients not to depend on the
 endpoint in production. Treat this data source the same way.
 
 -> **You cannot read another user's links.** `user_id` accepts only `me` or the calling user's own

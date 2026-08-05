@@ -46,6 +46,39 @@ import (
 // stale retained one, leaving state naming two different definitions. The plan is the
 // only place that can be corrected, and the value has to come from *configuration*,
 // which is the only thing that knows which of the two names was written.
+//
+// WHY CHANGING THE DEFINITION REPLACES THE TRIGGER
+//
+// The definition id appears in exactly one route, the create:
+//
+//	POST  /projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers
+//	PATCH /projects/{project_id}/triggers/{trigger_id}          <- no slot for a definition
+//	GET   /projects/{project_id}/triggers/{trigger_id}           <- does not return one
+//
+// So a changed definition id used to plan an in-place Update, and the PATCH body has
+// nowhere to put it: the API accepted the request, ignored the field, and reported
+// success while the trigger stayed attached to the old definition. Read cannot
+// detect that drift either — the definition is never returned, which is why the
+// provider carries the value forward from state — so state confidently reported a
+// value the API had discarded, for ever. Issue #29.
+//
+// RequiresReplaceIfConfigured, not RequiresReplace. Both replace on a genuine
+// change, and neither replaces when the practitioner merely renames the attribute —
+// but for different reasons, and only one of them is load-bearing on its own.
+// RequiresReplaceIfConfigured declines because the configuration value for the name
+// that was not written is null. Plain RequiresReplace declines only because
+// UseStateForUnknown ran first and copied the prior value over the planned unknown,
+// prior value included when that value is null. So plain RequiresReplace makes the
+// no-op depend on the order of two plan modifiers on the same attribute, and the
+// case where it bites is not hypothetical: `pipeline_definition_id` is null in every
+// state written before 0.5.0, so with UseStateForUnknown removed, any plan that
+// changes anything at all on such a trigger replaces it. Verified both ways in
+// TestTriggerPlanUpgradingFrom04StateDoesNotReplace. Same reasoning, and the same
+// choice, as org_id_deprecation.go.
+//
+// TestTriggerResourceUnit_SwitchingPipelineAttributeIsNoop is what holds the rename
+// in place; TestTriggerResourceUnit_ChangingPipelineDefinitionIDReplaces is what
+// proves a real change is no longer silently dropped.
 
 // pipelineDefinitionIDDeprecationMessage is the warning shown on every plan that
 // still uses the old name. It says switching destroys nothing, because that is the
@@ -65,12 +98,16 @@ func deprecatedTriggerPipelineIDAttribute() schema.StringAttribute {
 			"[`circleci_pipeline_definition`](pipeline_definition), not of a pipeline run, " +
 			"which is what `pipeline_id` means on the run-scoped data sources. Both names " +
 			"work and mean the same thing; set exactly one. Switching to " +
-			"`pipeline_definition_id` does not replace the trigger.",
+			"`pipeline_definition_id` does not replace the trigger.\n\n" +
+			"Changing the definition *id* does: a trigger is created under a definition and " +
+			"there is no route that moves it to another one.",
 		DeprecationMessage: pipelineDefinitionIDDeprecationMessage,
 		Optional:           true,
 		Computed:           true,
 		PlanModifiers: []planmodifier.String{
 			stringplanmodifier.UseStateForUnknown(),
+			// Only when this name is the one written: see the header comment.
+			stringplanmodifier.RequiresReplaceIfConfigured(),
 		},
 	}
 }
@@ -83,11 +120,19 @@ func triggerPipelineDefinitionIDAttribute() schema.StringAttribute {
 			"[`circleci_pipeline_definition`](pipeline_definition) this trigger creates " +
 			"pipeline runs from.\n\nThis is a pipeline **definition** — where to check out " +
 			"code and where to find configuration — not a pipeline run. Same field as the " +
-			"deprecated `pipeline_id`; set exactly one of the two.",
+			"deprecated `pipeline_id`; set exactly one of the two.\n\n" +
+			"~> **Changing this forces the trigger to be replaced.** A trigger is created " +
+			"under a pipeline definition and CircleCI has no route that moves it to another " +
+			"one — the update endpoint has no field for it. Replacement produces a new trigger " +
+			"id, and for a `webhook` event source a new `event_source_web_hook_url`, so " +
+			"anything posting to the old URL has to be repointed. Switching between this " +
+			"attribute and the deprecated `pipeline_id` is not a change and replaces nothing.",
 		Optional: true,
 		Computed: true,
 		PlanModifiers: []planmodifier.String{
 			stringplanmodifier.UseStateForUnknown(),
+			// Only when this name is the one written: see the header comment.
+			stringplanmodifier.RequiresReplaceIfConfigured(),
 		},
 	}
 }

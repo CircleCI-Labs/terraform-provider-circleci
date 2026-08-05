@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -75,8 +77,24 @@ func (r *organizationResource) Schema(_ context.Context, _ resource.SchemaReques
 				},
 			},
 			"vcs_type": schema.StringAttribute{
-				MarkdownDescription: "The VCS type of the CircleCI organization (e.g., github, bitbucket, circleci). Changing this value forces a new resource to be created.",
-				Required:            true,
+				MarkdownDescription: "The VCS type of the CircleCI organization: `github`, `bitbucket` or " +
+					"`circleci`. Changing this value forces a new resource to be created.\n\n" +
+					"~> **Only these three exact spellings are accepted.** The abbreviations that work in " +
+					"an organization *slug* — `gh` and `bb` — are not valid here: the create route " +
+					"validates this field against an enumeration and answers `400` for anything else. " +
+					"This provider rejects it at plan time rather than letting the apply fail.",
+				Required: true,
+				Validators: []validator.String{
+					// The enumeration is the API's, not this provider's: the create
+					// route's accepted values are exactly the set
+					// {"github" "bitbucket" "circleci"}, validated before anything else
+					// runs, and rejected again by name if something else slips through.
+					// Without this validator `vcs_type = "gh"` plans cleanly and fails
+					// mid-apply — and for a resource whose central hazard is that create
+					// and destroy behave differently per VCS type, a plan that looks fine
+					// is the wrong place to learn the value was never valid.
+					stringvalidator.OneOf(circleci.OrganizationVCSTypes()...),
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},

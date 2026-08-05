@@ -160,3 +160,125 @@ func TestDeployComponentServiceListVersions(t *testing.T) {
 		t.Errorf("request = %s %s, want GET %s", got.method, got.path, wantPath)
 	}
 }
+
+// TestDeployComponentServiceListDrainsPages asserts the component listing
+// follows the API's page-token to the end.
+//
+// The environments listing has an equivalent test; components did not, so
+// nothing pinned the *name* of the pagination parameter on this route. Getting
+// it wrong is silent: the server ignores the unknown parameter, answers page
+// one again with the same token, and a wrong name therefore looks exactly like
+// a single-page result on a fixture that only ever returns one page. The second
+// request's query string is asserted for that reason.
+//
+// The API also emits a token for every non-empty page, derived from the last
+// item, and only returns "" for an empty page, so the drain must be able to
+// stop on an empty final page, which is what the third response here is.
+func TestDeployComponentServiceListDrainsPages(t *testing.T) {
+	t.Parallel()
+
+	pages := []string{
+		`{"items":[{"id":"c1","name":"one","project_id":null,"release_count":1,"labels":[],` +
+			`"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z"}],"next_page_token":"tok-2"}`,
+		`{"items":[{"id":"c2","name":"two","project_id":null,"release_count":2,"labels":[],` +
+			`"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z"}],"next_page_token":"tok-3"}`,
+		`{"items":[],"next_page_token":""}`,
+	}
+
+	var calls int
+	client, seen := newDeployServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := pages[min(calls, len(pages)-1)]
+		calls++
+		_, _ = w.Write([]byte(body))
+	})
+
+	components, err := client.DeployComponents().List(context.Background(), testDeployOrgID, "", "")
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(components) != 2 {
+		t.Fatalf("component count = %d, want 2 (every page drained)", len(components))
+	}
+	if components[0].ID != "c1" || components[1].ID != "c2" {
+		t.Errorf("component ids = %q, %q, want c1, c2", components[0].ID, components[1].ID)
+	}
+
+	if len(*seen) != 3 {
+		t.Fatalf("request count = %d, want 3", len(*seen))
+	}
+	if got := (*seen)[0].query; got != "org-id="+testDeployOrgID {
+		t.Errorf("first request query = %q, want no page token", got)
+	}
+	if got, want := (*seen)[1].query, "org-id="+testDeployOrgID+"&page-token=tok-2"; got != want {
+		t.Errorf("second request query = %q, want %q", got, want)
+	}
+	if got, want := (*seen)[2].query, "org-id="+testDeployOrgID+"&page-token=tok-3"; got != want {
+		t.Errorf("third request query = %q, want %q", got, want)
+	}
+}
+
+// TestDeployComponentServiceListVersionsDrainsPages is the same guarantee for
+// the component-versions route, which paginates with its own token derived from
+// (name, last_deployed_at).
+func TestDeployComponentServiceListVersionsDrainsPages(t *testing.T) {
+	t.Parallel()
+
+	const componentID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+
+	pages := []string{
+		`{"items":[{"name":"1.2.3","namespace":"default","environment_id":"e1","is_live":false,` +
+			`"pipeline_id":"` + circleci.ZeroUUID + `","workflow_id":"` + circleci.ZeroUUID + `",` +
+			`"job_id":"` + circleci.ZeroUUID + `","last_deployed_at":"2024-04-24T15:10:21.123Z"}],` +
+			`"next_page_token":"tok-2"}`,
+		`{"items":[{"name":"1.2.4","namespace":"default","environment_id":"e1","is_live":true,` +
+			`"pipeline_id":"3c4d5e6f-7a8b-49c0-91d2-e3f4a5b6c7d8",` +
+			`"workflow_id":"5e6f7a8b-9c0d-41e2-a3f4-b5c6d7e8f901",` +
+			`"job_id":"7a8b9c0d-1e2f-43a4-b5c6-d7e8f9012345","job_number":17,` +
+			`"last_deployed_at":"2024-04-25T15:10:21.123Z"}],"next_page_token":null}`,
+	}
+
+	var calls int
+	client, seen := newDeployServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := pages[min(calls, len(pages)-1)]
+		calls++
+		_, _ = w.Write([]byte(body))
+	})
+
+	versions, err := client.DeployComponents().ListVersions(context.Background(), componentID)
+	if err != nil {
+		t.Fatalf("ListVersions returned error: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("version count = %d, want 2 (both pages drained)", len(versions))
+	}
+
+	// job_number carries omitempty upstream on an int64, where omitempty does
+	// work, so it really is absent on the first row and present on the second.
+	// The three UUID fields do not, because omitempty never applies to a
+	// fixed-size array like uuid.UUID: they arrive as the all-zero sentinel.
+	if versions[0].JobNumber != 0 {
+		t.Errorf("first version job number = %d, want 0 (omitted by the API)", versions[0].JobNumber)
+	}
+	if versions[1].JobNumber != 17 {
+		t.Errorf("second version job number = %d, want 17", versions[1].JobNumber)
+	}
+	if versions[0].PipelineID != circleci.ZeroUUID {
+		t.Errorf("first version pipeline id = %q, want the all-zero sentinel", versions[0].PipelineID)
+	}
+	if versions[1].PipelineID != "3c4d5e6f-7a8b-49c0-91d2-e3f4a5b6c7d8" {
+		t.Errorf("second version pipeline id = %q, want the recorded run id", versions[1].PipelineID)
+	}
+
+	if len(*seen) != 2 {
+		t.Fatalf("request count = %d, want 2", len(*seen))
+	}
+	wantPath := "/api/v2/deploy/components/" + componentID + "/versions"
+	if got := (*seen)[0]; got.path != wantPath || got.query != "" {
+		t.Errorf("first request = %s?%s, want %s with no query", got.path, got.query, wantPath)
+	}
+	if got, want := (*seen)[1].query, "page-token=tok-2"; got != want {
+		t.Errorf("second request query = %q, want %q", got, want)
+	}
+}

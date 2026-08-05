@@ -20,9 +20,15 @@ renamed for exactly that reason; the old name still works, and
 [Renaming pipeline resources and data sources](../guides/renaming-pipeline-types)
 covers the move.
 
-~> **Not available on CircleCI Server** This data source uses the
-`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
-Server installation does not expose.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — and **not** for the v3 reason that covers orbs and organization settings. `pipeline-definitions` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. v3 arriving on Server would therefore not make this work. `deployment = "server"` is refused explicitly, because the HTTP 404 a Server installation answers with is indistinguishable from a project that does not exist. |
+| **API** | `GET /api/v2/projects/{project_id}/pipeline-definitions/{id}` |
+| **Organization type** | Any. Unlike the resource, *reading* a definition works on every VCS integration — on GitHub OAuth, GitLab and Bitbucket Cloud CircleCI synthesises one from the project id. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 

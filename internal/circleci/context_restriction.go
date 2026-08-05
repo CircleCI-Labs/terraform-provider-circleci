@@ -7,9 +7,7 @@ import "context"
 
 // Context restriction routes. Restrictions are served by v2 on every deployment.
 //
-// Shapes and semantics here follow the API's the CircleCI API
-// (context_restrictions_get.go, context_restriction_post.go,
-// context_restriction_delete.go) and
+// Shapes and semantics here follow the API's own handlers and
 // github.com/CircleCI-Public/circleci-cli's internal/apiclient/context.go
 // (MIT), which agree on routes and field names.
 const (
@@ -68,10 +66,10 @@ type CreateContextRestrictionRequest struct {
 // CreateContextRestriction adds a restriction to a context and returns it as
 // stored.
 //
-// The response never carries a "name": the API's postContextRestrictions
-// (context_restriction_post.go) response struct has no such field — the
-// human-readable name of whatever the restriction points at (e.g. a project's
-// slug) is learned out of band and only reported by a later list/read. Callers
+// The response never carries a "name": the create route's response has no
+// such field — the human-readable name of whatever the restriction points at
+// (e.g. a project's slug) is learned out of band and only reported by a later
+// list/read. Callers
 // must not treat the returned Name as meaningful; it decodes to "".
 func (c *Client) CreateContextRestriction(
 	ctx context.Context,
@@ -88,7 +86,7 @@ func (c *Client) CreateContextRestriction(
 
 // DeleteContextRestriction removes a restriction from a context.
 //
-// This route sits behind the same context-resolution step as GetContext and
+// This route sits behind the same middleware as GetContext and
 // DeleteContext (see context.go), so a context that no longer exists — and
 // therefore a restriction that no longer exists along with it — answers 403
 // rather than 404.

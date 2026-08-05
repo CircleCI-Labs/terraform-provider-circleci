@@ -11,11 +11,13 @@ Fetches an iOS signing certificate by id.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-~> **Not available on CircleCI Server.** Signing certificates are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/signing/certificates/{id}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 -> **No lookup by name.** The API's only single-entity route is `GET /signing/certificates/{id}`; there is no lookup by `file_name`. Use [`circleci_ios_signing_certificates`](./ios_signing_certificates) to resolve a certificate by name within an organization first.
 
@@ -40,7 +42,7 @@ output "distribution_certificate_expires_at" {
 
 ### Read-Only
 
-- `cert_type` (String) The certificate's type, `distribution` or `development`.
+- `cert_type` (String) The certificate's type: one of `distribution`, `development`, `developer-id-application`, `developer-id-installer`, `mac-development`, `mac-app-distribution` or `mac-installer-distribution`.
 - `created_at` (String) When the certificate was uploaded, as an RFC 3339 timestamp with millisecond precision.
 - `expires_at` (String) When the certificate expires, as an RFC 3339 timestamp with millisecond precision, or an empty string if CircleCI could not determine an expiry from the certificate.
 - `file_name` (String) The certificate's display name.

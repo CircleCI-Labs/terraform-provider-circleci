@@ -5,7 +5,6 @@ package provider
 
 import (
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -18,6 +17,42 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
+
+// triggerAccImportID builds the "project_id/pipeline_definition_id/trigger_id"
+// import id trigger_resource.go's ImportState requires (see its own comment: the
+// definition id has to come from somewhere other than the API, because a read
+// carries no reference back to it). It reads pipeline_id rather than
+// pipeline_definition_id because every config below still uses the deprecated
+// name; Create/Read populate both identically (see setPipelineDefinitionIDs), so
+// either would do.
+//
+// The two-segment "project_id/trigger_id" form these acceptance tests used to
+// build here is what earlier provider versions accepted, and ImportState now
+// rejects it outright with "Invalid Import ID Format" rather than silently
+// importing a trigger with no definition id — so every ImportState step below
+// used to fail before ever reaching ImportStateVerify's attribute comparison,
+// regardless of what it ignored.
+func triggerAccImportID(resourceAddr string) func(s *terraform.State) (string, error) {
+	return func(s *terraform.State) (string, error) {
+		res := s.RootModule().Resources[resourceAddr]
+		if res == nil {
+			return "", fmt.Errorf("resource %s not found in state", resourceAddr)
+		}
+
+		for _, attr := range []string{"project_id", "pipeline_id", "id"} {
+			if _, found := res.Primary.Attributes[attr]; !found {
+				return "", fmt.Errorf("attribute %s.%s not found", resourceAddr, attr)
+			}
+		}
+
+		return fmt.Sprintf(
+			"%s/%s/%s",
+			res.Primary.Attributes["project_id"],
+			res.Primary.Attributes["pipeline_id"],
+			res.Primary.Attributes["id"],
+		), nil
+	}
+}
 
 func TestAccTriggerResourceGithub(t *testing.T) {
 	projectID := testProjectID(t)
@@ -45,27 +80,23 @@ func TestAccTriggerResourceGithub(t *testing.T) {
 			},
 			// ImportState testing
 			{
-				ResourceName:            "circleci_trigger.test_trigger_github",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"pipeline_id"},
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					triggerId, found := s.RootModule().Resources["circleci_trigger.test_trigger_github"].Primary.Attributes["id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_github.id not found")
-					}
-					projectId, found := s.RootModule().Resources["circleci_trigger.test_trigger_github"].Primary.Attributes["project_id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_github.project_id not found")
-					}
-					return fmt.Sprintf("%s/%s", projectId, triggerId), nil
-				},
+				ResourceName:      "circleci_trigger.test_trigger_github",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: triggerAccImportID("circleci_trigger.test_trigger_github"),
 			},
 		},
 	})
 }
 
+// circleci_trigger does not exist at all on GitLab, GitLab self-managed or
+// Bitbucket Cloud (README.md's compatibility matrix), and this test's
+// fixtures (project_id, pipeline_id) are the ones set in every context — so
+// nothing else here would skip on those integrations, and the create below
+// would fail against the real API rather than the provider.
 func TestAccTriggerResourceWebhook(t *testing.T) {
+	testRequireVCSType(t, "github_app", "github_oauth", "github_server")
+
 	projectID := testProjectID(t)
 	pipelineID := testPipelineID(t)
 	webhookTriggerName := rand.Text()
@@ -91,21 +122,21 @@ func TestAccTriggerResourceWebhook(t *testing.T) {
 			},
 			// ImportState testing
 			{
-				ResourceName:            "circleci_trigger.test_trigger_webhook",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"event_source_web_hook_url", "pipeline_id"},
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					triggerId, found := s.RootModule().Resources["circleci_trigger.test_trigger_webhook"].Primary.Attributes["id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_webhook.id not found")
-					}
-					projectId, found := s.RootModule().Resources["circleci_trigger.test_trigger_webhook"].Primary.Attributes["project_id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_webhook.project_id not found")
-					}
-					return fmt.Sprintf("%s/%s", projectId, triggerId), nil
-				},
+				ResourceName:      "circleci_trigger.test_trigger_webhook",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// event_source_web_hook_url only: the same GET this step's Read runs
+				// against the real API can answer with the literal string
+				// "**REDACTED**" in place of the secret when the token importing is
+				// not the one allowed to see it (see the attribute's own
+				// MarkdownDescription in trigger_resource.go). The fake this
+				// provider's other webhook trigger test runs against
+				// (TestTriggerResourceUnit_WebhookCRUD) always returns the real
+				// value regardless of token, so it carries no such ignore — this one
+				// is a hedge against real API behaviour the fake cannot reproduce,
+				// not evidence of a client-side bug.
+				ImportStateVerifyIgnore: []string{"event_source_web_hook_url"},
+				ImportStateIdFunc:       triggerAccImportID("circleci_trigger.test_trigger_webhook"),
 			},
 		},
 	})
@@ -137,21 +168,10 @@ func TestAccTriggerResourceGithubServer(t *testing.T) {
 			},
 			// ImportState testing
 			{
-				ResourceName:            "circleci_trigger.test_trigger_github_server",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"pipeline_id"},
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					triggerId, found := s.RootModule().Resources["circleci_trigger.test_trigger_github_server"].Primary.Attributes["id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_github_server.id not found")
-					}
-					projectId, found := s.RootModule().Resources["circleci_trigger.test_trigger_github_server"].Primary.Attributes["project_id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_github_server.project_id not found")
-					}
-					return fmt.Sprintf("%s/%s", projectId, triggerId), nil
-				},
+				ResourceName:      "circleci_trigger.test_trigger_github_server",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: triggerAccImportID("circleci_trigger.test_trigger_github_server"),
 			},
 		},
 	})
@@ -257,21 +277,16 @@ func TestAccTriggerResourceScheduled(t *testing.T) {
 			},
 			// ImportState testing
 			{
-				ResourceName:            "circleci_trigger.test_trigger_scheduled",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"pipeline_id", "event_source_schedule_attribution_actor"},
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					triggerId, found := s.RootModule().Resources["circleci_trigger.test_trigger_scheduled"].Primary.Attributes["id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_scheduled.id not found")
-					}
-					projectId, found := s.RootModule().Resources["circleci_trigger.test_trigger_scheduled"].Primary.Attributes["project_id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_scheduled.project_id not found")
-					}
-					return fmt.Sprintf("%s/%s", projectId, triggerId), nil
-				},
+				ResourceName:      "circleci_trigger.test_trigger_scheduled",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// event_source_schedule_attribution_actor only: a read reports the
+				// resolved actor id, never the "system"/"current" alias the config
+				// above sets, and import is a read with no prior state to preserve
+				// the alias from — see the attribute's MarkdownDescription in
+				// trigger_resource.go for the mutation-tested detail.
+				ImportStateVerifyIgnore: []string{"event_source_schedule_attribution_actor"},
+				ImportStateIdFunc:       triggerAccImportID("circleci_trigger.test_trigger_scheduled"),
 			},
 		},
 	})
@@ -303,21 +318,16 @@ func TestAccTriggerResourceScheduledNoParameters(t *testing.T) {
 				},
 			},
 			{
-				ResourceName:            "circleci_trigger.test_trigger_scheduled",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"pipeline_id", "event_source_schedule_attribution_actor"},
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					triggerId, found := s.RootModule().Resources["circleci_trigger.test_trigger_scheduled"].Primary.Attributes["id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_scheduled.id not found")
-					}
-					projectId, found := s.RootModule().Resources["circleci_trigger.test_trigger_scheduled"].Primary.Attributes["project_id"]
-					if !found {
-						return "", errors.New("attribute circleci_trigger.test_trigger_scheduled.project_id not found")
-					}
-					return fmt.Sprintf("%s/%s", projectId, triggerId), nil
-				},
+				ResourceName:      "circleci_trigger.test_trigger_scheduled",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// event_source_schedule_attribution_actor only: a read reports the
+				// resolved actor id, never the "system"/"current" alias the config
+				// above sets, and import is a read with no prior state to preserve
+				// the alias from — see the attribute's MarkdownDescription in
+				// trigger_resource.go for the mutation-tested detail.
+				ImportStateVerifyIgnore: []string{"event_source_schedule_attribution_actor"},
+				ImportStateIdFunc:       triggerAccImportID("circleci_trigger.test_trigger_scheduled"),
 			},
 		},
 	})

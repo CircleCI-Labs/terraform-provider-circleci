@@ -15,9 +15,11 @@ import (
 const (
 	// OrbVisibilityPublic restricts a listing to public orbs.
 	OrbVisibilityPublic = "public"
-	// OrbVisibilityPrivate restricts a listing to orbs private to an
-	// organization. Private orbs are not returned by an unfiltered listing, so a
-	// lookup that must find one has to ask for them explicitly.
+	// OrbVisibilityPrivate restricts a namespace listing to orbs private to the
+	// organization. It replaces the default public-only view rather than adding to
+	// it, and it is read only when a namespace is also given — see
+	// ListOrbPackagesOptions. A lookup by name needs neither: it finds a private
+	// orb without being asked to.
 	OrbVisibilityPrivate = "private"
 )
 
@@ -55,8 +57,13 @@ type OrbPackage struct {
 	IsListed    bool
 	CreatedAt   string
 	HomeURL     string
-	// LatestVersion is the first entry of the version references, which the API
-	// returns most-recent first. It is empty for an orb with no versions yet.
+	// LatestVersion is the first entry of the version references. The registry
+	// orders them most-recent first, but that order is not part of the route's
+	// contract, so this is a convention rather than a guarantee. It is empty for
+	// an orb with no versions yet.
+	//
+	// A detail response carries up to 50 version references; a paginated listing
+	// carries only one, so LatestVersion is all a listing can offer.
 	LatestVersion          string
 	LatestVersionCreatedAt string
 	Last30DaysBuildCount   int64
@@ -68,8 +75,16 @@ type OrbPackage struct {
 // OrbVersion is a single published version of an orb. Once published a version
 // is immutable and cannot be deleted or overwritten.
 type OrbVersion struct {
-	ID      string
-	OrbID   string
+	ID    string
+	OrbID string
+	// OrbName is the qualified "<namespace>/<orb>" name of the owning orb.
+	//
+	// No orb version route reports it. Every one of them carries the owning orb
+	// as references.orb_package, but that reference's attributes object is
+	// omitted whenever the name is absent, and upstream the name is never
+	// present: the version record simply has no orb name on it. So the reference
+	// is an id and nothing more, and the name has to be resolved from the orb
+	// package by a second request — which is what resolveOrbName does.
 	OrbName string
 	// Version is a semantic version such as "1.2.3" for a stable release, or a
 	// "dev:<label>" string for a dev release.
@@ -169,6 +184,12 @@ type orbPackageListWire struct {
 	} `json:"references"`
 }
 
+// orbVersionWire is the shape of every orb version response.
+//
+// attributes.source is present only on the by-id route asked for it explicitly,
+// and references.orb_package.attributes is never present at all — see
+// OrbVersion.OrbName. Both are decoded anyway so that the client keeps working
+// unchanged if the API starts sending them.
 type orbVersionWire struct {
 	ID         string `json:"id"`
 	Attributes struct {
@@ -345,18 +366,36 @@ func (c *Client) GetOrbPackage(ctx context.Context, id string) (*OrbPackage, err
 
 // ListOrbPackagesOptions scopes a ListOrbPackages call. Every field is optional;
 // the zero value lists what the server considers the default set.
+//
+// The filters are not independent, and the server's precedence is not obvious
+// from the route:
+//
+//   - Name short-circuits everything. When filter[name] is present the handler
+//     resolves that one name and returns immediately, so Certified, Visibility
+//     and NamespaceID are all ignored, and the answer is never paginated.
+//   - Visibility is only consulted alongside NamespaceID, and the two settings
+//     are mutually exclusive rather than additive: a namespace listing is
+//     public-only unless Visibility is OrbVisibilityPrivate, which makes it
+//     private-only. There is no way to ask for both in one request, and a
+//     Visibility with no NamespaceID does nothing at all.
+//   - Certified is only consulted when NamespaceID is empty.
 type ListOrbPackagesOptions struct {
 	NamespaceID string
-	// Name filters on the fully qualified "<namespace>/<orb>" name.
+	// Name filters on the fully qualified "<namespace>/<orb>" name. It is an
+	// exact lookup that overrides every other field here.
 	Name string
-	// Certified, when non-nil, restricts the listing to CircleCI-certified orbs
-	// or excludes them. It is a pointer because leaving the filter off entirely
-	// is different from asking for filter[certified]=false.
+	// Certified, when non-nil, restricts the listing to CircleCI-certified orbs.
+	//
+	// It is a pointer for symmetry with the schema attribute that feeds it, not
+	// because the server distinguishes the two: filter[certified]=false is read
+	// as "no certification filter", exactly like omitting it. Only true has an
+	// effect, and only on a listing with no NamespaceID.
 	Certified *bool
-	// Visibility is OrbVisibilityPublic or OrbVisibilityPrivate. Leave it empty
-	// for the server default.
+	// Visibility is OrbVisibilityPublic or OrbVisibilityPrivate, and is only
+	// honoured together with NamespaceID. See the type comment.
 	Visibility string
-	// PageLimit sets page[limit]; every page is fetched regardless.
+	// PageLimit sets page[limit]; every page is fetched regardless. The server
+	// caps it at 1000 and rejects anything larger with a 400.
 	PageLimit int
 }
 
@@ -399,24 +438,22 @@ func (c *Client) ListOrbPackages(ctx context.Context, opts ListOrbPackagesOption
 // namespace id, so the match is refetched by id to return a fully populated
 // package.
 //
-// A private orb is not returned by an unfiltered listing, so a miss is retried
-// with filter[visibility]=private before giving up.
+// Exactly one listing request is made, with no visibility filter. filter[name]
+// is served by a dedicated by-name lookup that runs before the handler reads
+// filter[visibility] at all, and that lookup is not restricted to public orbs —
+// so a private orb is found on the first attempt, and retrying with
+// filter[visibility]=private would only repeat the identical request.
 func (c *Client) GetOrbPackageByName(ctx context.Context, fullName string) (*OrbPackage, error) {
-	for _, visibility := range []string{"", OrbVisibilityPrivate} {
-		pkgs, err := c.ListOrbPackages(ctx, ListOrbPackagesOptions{
-			Name:       fullName,
-			Visibility: visibility,
-		})
-		if err != nil {
-			return nil, err
-		}
+	pkgs, err := c.ListOrbPackages(ctx, ListOrbPackagesOptions{Name: fullName})
+	if err != nil {
+		return nil, err
+	}
 
-		for i := range pkgs {
-			// filter[name] is not documented as an exact match, so confirm it
-			// rather than trusting the first record.
-			if pkgs[i].Name == fullName {
-				return c.GetOrbPackage(ctx, pkgs[i].ID)
-			}
+	for i := range pkgs {
+		// filter[name] is not documented as an exact match, so confirm it
+		// rather than trusting the first record.
+		if pkgs[i].Name == fullName {
+			return c.GetOrbPackage(ctx, pkgs[i].ID)
 		}
 	}
 
@@ -504,7 +541,10 @@ func (c *Client) PublishOrbVersion(ctx context.Context, req PublishOrbVersionReq
 		return nil, err
 	}
 
-	return env.Data.toOrbVersion(), nil
+	version := env.Data.toOrbVersion()
+	c.resolveOrbName(ctx, version)
+
+	return version, nil
 }
 
 // GetOrbVersion retrieves an orb version by its UUID.
@@ -520,24 +560,68 @@ func (c *Client) GetOrbVersion(ctx context.Context, id string) (*OrbVersion, err
 		return nil, fmt.Errorf("orb version %q: %w", id, ErrNotFound)
 	}
 
-	return env.Data.toOrbVersion(), nil
+	version := env.Data.toOrbVersion()
+	c.resolveOrbName(ctx, version)
+
+	return version, nil
 }
 
-// ListOrbVersionsOptions scopes a ListOrbVersions call. OrbID is required: the
-// version collection has no global form.
+// orbNilUUID is what the orb version routes render for an absent orb reference.
+// references.orb_package.id is a UUID field with no omit rule on it, so a version
+// record that carries no orb id serializes as the zero UUID rather than as an
+// absent key. It is not an id anything can be fetched by.
+const orbNilUUID = "00000000-0000-0000-0000-000000000000"
+
+// resolveOrbName fills version.OrbName, which no orb version route reports. See
+// OrbVersion.OrbName for why it is always missing.
+//
+// The lookup is best effort and deliberately swallows its error. It runs after
+// the caller's own request has already succeeded — including after a publish,
+// which is irreversible — so turning a failure to decorate the result into a
+// failure of the whole call would lose a version that was just created. An empty
+// OrbName is the lesser harm, and it is what callers already had to tolerate.
+func (c *Client) resolveOrbName(ctx context.Context, version *OrbVersion) {
+	if version == nil || version.OrbName != "" {
+		return
+	}
+	if version.OrbID == "" || version.OrbID == orbNilUUID {
+		return
+	}
+
+	if pkg, err := c.GetOrbPackage(ctx, version.OrbID); err == nil {
+		version.OrbName = pkg.Name
+	}
+}
+
+// ListOrbVersionsOptions scopes a ListOrbVersions call.
+//
+// One of OrbID and Ref is required. Ref takes precedence and is served by a
+// separate resolver, so when it is set OrbID and Channel are both ignored; when
+// it is not set, OrbID is mandatory and a missing or non-UUID value is a 400.
 type ListOrbVersionsOptions struct {
 	OrbID string
-	// Channel is OrbChannelStable or OrbChannelDev. Leave it empty for both.
+	// Channel is OrbChannelStable or OrbChannelDev.
+	//
+	// Leaving it empty is the same as OrbChannelStable, not "both": the handler
+	// routes to the dev listing only for the exact value "dev", and to the
+	// stable listing for everything else. There is no request that returns both
+	// channels.
 	Channel string
-	// Ref filters on a version reference, either "<namespace>/<orb>@1.2.3" or a
-	// bare version string, depending on what the server accepts.
+	// Ref filters on a fully qualified version reference,
+	// "<namespace>/<orb>@1.2.3". A bare version string resolves nothing: the
+	// server hands the whole value to a by-reference resolver that needs the orb
+	// name to find the orb at all. See GetOrbVersionByRef.
 	Ref string
 	// PageLimit sets page[limit]; every page is fetched regardless.
 	PageLimit int
 }
 
 // ListOrbVersions lists an orb's versions, following the v3 cursor to the last
-// page. Versions come back most recent first.
+// page.
+//
+// The order is the upstream registry's and is not part of the public contract.
+// Callers here treat the first entry as the most recent one, which matches what
+// the registry has always returned, but nothing in the route guarantees it.
 func (c *Client) ListOrbVersions(ctx context.Context, opts ListOrbVersionsOptions) ([]OrbVersion, error) {
 	return DrainV3(ctx, func(ctx context.Context, cursor string) (List[OrbVersion], error) {
 		var page List[orbVersionWire]
@@ -594,6 +678,12 @@ func (c *Client) GetOrbVersionByRef(ctx context.Context, orbID, ref string) (*Or
 		return nil, fmt.Errorf("orb version %q: %w", qualified, ErrNotFound)
 	}
 
+	// The orb was fetched above to build the reference, so the name the version
+	// routes never report is already in hand: no second lookup is needed here.
+	for i := range versions {
+		versions[i].OrbName = orb.Name
+	}
+
 	for i := range versions {
 		if versions[i].Version == ref {
 			return &versions[i], nil
@@ -605,8 +695,13 @@ func (c *Client) GetOrbVersionByRef(ctx context.Context, orbID, ref string) (*Or
 	return &versions[0], nil
 }
 
-// PromoteOrbVersionRequest is the input to PromoteOrbVersion. Supply exactly one
-// of Segment and SemanticVersion.
+// PromoteOrbVersionRequest is the input to PromoteOrbVersion.
+//
+// Supply exactly one of Segment and SemanticVersion. Supplying neither is a 400,
+// and because both fields are omitempty the zero value serializes to {}, which
+// the server rejects as an empty body rather than with the more helpful message
+// about the two fields. Supplying both is not an error: Segment wins and
+// SemanticVersion is discarded.
 type PromoteOrbVersionRequest struct {
 	// Segment is OrbSegmentMajor, OrbSegmentMinor or OrbSegmentPatch, and bumps
 	// that part of the orb's current highest version.
@@ -624,7 +719,10 @@ func (c *Client) PromoteOrbVersion(ctx context.Context, id string, req PromoteOr
 		return nil, err
 	}
 
-	return env.Data.toOrbVersion(), nil
+	version := env.Data.toOrbVersion()
+	c.resolveOrbName(ctx, version)
+
+	return version, nil
 }
 
 // GetOrbSource returns the YAML source of an orb version.
@@ -649,6 +747,9 @@ func (c *Client) GetOrbSource(ctx context.Context, id string) (string, error) {
 
 // ListOrbCategories lists every registry category, following the v3 cursor to
 // the last page. The set is small and fixed by CircleCI.
+//
+// The collection takes no filters at all — not even filter[name] — which is why
+// GetOrbCategoryByName has to list and match locally.
 func (c *Client) ListOrbCategories(ctx context.Context) ([]OrbCategory, error) {
 	return DrainV3(ctx, func(ctx context.Context, cursor string) (List[OrbCategory], error) {
 		var page List[orbCategoryWire]

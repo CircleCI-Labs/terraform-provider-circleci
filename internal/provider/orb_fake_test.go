@@ -201,7 +201,11 @@ func (a *orbFakeAPI) mintID() string {
 	return fmt.Sprintf("%08d-1111-2222-3333-444444444444", a.nextID)
 }
 
-const orbFakeCreatedAt = "2026-01-02T03:04:05Z"
+// orbFakeCreatedAt is a v3 timestamp in the exact form the API emits: UTC,
+// RFC 3339, and always three decimal places, because the v3 response marshaller
+// truncates every time.Time to milliseconds and formats it that way. A bare
+// "...:05Z" is not a shape any v3 route can produce.
+const orbFakeCreatedAt = "2026-01-02T03:04:05.000Z"
 
 func orbFakeWriteJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -413,6 +417,19 @@ func (a *orbFakeAPI) orbCategoryRefs(orb *orbFakeOrb) []map[string]any {
 	return refs
 }
 
+// listOrbs implements the filter precedence the real handler has, which is not
+// the additive one the shape of the query string suggests.
+//
+// filter[name] is a separate by-name lookup that runs first and returns
+// immediately, so it ignores every other filter — including filter[visibility],
+// and it finds a private orb without being asked to. filter[visibility] is read
+// only on the namespace-scoped branch, where it selects public-only or
+// private-only rather than widening the set. A filter[visibility] with no
+// filter[namespace_id] does nothing at all.
+//
+// The fake used to apply visibility to every listing, which made the client's
+// retry with filter[visibility]=private look load-bearing when against
+// production it was a duplicate of the request that had just been made.
 func (a *orbFakeAPI) listOrbs(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -424,24 +441,24 @@ func (a *orbFakeAPI) listOrbs(w http.ResponseWriter, r *http.Request) {
 	data := make([]map[string]any, 0, len(a.orbs))
 	for _, orb := range a.orbs {
 		switch {
-		case name != "" && orb.Name != name:
-			continue
-		case namespaceID != "" && orb.NamespaceID != namespaceID:
-			continue
-		// A private orb is only returned when asked for, which is what the
-		// client's retry with filter[visibility]=private exists for.
-		case visibility == "private" && !orb.IsPrivate:
-			continue
-		case visibility != "private" && orb.IsPrivate:
-			continue
+		case name != "":
+			if orb.Name != name {
+				continue
+			}
+		case namespaceID != "":
+			if orb.NamespaceID != namespaceID {
+				continue
+			}
+			if orb.IsPrivate != (visibility == "private") {
+				continue
+			}
 		}
 		data = append(data, a.orbSummary(orb))
 	}
 
-	orbFakeWriteJSON(w, http.StatusOK, map[string]any{
-		"data": data,
-		"page": map[string]any{"next": nil, "prev": nil},
-	})
+	// A single-page v3 collection omits "page" entirely rather than sending null
+	// cursors: the envelope's page object is only emitted when a cursor exists.
+	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
 func (a *orbFakeAPI) createOrb(w http.ResponseWriter, r *http.Request) {
@@ -594,20 +611,27 @@ func (a *orbFakeAPI) listOrbCategories(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 
-	orbFakeWriteJSON(w, http.StatusOK, map[string]any{
-		"data": data,
-		"page": map[string]any{"next": nil, "prev": nil},
-	})
+	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
 // --- orb versions ---
 
+// versionEntity renders an orb version.
+//
+// references.orb_package carries an id and nothing else. That is not a shortcut:
+// the API's orb reference renders its attributes object only when it has an orb
+// name to put in it, and the version records it renders from never carry one, so
+// no orb version route ever sends references.orb_package.attributes.
+//
+// The fake used to send the name, which made the whole test suite endorse a
+// field production omits: every assertion on orb_name passed while the attribute
+// was permanently empty against the real API. The client now resolves the name
+// from the orb package instead, and this fake is what proves it has to.
+//
+// attributes.source is likewise absent. The by-id route includes it only when
+// asked with ?include=source, which the client does not do — it reads
+// /orb/versions/{id}/source instead, so that one code path serves every route.
 func (a *orbFakeAPI) versionEntity(v *orbFakeVersion) map[string]any {
-	name := ""
-	if orb, ok := a.orbs[v.OrbID]; ok {
-		name = orb.Name
-	}
-
 	return map[string]any{
 		"id": v.ID,
 		"attributes": map[string]any{
@@ -615,10 +639,7 @@ func (a *orbFakeAPI) versionEntity(v *orbFakeVersion) map[string]any {
 			"created_at": orbFakeCreatedAt,
 		},
 		"references": map[string]any{
-			"orb_package": map[string]any{
-				"id":         v.OrbID,
-				"attributes": map[string]any{"name": name},
-			},
+			"orb_package": map[string]any{"id": v.OrbID},
 		},
 	}
 }

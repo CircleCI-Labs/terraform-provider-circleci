@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +44,11 @@ type otelAPI struct {
 	created      int
 	// limit caps the number of exporters, standing in for the API's own limit.
 	limit int
+	// listStatus, when non-zero, makes the list route answer with that status
+	// instead of the collection. It stands in for the 404 "Org not found" the real
+	// route gives both for a missing organization and for a token that cannot
+	// manage one, which is a very different thing from an exporter being absent.
+	listStatus int
 }
 
 func newOTelAPI() *otelAPI {
@@ -85,6 +93,59 @@ func newOTelServer(t *testing.T, api *otelAPI) *httptest.Server {
 	return srv
 }
 
+// otelEndpointRejection reports the message the API answers 400 with for an
+// endpoint and protocol combination it refuses, or "" when it accepts them.
+//
+// Matched to what the API actually accepts: it parses the endpoint as a URL
+// whenever the scheme is http or https, and as a host:port pair otherwise:
+//
+//   - an http or https URL is valid, with or without a port and a path, but only
+//     with protocol "http";
+//   - any other value must split into a host AND a port, so a bare hostname is
+//     malformed;
+//   - the port must be 1-65535.
+//
+// DNS resolution and the private-address check are deliberately not modelled: they
+// depend on the network, and nothing in the provider can anticipate them.
+func otelEndpointRejection(endpoint, protocol string) string {
+	const (
+		malformed = "endpoint must be in the form 'hostname:port' or " +
+			"'https://host:port/path' for HTTP endpoints"
+		badPort      = "endpoint port must be a number between 1 and 65535"
+		wrongForGRPC = "protocol must be 'http' when endpoint starts with http:// or https://"
+	)
+
+	if parsed, err := url.Parse(endpoint); err == nil &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" {
+		if protocol == circleci.OTelProtocolGRPC {
+			return wrongForGRPC
+		}
+
+		if port := parsed.Port(); port != "" && !validOTelPort(port) {
+			return badPort
+		}
+
+		return ""
+	}
+
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" || port == "" {
+		return malformed
+	}
+
+	if !validOTelPort(port) {
+		return badPort
+	}
+
+	return ""
+}
+
+func validOTelPort(port string) bool {
+	number, err := strconv.Atoi(port)
+
+	return err == nil && number >= 1 && number <= 65535
+}
+
 func (a *otelAPI) handleCreate(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	t.Helper()
 
@@ -118,8 +179,17 @@ func (a *otelAPI) handleCreate(t *testing.T, w http.ResponseWriter, r *http.Requ
 	if body.OrgID == "" {
 		t.Error("create body omitted org_id; the create route has no org-id query parameter")
 	}
-	if strings.Contains(body.Endpoint, "://") {
-		t.Errorf("create body carried a scheme in the endpoint %q", body.Endpoint)
+
+	// The endpoint rules, as the service that validates the request enforces them
+	// rather than as the published schema describes them. This fake used to fail the
+	// test outright on any endpoint containing "://", which is the client's old
+	// assumption restated — a fake agreeing with the client is exactly how a wrong
+	// assumption survives a green suite.
+	if msg := otelEndpointRejection(body.Endpoint, body.Protocol); msg != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":` + strconv.Quote(msg) + `}`))
+
+		return
 	}
 
 	a.mu.Lock()
@@ -159,8 +229,28 @@ func (a *otelAPI) handleCreate(t *testing.T, w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(exporter)
 }
 
+// setListStatus makes the list route fail with status, or restores it when status
+// is zero.
+func (a *otelAPI) setListStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.listStatus = status
+}
+
 func (a *otelAPI) handleList(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	t.Helper()
+
+	a.mu.Lock()
+	status := a.listStatus
+	a.mu.Unlock()
+
+	if status != 0 {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"Org not found"}`))
+
+		return
+	}
 
 	orgID := r.URL.Query().Get("org-id")
 	if orgID == "" {
@@ -341,6 +431,67 @@ func TestAccOTelExporterResource(t *testing.T) {
 	}
 }
 
+// TestAccOTelExporterImportWithHeadersForcesReplacement proves, against a real
+// plan, the consequence the resource documentation already claims in "Headers
+// cannot be read back": importing an exporter that has headers and then
+// supplying the real values in configuration (the only way to have a usable
+// exporter) plans a replacement on the very next apply, not an empty plan.
+//
+// The exporter is seeded directly into the fake, bypassing Terraform Create
+// entirely, to stand in for one that already exists in the organization.
+// ImportStatePersist is required to observe this: a bare ImportState step
+// imports into a throwaway working directory and discards it, so a Config step
+// afterwards would plan against whatever state the *previous* step left
+// behind, not against the imported state.
+func TestAccOTelExporterImportWithHeadersForcesReplacement(t *testing.T) {
+	api := newOTelAPI()
+	srv := newOTelServer(t, api)
+
+	api.created = 1
+	api.exporters = append(api.exporters, map[string]any{
+		"id":       "00000000-0000-0000-0000-000000000001",
+		"org_id":   testOTelOrg,
+		"endpoint": "otel.example.com:4317",
+		"protocol": "grpc",
+		"insecure": false,
+		"headers":  map[string]string{"api-key": circleci.OTelRedactedHeaderValue},
+	})
+
+	config := governanceProviderConfig(srv.URL) + fmt.Sprintf(`
+resource "circleci_otel_exporter" "test" {
+  organization_id = %q
+  endpoint        = "otel.example.com:4317"
+  protocol        = "grpc"
+  headers = {
+    "api-key" = "s3cret"
+  }
+}
+`, testOTelOrg)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				ResourceName:       "circleci_otel_exporter.test",
+				ImportState:        true,
+				ImportStateId:      testOTelOrg + "/00000000-0000-0000-0000-000000000001",
+				ImportStatePersist: true,
+				Config:             config,
+			},
+			{
+				Config: config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_otel_exporter.test", plancheck.ResourceActionReplace,
+						),
+					},
+				},
+			},
+		},
+	})
+}
+
 // TestAccOTelExporterEveryChangeReplaces covers the missing update route: with no
 // PATCH available, every configurable attribute has to force replacement.
 func TestAccOTelExporterEveryChangeReplaces(t *testing.T) {
@@ -434,6 +585,14 @@ resource "circleci_otel_exporter" "test" {
 // TestAccOTelExporterHeaderAddedOutsideTerraform covers the drift the provider
 // can see: header names are returned in full, so a header added elsewhere shows
 // up even though its value never does.
+//
+// The assertion is a PreApply plan check on a normal apply step, not
+// ExpectNonEmptyPlan on a bare RefreshState step. The latter was this test's
+// original shape, and it turned out to pass unconditionally — with or without
+// api.addHeader actually called — because a bare RefreshState step has no
+// config to plan against, so "non-empty" there asserted nothing. A normal step
+// refreshes before planning on its own, and its ConfigPlanChecks.PreApply can
+// inspect what that refresh produced.
 func TestAccOTelExporterHeaderAddedOutsideTerraform(t *testing.T) {
 	api := newOTelAPI()
 	srv := newOTelServer(t, api)
@@ -454,9 +613,16 @@ resource "circleci_otel_exporter" "test" {
 		Steps: []resource.TestStep{
 			{Config: config},
 			{
-				PreConfig:          func() { api.addHeader("x-tenant") },
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				PreConfig: func() { api.addHeader("x-tenant") },
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_otel_exporter.test",
+							plancheck.ResourceActionDestroyBeforeCreate,
+						),
+					},
+				},
 			},
 		},
 	})
@@ -476,26 +642,228 @@ func TestAccOTelExporterDeletedOutsideTerraform(t *testing.T) {
 		Steps: []resource.TestStep{
 			{Config: config},
 			{
-				PreConfig:          func() { api.removeAll() },
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				// Read reports a missing exporter as ErrNotFound and that drops the
+				// resource from state (see otelExporterResource.Read), so the plan
+				// that follows recreates it rather than reporting no changes.
+				PreConfig: func() { api.removeAll() },
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_otel_exporter.test",
+							plancheck.ResourceActionCreate,
+						),
+					},
+				},
 			},
 		},
 	})
 }
 
-func TestOTelExporterRejectsEndpointWithScheme(t *testing.T) {
+// TestOTelExporterAcceptsAURLEndpoint is the regression test for a plan-time
+// validator that was stricter than the API.
+//
+// `endpoint` used to be matched against `^[A-Za-z0-9._\-\[\]:]+$`, on the strength
+// of the published schema's "Don't include https:// or grpc://". The service that
+// validates the request accepts an http or https URL as well, and has a dedicated
+// error for pairing one with grpc — a rule that could not exist if the form were
+// invalid. So this configuration was refused during `terraform plan` even though
+// the API would have taken it.
+//
+// The assertion is on what the fake received, not only on state: the URL has to
+// reach the API byte for byte, path included.
+func TestOTelExporterAcceptsAURLEndpoint(t *testing.T) {
+	const endpoint = "https://otel.example.com:4318/v1/traces"
+
 	api := newOTelAPI()
 	srv := newOTelServer(t, api)
 
-	for _, endpoint := range []string{"https://otel.example.com:4317", "grpc://otel.example.com", "otel.example.com/v1/traces"} {
-		t.Run(endpoint, func(t *testing.T) {
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: otelExporterConfig(srv.URL, endpoint, "http"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_otel_exporter.test",
+						tfjsonpath.New("endpoint"),
+						knownvalue.StringExact(endpoint),
+					),
+				},
+			},
+		},
+	})
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+
+	if len(api.createBodies) != 1 {
+		t.Fatalf("create bodies = %d, want 1", len(api.createBodies))
+	}
+	if got := api.createBodies[0]["endpoint"]; got != endpoint {
+		t.Errorf("endpoint sent = %v, want %q", got, endpoint)
+	}
+}
+
+// TestOTelExporterRejectsInvalidEndpoints covers the forms the API really does
+// refuse, each with the plan-time check that spares the practitioner an HTTP 400
+// mid-apply:
+//
+//   - a scheme other than http or https matches neither branch of the service's
+//     validation, so it is malformed;
+//   - the bare form needs a port, because that branch is net.SplitHostPort;
+//   - a path is only meaningful in the URL form;
+//   - and a URL endpoint with protocol = "grpc" is refused by name.
+func TestOTelExporterRejectsInvalidEndpoints(t *testing.T) {
+	api := newOTelAPI()
+	srv := newOTelServer(t, api)
+
+	tests := []struct {
+		endpoint string
+		protocol string
+		want     *regexp.Regexp
+	}{
+		{"grpc://otel.example.com:4317", "grpc", regexp.MustCompile(`(?s)must be either a bare host and port`)},
+		{"otel.example.com", "grpc", regexp.MustCompile(`(?s)must be either a bare host and port`)},
+		{"otel.example.com/v1/traces", "http", regexp.MustCompile(`(?s)must be either a bare host and port`)},
+		{"https://otel.example.com/v1/traces", "grpc", regexp.MustCompile(`(?s)Invalid protocol for a URL endpoint`)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.endpoint+" "+tc.protocol, func(t *testing.T) {
 			resource.UnitTest(t, resource.TestCase{
 				ProtoV6ProviderFactories: governanceProviderFactories,
 				Steps: []resource.TestStep{
 					{
-						Config:      otelExporterConfig(srv.URL, endpoint, "grpc"),
-						ExpectError: regexp.MustCompile(`(?s)must be a bare host and port`),
+						Config:      otelExporterConfig(srv.URL, tc.endpoint, tc.protocol),
+						ExpectError: tc.want,
+					},
+				},
+			})
+		})
+	}
+
+	// Nothing may have reached the API: every rejection above is a plan-time one.
+	api.mu.Lock()
+	defer api.mu.Unlock()
+
+	if len(api.createBodies) != 0 {
+		t.Errorf("%d create requests were sent; all four cases must fail before apply",
+			len(api.createBodies))
+	}
+}
+
+// TestOTelExporterFakeMatchesTheServiceOnEndpoints guards the guard.
+//
+// The fake's endpoint rules match what the API accepts, and the provider's
+// validator is derived from the same understanding. If the two ever disagree
+// the suite should say which — so this asserts the fake's own verdict on the cases
+// the provider tests above rely on, independently of Terraform.
+func TestOTelExporterFakeMatchesTheServiceOnEndpoints(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		endpoint   string
+		protocol   string
+		wantReject bool
+	}{
+		{"otel.example.com:4317", circleci.OTelProtocolGRPC, false},
+		{"[2001:db8::1]:4317", circleci.OTelProtocolGRPC, false},
+		{"https://otel.example.com/v1/traces", circleci.OTelProtocolHTTP, false},
+		{"http://otel.example.com:4318", circleci.OTelProtocolHTTP, false},
+		{"https://otel.example.com/v1/traces", circleci.OTelProtocolGRPC, true},
+		{"otel.example.com", circleci.OTelProtocolGRPC, true},
+		{"grpc://otel.example.com:4317", circleci.OTelProtocolGRPC, true},
+		{"otel.example.com:0", circleci.OTelProtocolGRPC, true},
+		{"otel.example.com:99999", circleci.OTelProtocolGRPC, true},
+	}
+
+	for _, tc := range tests {
+		got := otelEndpointRejection(tc.endpoint, tc.protocol)
+		if (got != "") != tc.wantReject {
+			t.Errorf("otelEndpointRejection(%q, %q) = %q, want rejected = %t",
+				tc.endpoint, tc.protocol, got, tc.wantReject)
+		}
+	}
+}
+
+// TestAccOTelExporterKeepsStateWhenTheOrganizationAnswers404 is the drift-detection
+// counterpart to TestAccOTelExporterDeletedOutsideTerraform.
+//
+// An exporter is read by listing its organization's exporters, and that list route
+// answers 404 "Org not found" both for an organization that does not exist and for
+// a token that cannot manage one that does. circleci.IsNotFound says yes to that
+// 404, so treating it like an absent exporter would drop a live exporter from state
+// and have the next apply create a duplicate — against a limit of five per
+// organization, so the damage compounds. Read must report it and leave state alone.
+func TestAccOTelExporterKeepsStateWhenTheOrganizationAnswers404(t *testing.T) {
+	api := newOTelAPI()
+	srv := newOTelServer(t, api)
+
+	config := otelExporterConfig(srv.URL, "otel.example.com:4317", "grpc")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+			{
+				PreConfig:    func() { api.setListStatus(http.StatusNotFound) },
+				RefreshState: true,
+				// The diagnostic is line-wrapped by Terraform, so match a short phrase
+				// rather than a sentence: this is the branch that reports the 404
+				// instead of removing the resource.
+				ExpectError: regexp.MustCompile(`(?s)404 for organization`),
+			},
+			// Undo the failure so the framework's own destroy step can run.
+			{
+				PreConfig: func() { api.setListStatus(0) },
+				Config:    config,
+			},
+		},
+	})
+}
+
+// TestAccOTelExporterRequiresCloud covers the deployment gate.
+//
+// The routes are /api/v2, which is not sufficient: CircleCI's public API service
+// forwards /api/v2/otel to a backend a CircleCI Server installation does not
+// deploy, so a Server installation has no such route at all. Without the gate
+// `terraform plan` would succeed and the create would 404 mid-apply.
+func TestAccOTelExporterRequiresCloud(t *testing.T) {
+	wantError := regexp.MustCompile(`(?s)requires CircleCI Cloud.*"server".*circleci\.example\.com`)
+
+	tests := []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "circleci_otel_exporter resource",
+			config: `
+resource "circleci_otel_exporter" "test" {
+  organization_id = "b9291e0d-a11e-41fb-8517-c545388b5953"
+  endpoint        = "otel.example.com:4317"
+  protocol        = "grpc"
+}
+`,
+		},
+		{
+			name: "circleci_otel_exporters data source",
+			config: `
+data "circleci_otel_exporters" "test" {
+  organization_id = "b9291e0d-a11e-41fb-8517-c545388b5953"
+}
+`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resource.UnitTest(t, resource.TestCase{
+				ProtoV6ProviderFactories: governanceProviderFactories,
+				Steps: []resource.TestStep{
+					{
+						Config:      cloudOnlyServerProvider + tc.config,
+						ExpectError: wantError,
 					},
 				},
 			})

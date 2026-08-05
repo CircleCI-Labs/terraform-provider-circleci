@@ -47,7 +47,7 @@ output "resource_class_ids" {
 
 ### Optional
 
-- `namespace` (String) Only return resource classes in this runner namespace.
+- `namespace` (String) Only return resource classes in this runner namespace. Cannot be combined with an organization filter — the API honours one scope per request.
 - `org_id` (String) The unique identifier (UUID) of the organization to read runner resource classes from.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.

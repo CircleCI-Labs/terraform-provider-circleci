@@ -15,7 +15,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -136,14 +135,35 @@ func (r *orbResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			},
 			"is_private": schema.BoolAttribute{
 				MarkdownDescription: "Whether the orb is private to the owning organization. " +
-					"Defaults to `false`. Visibility cannot be changed after creation and there " +
+					"CircleCI defaults this to `false`. Visibility cannot be changed after creation and there " +
 					"is no delete route for an orb, so changing this plans a replacement that the " +
 					"API will reject because the orb already exists.",
 				Optional: true,
 				Computed: true,
-				Default:  booldefault.StaticBool(false),
 				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.RequiresReplace(),
+					// RequiresReplaceIfConfigured rather than plain RequiresReplace, because
+					// this attribute is Optional+Computed: plain RequiresReplace fires whenever
+					// the planned value differs from state, and it does not special-case an
+					// unknown planned value (for example while is_private references another
+					// resource's not-yet-known attribute) as equal to the retained one, so it
+					// would plan a spurious replacement in that case.
+					boolplanmodifier.RequiresReplaceIfConfigured(),
+
+					// UseStateForUnknown, and deliberately NO Default. Pairing a Default with
+					// RequiresReplaceIfConfigured broke apply, in the same way it did for
+					// circleci_otel_exporter's insecure: the framework applies a Default
+					// whenever the *config* value is null, without consulting prior state, so
+					// an is_private that had been set and was then removed from the
+					// configuration planned as false. RequiresReplaceIfConfigured then
+					// declined to fire — a null config value is precisely its bail-out — so
+					// an in-place update was planned, and applyOrb wrote the orb's real,
+					// unchanged visibility back to state, contradicting the plan.
+					//
+					// It is reachable simply by importing an existing private orb and then
+					// changing is_listed, which sits directly below and has always used this
+					// pattern. Without the Default, an omitted is_private plans as unknown
+					// and resolves to what is already in state.
+					boolplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"is_listed": schema.BoolAttribute{

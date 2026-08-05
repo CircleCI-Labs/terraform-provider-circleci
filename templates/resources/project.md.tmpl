@@ -25,6 +25,8 @@ Import is supported using the project slug (`vcs-type/org-name/repo-name`):
 terraform import circleci_project.example "github/my-org/my-repo"
 ```
 
+Only `slug` is populated by the import itself. Every setting — every boolean toggle and `pr_only_branch_overrides` alike — starts `null`, the same as when this resource is created against a configuration that names none of them: see "Settings you leave out" below. So a configuration generated from the import (for example with `terraform plan -generate-config-out`) mentions no settings either, and `terraform plan` against it is empty. Add a setting to the generated configuration only once you actually want this resource to manage it; adding one that already holds the value CircleCI reports is a no-op, but adding one with a different value writes it on the next apply.
+
 ## Settings you leave out
 
 A setting this configuration does not mention is **not sent at all**, so CircleCI applies its own default. This is worth knowing, because the defaults are not uniformly `false`:

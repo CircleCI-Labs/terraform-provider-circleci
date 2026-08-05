@@ -12,17 +12,20 @@ each one holds.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | no |
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No. Unlike `circleci_group`, this data source does **not** reject `deployment = "server"` with a friendly error — it attempts the request and the request fails. See the note below. |
+| **API** | `GET /api/v2/organizations/{org_id}/projects/{project_id}/groups` |
+| **Organization type** | `circleci` (standalone) only, because the groups it reports can only exist in one. |
+| **Token** | A personal API token with read access to the organization. |
 
-This data source uses
-`/api/v2/organizations/{organization_id}/projects/{project_id}/groups`. That path
-is **not** in the routes served a CircleCI Server installation forwards to the
-public API service: Server exposes only `/api/v2/organizations/[^/]+/groups`, and
-`.../projects/{project_id}/groups` is a different prefix. Against CircleCI Server
-the request does not reach the API and fails. Use this data source on CircleCI
-Cloud only.
+-> **Why there is no explicit Server error here.** This route is **not** served
+on CircleCI Server: Server exposes only `/api/v2/organizations/[^/]+/groups`, and
+`.../projects/{project_id}/groups` is a different prefix that a Server
+installation does not serve. That makes it a routing fact rather than an
+organization-type fact, so it is stated here rather than enforced in code. Use
+this data source on CircleCI Cloud only.
 
 ~> **This API is not part of the published CircleCI OpenAPI specification** and
 may change without notice.

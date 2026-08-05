@@ -77,10 +77,10 @@ func (d *WebhookDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 			"signing_secret": schema.StringAttribute{
 				MarkdownDescription: "Always null. The API never discloses a webhook's signing secret, " +
 					"masking it unconditionally, so there is nothing this attribute could ever return. " +
-					"Scheduled for removal in 1.0 (issue #21); use `circleci_webhooks`' " +
+					"Scheduled for removal in 1.0; use `circleci_webhooks`' " +
 					"`has_signing_secret` instead.",
 				DeprecationMessage: "Always null: the API never discloses a signing secret. Scheduled for " +
-					"removal in 1.0 (issue #21). Use the circleci_webhooks (plural) data source's " +
+					"removal in 1.0. Use the circleci_webhooks (plural) data source's " +
 					"has_signing_secret instead.",
 				Computed:  true,
 				Sensitive: true,

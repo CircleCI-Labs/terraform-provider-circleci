@@ -14,10 +14,9 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// testCatalogOfferingsBody is the shape production sends. the API
-// serializes its machine-provisioner Offerings struct — four platform keys, each a
-// map of resource class name to image list — into a v3 attributes envelope with no
-// id and no references.
+// testCatalogOfferingsBody is the shape production sends: four platform keys, each a
+// map of resource class name to image list, serialized into a v3 attributes envelope
+// with no id and no references.
 const testCatalogOfferingsBody = `{
   "data": {
     "attributes": {

@@ -11,9 +11,17 @@ Manages a CircleCI orb: the named container in a namespace that owns a series of
 
 Creating an orb publishes no source. Use `circleci_orb_version` to publish versions against it, and reference them from a `.circleci/config.yml` as `<namespace>/<orb>@<version>`.
 
-~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
-
 !> **An orb cannot be deleted.** The CircleCI API has no delete route for an orb, on purpose: pipelines that reference its versions must keep resolving. `terraform destroy` therefore removes the resource from Terraform state, warns, and leaves the orb in the registry. To hide a public orb, set `is_listed = false` instead of destroying it. To remove an orb entirely, delete the `circleci_orb_namespace` that owns it, which deletes its orbs too.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/orb/packages`, `GET /api/v3/orb/packages/{id}`, `POST /api/v3/orb/packages/{id}/set-listed` |
+| **Organization type** | Any. Publishing a **private** orb additionally requires the organization's `enable_private_orbs` setting. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -82,7 +90,7 @@ Keeping the bare name separate is what makes the resource survive a namespace re
 
 Omit this attribute to leave categories unmanaged, so that categories set outside Terraform are left alone. Set it to `[]` to manage them and remove all of them.
 - `is_listed` (Boolean) Whether the orb appears in the public orb registry listing. This is an in-place update. Left unset, the value CircleCI chose at creation is kept.
-- `is_private` (Boolean) Whether the orb is private to the owning organization. Defaults to `false`. Visibility cannot be changed after creation and there is no delete route for an orb, so changing this plans a replacement that the API will reject because the orb already exists.
+- `is_private` (Boolean) Whether the orb is private to the owning organization. CircleCI defaults this to `false`. Visibility cannot be changed after creation and there is no delete route for an orb, so changing this plans a replacement that the API will reject because the orb already exists.
 
 ### Read-Only
 

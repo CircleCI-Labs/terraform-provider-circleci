@@ -8,9 +8,11 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -53,23 +55,25 @@ func (d *runnerResourceClassesDataSource) Metadata(_ context.Context, req dataso
 	resp.TypeName = req.ProviderTypeName + "_runner_resource_classes"
 }
 
-// ConfigValidators requires at least one filter, because the runner API rejects
-// an unfiltered list.
+// ConfigValidators requires exactly one filter, for the same reason as on
+// circleci_runners: the API honours one and silently drops the other.
 //
-// The organization filter counts under either of its two names. As on
-// circleci_runners, this is deliberately not orgIDDataSourceConfigValidator:
-// requiring exactly one of the pair would break a namespace-only listing, which
-// is supported today. Both at once is still refused, by the Conflicting
-// validator. See org_id_deprecation.go.
+// The API switches on org-id first and only falls through to namespace when
+// org-id is absent. Setting both is not an error — it
+// returns every resource class the organization owns, ignoring the namespace
+// entirely — so an "at least one" rule let a configuration ask for one namespace
+// and receive the whole organization with nothing to indicate it. Requiring
+// exactly one makes the answer match the question; a namespace-scoped listing
+// still works, on its own.
+//
+// The organization counts under either of its two names, and the pair is mutually
+// exclusive, so listing all three here still means "exactly one scope". See
+// org_id_deprecation.go.
 func (d *runnerResourceClassesDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
 	return []datasource.ConfigValidator{
-		datasourcevalidator.AtLeastOneOf(
+		datasourcevalidator.ExactlyOneOf(
 			path.MatchRoot("organization_id"),
 			path.MatchRoot("namespace"),
-			path.MatchRoot("org_id"),
-		),
-		datasourcevalidator.Conflicting(
-			path.MatchRoot("organization_id"),
 			path.MatchRoot("org_id"),
 		),
 	}
@@ -95,8 +99,12 @@ func (d *runnerResourceClassesDataSource) Schema(_ context.Context, _ datasource
 				orgIDDataSourceAttribute("runner resource classes"),
 			),
 			"namespace": schema.StringAttribute{
-				MarkdownDescription: "Only return resource classes in this runner namespace.",
-				Optional:            true,
+				MarkdownDescription: "Only return resource classes in this runner namespace. Cannot be " +
+					"combined with an organization filter — the API honours one scope per request.",
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(runnerNamespacePattern, runnerNamespaceFormatMessage),
+				},
 			},
 			"resource_classes": schema.ListNestedAttribute{
 				MarkdownDescription: "The matching resource classes, in the order the API returned them.",

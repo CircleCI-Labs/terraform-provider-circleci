@@ -12,10 +12,9 @@ import (
 
 // GitHub App routes.
 //
-// These are served by the API, which proxies them to the
-// the API BFF. They are declared in that service's
-// openapi_definitions/v2.yaml purely so the request validation middleware
-// accepts them, under a comment marking them "Internal / CLI-only [...]
+// These are served by a backend service behind a proxy. They are declared in
+// that backend's own OpenAPI definitions purely so the request validation
+// middleware accepts them, under a comment marking them "Internal / CLI-only [...]
 // intentionally NOT customer-facing: they are excluded from the public docs
 // bundles". They are therefore absent from the published OpenAPI spec and from
 // the CircleCI API reference, and may change or disappear without notice.
@@ -29,8 +28,8 @@ const githubAppRepositoriesRoute = "/github-app/organization/%s/repositories"
 // githubAppInstallationRoute reports whether, and how, the CircleCI GitHub App
 // is installed for an organization. It sits under the same "Internal /
 // CLI-only [...] intentionally NOT customer-facing" comment block as
-// githubAppRepositoriesRoute in the API's openapi_definitions/v2.yaml,
-// so the same unpublished-API caveat applies.
+// githubAppRepositoriesRoute in the backend's own OpenAPI definitions, so the
+// same unpublished-API caveat applies.
 const githubAppInstallationRoute = "/github-app/organization/%s/installation"
 
 // githubAppRepositoryPageLimit is the page size requested when listing
@@ -54,10 +53,8 @@ const githubAppRepositoryPageCap = 1000
 // event_source_repo_external_id, all expect.
 //
 // Note that the full name is sent as repo_full_name, not full_name: the field
-// names here are taken from the response struct in the API's
-// the CircleCI API and from the repository schema in its
-// openapi_definitions/v2_endpoints/github_app/schemas.yaml, not guessed from the
-// shape of neighbouring routes.
+// names here are taken directly from the backend's response shape and its own
+// schema, not guessed from the shape of neighbouring routes.
 type GitHubAppRepository struct {
 	// ID is the numeric GitHub repository id, used as the repository external id
 	// in pipeline definitions and triggers.
@@ -97,9 +94,8 @@ type githubAppRepositoryPage struct {
 // organization, as served by GET
 // /api/v2/github-app/organization/{org_id}/installation.
 //
-// Field names are taken from the "installation" schema in the API's
-// openapi_definitions/v2_endpoints/github_app/schemas.yaml and confirmed
-// against the CircleCI API's fixture, not guessed.
+// Field names are taken from the backend's own "installation" schema and
+// confirmed against its test fixture, not guessed.
 type GitHubAppInstallation struct {
 	// ID is the GitHub App installation's own numeric id (distinct from any
 	// repository id).
@@ -135,10 +131,9 @@ func (c *Client) GitHubApp() *GitHubAppService {
 
 // GetInstallation returns the CircleCI GitHub App installation for an
 // organization. It answers ErrNotFound (via an ordinary HTTP 404, confirmed
-// against the API's "404 response when the GitHub App is not
-// installed" case) when no installation exists — not the 403
-// anti-enumeration pattern circleci_group uses, so IsNotFound alone is
-// sufficient here.
+// against the backend's own "GitHub App is not installed" test case) when no
+// installation exists — not the 403 anti-enumeration pattern circleci_group
+// uses, so IsNotFound alone is sufficient here.
 func (s *GitHubAppService) GetInstallation(ctx context.Context, orgID string) (*GitHubAppInstallation, error) {
 	var installation GitHubAppInstallation
 	if err := s.client.GetV2(ctx, githubAppInstallationRoute, &installation, RouteParams(orgID)); err != nil {

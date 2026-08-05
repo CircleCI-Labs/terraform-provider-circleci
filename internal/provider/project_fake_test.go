@@ -87,8 +87,8 @@ func (p *fakeProject) toJSON() map[string]any {
 // project has, matching fakeProjectSettingsAPI's defaults in
 // project_settings_resource_test.go.
 //
-// These are not guesses. They are the flag defaults from the CircleCI API's
-// feature registry, confirmed against a live GET of a real project's settings:
+// These are not guesses. They are CircleCI's own defaults for these flags,
+// confirmed against a live GET of a real project's settings:
 // set_github_status and setup_workflows default to true (not false),
 // forks_receive_secret_env_vars defaults to true on a private project, and
 // pr_only_branch_overrides defaults to the project's default branch rather than an
@@ -219,7 +219,13 @@ func (a *fakeProjectAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	a.settings[p.slug] = defaultFakeProjectSettings()
 	a.mu.Unlock()
 
-	a.write(w, http.StatusCreated, p.toJSON())
+	// 200, not 201. POST /api/v2/organization/{org}/project answers 200 — that is
+	// what the route returns, and what its own published documentation says. The
+	// slug-based sibling route (POST /api/v2/project/{provider}/{org}/{project}),
+	// which this provider deliberately does not use, is the one that answers 201.
+	// The client treats any 2xx as success either way, so this is fake fidelity
+	// rather than a bug it was hiding.
+	a.write(w, http.StatusOK, p.toJSON())
 }
 
 func (a *fakeProjectAPI) handleFollow(w http.ResponseWriter, r *http.Request) {
@@ -290,7 +296,7 @@ func (a *fakeProjectAPI) handleDelete(w http.ResponseWriter, slug string) {
 	}
 
 	delete(a.projects, slug)
-	a.write(w, http.StatusOK, map[string]any{"message": "ok"})
+	a.write(w, http.StatusOK, map[string]any{"message": "Project deleted"})
 }
 
 func (a *fakeProjectAPI) handleGetSettings(w http.ResponseWriter, slug string) {
@@ -308,10 +314,8 @@ func (a *fakeProjectAPI) handleGetSettings(w http.ResponseWriter, slug string) {
 }
 
 func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Request, slug string) {
-	var body struct {
-		Advanced map[string]any `json:"advanced"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		a.write(w, http.StatusBadRequest, map[string]any{"message": "Invalid JSON body."})
 
 		return
@@ -327,42 +331,174 @@ func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if len(body.Advanced) == 0 {
-		a.write(w, http.StatusBadRequest, map[string]any{"message": "No JSON fields found."})
+	advanced, message, accepted := settingsPatchBody(raw)
+	if advanced != nil {
+		// Recorded even when rejected, so a test can assert on what was sent.
+		a.patches = append(a.patches, advanced)
+	}
+	if !accepted {
+		a.write(w, http.StatusBadRequest, map[string]any{"message": message})
 
 		return
 	}
 
+	applySettingsPatch(current, advanced)
+	a.settings[slug] = current
+
+	a.write(w, http.StatusOK, map[string]any{"advanced": current})
+}
+
+// settingsPatchBody validates a settings PATCH body the way the API does, and
+// returns the "advanced" object to apply.
+//
+// Three behaviours, all established from what the API accepts rather than guessed:
+//
+//   - An empty body — `{}` — is rejected with "No JSON fields found." The check
+//     is on the TOP LEVEL only.
+//   - `{"advanced":{}}` is therefore accepted, and answers 200 with the current
+//     settings. Both fakes here used to reject it, which made the client's own
+//     comment ("the API rejects a body with no fields") look confirmed when it
+//     was describing a different shape. Skipping a no-op PATCH is an
+//     optimisation, not a way of avoiding a 400.
+//   - Any unrecognised key is rejected naming the first one, at whatever depth:
+//     "Unexpected field 'cheese'." at the top level and "Unexpected field
+//     'advanced.oss'." inside. That is the same mechanism that makes oss
+//     unwritable, so modelling it as one rule rather than as an oss special case
+//     is what would catch the next unwritable field too.
+func settingsPatchBody(raw map[string]any) (advanced map[string]any, message string, ok bool) {
+	if len(raw) == 0 {
+		return nil, "No JSON fields found.", false
+	}
+
+	for key := range raw {
+		if key != "advanced" {
+			return nil, fmt.Sprintf("Unexpected field '%s'.", key), false
+		}
+	}
+
+	advanced, _ = raw["advanced"].(map[string]any)
+	if advanced == nil {
+		advanced = map[string]any{}
+	}
+
 	// oss is read-only on v2, and the API rejects the whole request when it is
-	// present — verified against the live API:
+	// present rather than ignoring the one field — verified against the live API:
 	//
 	//	PATCH /api/v2/project/{slug}/settings  {"advanced":{"oss":false}}
 	//	→ 400  {"message":"Unexpected field 'advanced.oss'."}
 	//
-	// The fake used to accept it, which is exactly why sending it survived a
-	// passing test suite and broke every create and update against the real API.
-	if _, ok := body.Advanced["oss"]; ok {
-		a.patches = append(a.patches, body.Advanced)
-		a.write(w, http.StatusBadRequest, map[string]any{"message": "Unexpected field 'advanced.oss'."})
-
-		return
+	// The fakes used to accept it, which is exactly why sending it survived a
+	// passing test suite and broke every real create and update.
+	for _, key := range []string{"oss"} {
+		if _, present := advanced[key]; present {
+			return advanced, fmt.Sprintf("Unexpected field 'advanced.%s'.", key), false
+		}
 	}
 
-	a.patches = append(a.patches, body.Advanced)
-	for key, value := range body.Advanced {
-		// pr_only_branch_overrides is unordered on the API and comes back in an
-		// order of its own; see reorderedLikeTheAPI in
-		// webhook_resource_fake_test.go. Reordering it here is what makes an
-		// order-sensitive regression fail rather than pass.
+	return advanced, "", true
+}
+
+// applySettingsPatch merges an "advanced" PATCH body into the settings a fake
+// holds, the way the real route applies a partial update — including the two
+// things it does that a naive merge does not.
+//
+// Both matter, and neither was found by a test — they were established from how
+// the route actually behaves:
+//
+//   - pr_only_branch_overrides is unordered on the API and comes back in an order
+//     of its own; see reorderedLikeTheAPI in webhook_resource_fake_test.go.
+//   - An EMPTY pr_only_branch_overrides array is accepted with HTTP 200 and then
+//     ignored. The service fronting this route decodes the v2 body into a plain
+//     []string and copies it into the v1.1 body it forwards, where the field
+//     carries `omitempty`, so a zero-length slice is dropped before the write
+//     that would have cleared the list ever happens. The PATCH response is a
+//     fresh read, so the old branches come straight back. Both fakes used to
+//     clear the list obligingly, which is why the provider could ship a "clear
+//     the overrides" path that cannot work and still pass every test.
+//
+// See ProjectSettings.PROnlyBranchOverrides in internal/circleci for the caller
+// side of the same finding.
+func applySettingsPatch(current, advanced map[string]any) {
+	for key, value := range advanced {
 		if key == "pr_only_branch_overrides" {
+			if list, isList := value.([]any); isList && len(list) == 0 {
+				continue
+			}
+
 			value = reorderedLikeTheAPI(value)
 		}
 
 		current[key] = value
 	}
-	a.settings[slug] = current
+}
 
-	a.write(w, http.StatusOK, map[string]any{"advanced": current})
+// TestSettingsFakesIgnoreAnEmptyBranchOverrideList guards the guard, the same way
+// TestFakeAPIsDoNotEchoCollectionOrder does for collection ordering.
+//
+// Requirement: both settings fakes must accept an empty pr_only_branch_overrides
+// array and change nothing, because that is what the real route does. A fake that
+// goes back to clearing the list obligingly makes
+// TestProjectSettingsResourceCreateWithEmptyBranchOverrides pass by pretending a
+// broken path works — which is the state the suite was in while
+// `pr_only_branch_overrides = []` shipped as a documented way to remove every
+// override.
+//
+// Both fakes are exercised through applySettingsPatch, which is the one place the
+// behaviour lives; asserting on it directly is what keeps the two from drifting.
+func TestSettingsFakesIgnoreAnEmptyBranchOverrideList(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an empty list leaves the stored branches alone", func(t *testing.T) {
+		t.Parallel()
+
+		current := map[string]any{"pr_only_branch_overrides": []any{"main", "develop"}}
+		applySettingsPatch(current, map[string]any{"pr_only_branch_overrides": []any{}})
+
+		stored, ok := current["pr_only_branch_overrides"].([]any)
+		if !ok || len(stored) != 2 {
+			t.Errorf("an empty pr_only_branch_overrides array left %v; the real route drops it and keeps "+
+				"the previous branches, so a fake that clears them cannot catch the defect that "+
+				"clearing is impossible", current["pr_only_branch_overrides"])
+		}
+	})
+
+	t.Run("a populated list still replaces them, reordered", func(t *testing.T) {
+		t.Parallel()
+
+		current := map[string]any{"pr_only_branch_overrides": []any{"main"}}
+		applySettingsPatch(current, map[string]any{"pr_only_branch_overrides": []any{"alpha", "beta"}})
+
+		stored, ok := current["pr_only_branch_overrides"].([]any)
+		if !ok || len(stored) != 2 {
+			t.Fatalf("a populated pr_only_branch_overrides array stored %v, want two branches",
+				current["pr_only_branch_overrides"])
+		}
+		if stored[0] != "beta" {
+			t.Errorf("stored %v in the submitted order; the API answers in an order of its own, so the "+
+				"empty-list guard must not have cost us the ordering one", stored)
+		}
+	})
+
+	t.Run("an empty advanced object is accepted, an empty body is not", func(t *testing.T) {
+		t.Parallel()
+
+		if _, message, ok := settingsPatchBody(map[string]any{"advanced": map[string]any{}}); !ok {
+			t.Errorf(`{"advanced":{}} was rejected with %q; the API answers 200 for it, and its own `+
+				`handler tests assert that`, message)
+		}
+		if _, message, ok := settingsPatchBody(map[string]any{}); ok {
+			t.Error("an empty body was accepted; the request binder rejects it with " +
+				`"No JSON fields found."`)
+		} else if message != "No JSON fields found." {
+			t.Errorf("an empty body was rejected with %q, want the message the API uses", message)
+		}
+		if _, message, ok := settingsPatchBody(map[string]any{"cheese": true}); ok {
+			t.Error("an unrecognised top-level field was accepted; the binder rejects any unknown key")
+		} else if message != "Unexpected field 'cheese'." {
+			t.Errorf("an unrecognised top-level field was rejected with %q, want the message the API uses",
+				message)
+		}
+	})
 }
 
 func (a *fakeProjectAPI) write(w http.ResponseWriter, status int, body any) {

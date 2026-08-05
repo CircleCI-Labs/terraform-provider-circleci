@@ -19,8 +19,7 @@ const testDefinitionProjectID = "33333333-3333-3333-3333-333333333333"
 func TestListPipelineDefinitions(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the API's
-	// the CircleCI API: an {"items": [...]}
+	// The shape matches what the API actually returns: an {"items": [...]}
 	// envelope with no next_page_token, whose entries nest config_source and
 	// checkout_source, each with an optional repo.
 	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -169,11 +168,9 @@ type fakeRecordedRequest struct {
 func TestCreatePipelineDefinitionRequest(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the API's
-	// the CircleCI API's createRequest:
-	// config_source carries provider, repo.external_id and file_path;
-	// checkout_source carries provider and repo.external_id. Every field is
-	// sent unconditionally.
+	// The shape matches what the API actually expects: config_source carries
+	// provider, repo.external_id and file_path; checkout_source carries
+	// provider and repo.external_id. Every field is sent unconditionally.
 	srv, rec := recordedBodyServer(t, `{"id":"44444444-4444-4444-4444-444444444444",
 		"name":"build","description":"Main pipeline","created_at":"2024-05-01T10:00:00Z",
 		"config_source":{"provider":"github_app","file_path":".circleci/config.yml",
@@ -187,7 +184,7 @@ func TestCreatePipelineDefinitionRequest(t *testing.T) {
 		Description: "Main pipeline",
 		ConfigSource: circleci.PipelineConfigSourceInput{
 			Provider: "github_app",
-			Repo:     circleci.RepoInput{ExternalID: "123456"},
+			Repo:     &circleci.RepoInput{ExternalID: "123456"},
 			FilePath: ".circleci/config.yml",
 		},
 		CheckoutSource: circleci.PipelineCheckoutSourceInput{
@@ -224,6 +221,50 @@ func TestCreatePipelineDefinitionRequest(t *testing.T) {
 
 	if created.ID != "44444444-4444-4444-4444-444444444444" || created.Name != "build" {
 		t.Errorf("created = %+v, want id 44444444-4444-4444-4444-444444444444 and name build", created)
+	}
+}
+
+// TestCreatePipelineDefinitionRequestCircleCIConfigSource pins the fix for a
+// pipeline definition whose configuration is hosted by CircleCI itself rather than
+// a VCS repository.
+//
+// The API's config_source oneOf has a "circleci" branch that is
+// `additionalProperties: false` over only provider and file_path — no repo
+// property at all — so sending a repo object on that branch fails the oneOf
+// outright rather than being harmlessly ignored. PipelineConfigSourceInput.Repo
+// must therefore be omitted entirely, not sent as a repo with an empty
+// external_id.
+func TestCreatePipelineDefinitionRequestCircleCIConfigSource(t *testing.T) {
+	t.Parallel()
+
+	srv, rec := recordedBodyServer(t, `{"id":"44444444-4444-4444-4444-444444444444",
+		"name":"build","config_source":{"provider":"circleci","file_path":".circleci/config.yml"},
+		"checkout_source":{"provider":"github_app","repo":{"full_name":"acme/api","external_id":"123456"}}}`)
+
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	input := circleci.CreatePipelineDefinitionInput{
+		Name: "build",
+		ConfigSource: circleci.PipelineConfigSourceInput{
+			Provider: circleci.PipelineConfigSourceProviderCircleCI,
+			FilePath: ".circleci/config.yml",
+		},
+		CheckoutSource: circleci.PipelineCheckoutSourceInput{
+			Provider: "github_app",
+			Repo:     circleci.RepoInput{ExternalID: "123456"},
+		},
+	}
+
+	if _, err := client.CreatePipelineDefinition(context.Background(), testDefinitionProjectID, input); err != nil {
+		t.Fatalf("CreatePipelineDefinition returned error: %v", err)
+	}
+
+	configSource, _ := rec.Body["config_source"].(map[string]any)
+	if configSource["provider"] != "circleci" || configSource["file_path"] != ".circleci/config.yml" {
+		t.Errorf("request config_source = %v, want circleci/.circleci/config.yml", configSource)
+	}
+	if _, present := configSource["repo"]; present {
+		t.Errorf("request config_source carries repo = %v for a circleci-hosted config source, want it omitted entirely", configSource["repo"])
 	}
 }
 
@@ -267,11 +308,10 @@ func TestGetPipelineDefinitionNotFound(t *testing.T) {
 func TestUpdatePipelineDefinitionRequest(t *testing.T) {
 	t.Parallel()
 
-	// Pins the bug-4 fix at the client layer: the update body's config_source
-	// must carry ONLY file_path (verified against handler_update.go's
-	// updateRequestConfigSource, which has no provider or repo field at all),
-	// while checkout_source carries both provider and repo.external_id,
-	// matching the create shape.
+	// Pins a fix at the client layer: the update body's config_source must
+	// carry ONLY file_path, since the API's update route has no provider or
+	// repo field on config_source at all, while checkout_source carries both
+	// provider and repo.external_id, matching the create shape.
 	srv, rec := recordedBodyServer(t, `{"id":"44444444-4444-4444-4444-444444444444",
 		"name":"build","config_source":{"provider":"github_app","file_path":"new.yml"},
 		"checkout_source":{"provider":"github_app","repo":{"external_id":"789"}}}`)

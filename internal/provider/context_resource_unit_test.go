@@ -130,8 +130,8 @@ func TestContextResourceUnit_ImportInvalidID(t *testing.T) {
 // TestContextResourceUnit_ForbiddenIsNotSilentlyRemoved proves the deliberate
 // choice documented on context_resource.go's Read and internal/circleci's
 // GetContext: a context this token cannot resolve answers 403, the same
-// response the API's context-resolution step gives for "deleted",
-// "belongs to another organization" and "no permission" alike. Silently
+// response the API gives for "deleted", "belongs to another organization"
+// and "no permission" alike. Silently
 // dropping the resource from state on 403 (the way a genuine 404 does) would
 // mean a token that merely lost permission causes Terraform to recreate a
 // live context on the next apply — so this must surface as a hard diagnostic
@@ -162,9 +162,9 @@ func TestContextResourceUnit_ForbiddenIsNotSilentlyRemoved(t *testing.T) {
 
 // TestContextResourceUnit_GenuineNotFoundRecreatesCleanly exercises the other
 // branch of the same Read method: internal/circleci.GetContext documents a
-// rare race where the context-resolution step resolves the id fine but the read itself then
-// answers a literal 404 (the API.ErrNotFound). That must still drop
-// the resource from state and recreate cleanly rather than erroring — unlike
+// rare race where the id resolves fine but the read itself then answers a
+// literal 404. That must still drop the resource from state and recreate
+// cleanly rather than erroring — unlike
 // the 403 case above. contextFakeAPI always models the common 403 case, so
 // this uses a small dedicated fake to force the rare one directly.
 func TestContextResourceUnit_GenuineNotFoundRecreatesCleanly(t *testing.T) {

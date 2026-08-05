@@ -101,6 +101,19 @@ func TestAccTriggersDataSource(t *testing.T) {
 						tfjsonpath.New("triggers").AtSliceIndex(0).AtMapKey("event_source_repository_external_id"),
 						knownvalue.StringExact("123456"),
 					),
+					// The resource-matching spelling must report the exact same values as
+					// the deprecated one it is converging with — see
+					// trigger_event_source_spelling.go.
+					statecheck.ExpectKnownValue(
+						"data.circleci_triggers.test",
+						tfjsonpath.New("triggers").AtSliceIndex(0).AtMapKey("event_source_repo_full_name"),
+						knownvalue.StringExact("acme/api"),
+					),
+					statecheck.ExpectKnownValue(
+						"data.circleci_triggers.test",
+						tfjsonpath.New("triggers").AtSliceIndex(0).AtMapKey("event_source_repo_external_id"),
+						knownvalue.StringExact("123456"),
+					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_triggers.test",
 						tfjsonpath.New("triggers").AtSliceIndex(0).AtMapKey("event_preset"),
@@ -188,6 +201,12 @@ func TestAccTriggersDataSource_webhookProvider(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_triggers.test",
 						tfjsonpath.New("triggers").AtSliceIndex(0).AtMapKey("event_source_webhook_url"),
+						knownvalue.StringExact("https://example.com/private/soc/e/t3?secret=**REDACTED**"),
+					),
+					// The resource-matching spelling must agree with the deprecated one.
+					statecheck.ExpectKnownValue(
+						"data.circleci_triggers.test",
+						tfjsonpath.New("triggers").AtSliceIndex(0).AtMapKey("event_source_web_hook_url"),
 						knownvalue.StringExact("https://example.com/private/soc/e/t3?secret=**REDACTED**"),
 					),
 					statecheck.ExpectKnownValue(

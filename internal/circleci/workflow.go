@@ -7,10 +7,9 @@ import "context"
 
 // Workflow routes.
 //
-// Implemented in the CircleCI v2 API v2 API (the CircleCI API,
-// the CircleCI API) and served on both CircleCI Cloud and
-// CircleCI Server; see the comment on pipelineRunRoute in pipeline_run.go for
-// why no requireCloud gating is needed.
+// Implemented directly in the core CircleCI v2 API backend and served on both
+// CircleCI Cloud and CircleCI Server; see the comment on pipelineRunRoute in
+// pipeline_run.go for why no requireCloud gating is needed.
 //
 // This is a read of mutable runtime state: Status changes as the workflow
 // runs. Do not use this data source to derive a resource attribute, only for

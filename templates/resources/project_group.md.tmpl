@@ -13,22 +13,27 @@ group rather than to the whole organization.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | no |
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No. Unlike `circleci_group`, this resource does **not** reject `deployment = "server"` with a friendly error — it attempts the request and the request fails. See the note below. |
+| **API** | `POST /api/v2/organizations/{org_id}/projects/{project_id}/groups` and `POST .../groups/{group_id}/update-role` |
+| **Organization type** | `circleci` (standalone) only, because the group it grants a role to can only exist in one. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud. |
+| **Token** | A personal API token belonging to an organization admin. |
 
-Project group grants use the
-`/api/v2/organizations/{organization_id}/projects/{project_id}/groups` endpoints.
-Unlike the plain `.../groups` routes used by `circleci_group` and
-`circleci_group_membership`, this path is **not** in the routes served a CircleCI
-Server installation forwards to the public API service: Server exposes only
-`/api/v2/organizations/[^/]+/groups`, and `.../projects/{project_id}/groups` is a
-different prefix. Against CircleCI Server these requests do not reach the API and
-fail. Use this resource on CircleCI Cloud only.
+-> **Why there is no explicit Server error here.** The path
+`/api/v2/organizations/{org_id}/projects/{project_id}/groups` is not served on
+CircleCI Server: Server exposes only `/api/v2/organizations/[^/]+/groups`, and
+`.../projects/{project_id}/groups` is a different prefix that a Server
+installation does not serve. That makes it a routing fact rather than an
+organization-type fact, so it is stated here rather than enforced in code, and a
+Server installation answers with a transport-level failure instead of the
+plan-time diagnostic the other two group resources emit. Use this resource on
+CircleCI Cloud only.
 
 ~> **This API is not part of the published CircleCI OpenAPI specification** and
-may change without notice. It is not documented publicly rather than on the public
-API reference, so treat it as less stable than the rest of the provider.
+may change without notice. It is not documented publicly, so treat it as less
+stable than the rest of the provider.
 
 ## Destroy does not revoke access
 

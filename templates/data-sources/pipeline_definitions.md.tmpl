@@ -18,15 +18,13 @@ config source and a checkout source, not an execution of one; for those see
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Pipeline definitions live under `/api/v2` but are served by the public API service
-rather than the v2 API, and CircleCI Server does not route
-`pipeline-definitions` there. A Server installation answers HTTP 404, which is
-indistinguishable from a project that does not exist, so this data source rejects
-`deployment = "server"` outright with an explanatory error.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — and **not** for the v3 reason. `pipeline-definitions` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. A Server installation answers HTTP 404, which is indistinguishable from a project that does not exist, so `deployment = "server"` is refused outright. |
+| **API** | `GET /api/v2/projects/{project_id}/pipeline-definitions` |
+| **Organization type** | Any. Reading works on every VCS integration, unlike creating. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 

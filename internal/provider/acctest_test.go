@@ -5,6 +5,7 @@ package provider
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -241,4 +242,32 @@ func testRunnerNamespace(t *testing.T) string {
 	t.Helper()
 
 	return testAccEnv(t, "CIRCLECI_TEST_RUNNER_NAMESPACE", "runner namespace of the primary test organization")
+}
+
+// acceptanceVCSTypes lists every value CIRCLECI_TEST_VCS_TYPE may take. It
+// mirrors the "CircleCI org slug shape" table in TESTING.md. CircleCI Server
+// is deliberately not one of these six: it is a separate axis (deployment,
+// selected by CIRCLE_DEPLOYMENT), orthogonal to which VCS an organization is
+// connected to, and every one of these six can in principle run on it.
+var acceptanceVCSTypes = []string{
+	"github_app", "github_oauth", "gitlab", "gitlab_selfmanaged", "bitbucket", "github_server",
+}
+
+// testVCSType returns which VCS integration the configured fixtures belong
+// to, skipping the calling test — the same convention as every other helper
+// above — when CIRCLECI_TEST_VCS_TYPE is unset.
+//
+// Most resources behave identically on every integration, which is why every
+// helper above it takes no VCS branching at all: the same variable names
+// resolve to a GitHub App project in one CI run and a Bitbucket project in
+// another, and most tests never need to know which. A test whose resource is
+// *not* uniform across integrations (see README.md's compatibility matrix)
+// should call testRequireVCSType instead of this directly, so that running it
+// against the wrong fixture produces a named skip rather than a live-API
+// failure indistinguishable from a regression.
+func testVCSType(t *testing.T) string {
+	t.Helper()
+
+	return testAccEnv(t, "CIRCLECI_TEST_VCS_TYPE",
+		"the VCS integration of the configured fixtures, one of "+strings.Join(acceptanceVCSTypes, ", "))
 }

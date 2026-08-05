@@ -11,7 +11,15 @@ Reports whether a CircleCI organization is entitled to audit log streaming at al
 
 Check this before creating a `circleci_audit_log_config`: creating one against an ineligible organization fails with a 403 at apply time, and this data source lets a configuration produce a clearer, earlier diagnostic instead.
 
-!> **CircleCI Cloud only, and only on a Scale plan.** See [`circleci_audit_log_config`](../resources/audit_log_config.md) for why.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on a Scale plan. |
+| **CircleCI Server** | No, for two independent reasons. First, audit log streaming is gated behind a CircleCI Cloud billing plan tier (Scale) that a Server installation has no concept of; this is the one `requireCloud` gate in the provider that is not about the v3 API, and it fails with a clear error rather than an ambiguous 404. Second, the route itself is not implemented on CircleCI Server at all — it belongs to a backend CircleCI Server does not deploy — so even without the billing-tier gate, `/api/v2/organizations/{org_id}/audit-log/access` would not work there. |
+| **API** | `GET /api/v2/organizations/{org_id}/audit-log/access` |
+| **Organization type** | Any. Entitlement is a billing-plan property, not an organization-type one. |
+| **Token** | Any valid API token with read access to the organization. |
 
 ## Example Usage
 

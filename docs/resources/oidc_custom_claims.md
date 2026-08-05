@@ -9,7 +9,15 @@ description: |-
 
 Customizes the claims of the OIDC identity tokens CircleCI issues to jobs, so that a cloud provider or secrets manager will accept them.
 
-Works against both **CircleCI Cloud and CircleCI Server** — OIDC custom claims are served by the v2 API, which both provide.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes on CircleCI Server 4.4 and later. Not available in air-gapped installations. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET`, `PATCH` and `DELETE /api/v2/org/{org_id}/oidc-custom-claims`, and the same three on `/api/v2/org/{org_id}/project/{project_id}/oidc-custom-claims` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -55,7 +63,11 @@ Changing this value forces a new resource to be created.
 
 ~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 - `project_id` (String) Unique identifier (UUID) of the project whose identity tokens are customized. Omit it to customize the organization's tokens instead. Changing this value forces a new resource to be created.
-- `ttl` (String) How long an identity token stays valid, as a duration string: one or more unit-suffixed integers with no separator, for example `1h`, `90m` or `1h30m`. The accepted units are `ms`, `s`, `m`, `h`, `d` and `w`. Note that fractional values such as `1.5h` are rejected even though Go accepts them.
+- `ttl` (String) How long an identity token stays valid, as a duration string: one or more unit-suffixed numbers with no separator, for example `1h`, `90m` or `1h30m`. The accepted units are `ns`, `us`, `ms`, `s`, `m` and `h`.
+
+~> **`d` and `w` are not accepted, despite appearing in CircleCI's OpenAPI document.** That document gives this field the pattern `^([0-9]+(ms|s|m|h|d|w)){1,7}$`, but nothing enforces it and the API parses the value with Go's duration parser, which has no unit longer than an hour. `7d` is rejected with `400`; write `168h` instead. This provider rejects it at plan time rather than letting the apply fail.
+
+The API rewrites whatever it is given into its own canonical form, so `90m` is stored and reported as `1h30m0s`. That is not a change: the three spellings compare equal, and no diff is planned for one.
 
 ### Read-Only
 

@@ -6,17 +6,39 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
 )
+
+// groupNameAndDescriptionPattern is the character class the backend behind
+// the public API's /organizations/{org_id}/groups routes actually enforces
+// for both `name` and `description`, confirmed by reading its implementation:
+// `^[a-zA-Z0-9-_ .,\s]*$`. Letters, digits, space, hyphen, underscore, period
+// and comma are accepted; everything else, including a semicolon, is
+// rejected with a 400.
+//
+// The API's own error message — "can contain only underscores, dashes and
+// alphanumeric characters" — undersells what it actually accepts (it also allows
+// spaces, periods and commas) but correctly identifies what it rejects, which is
+// everything else. Do not derive this from the message text alone: it is
+// identical for both attributes, but the length bound is not (100 vs. 200
+// below), and reading the code rather than the message is what catches that.
+var groupNameAndDescriptionPattern = regexp.MustCompile(`^[a-zA-Z0-9\-_ .,\s]*$`)
+
+// groupNameAndDescriptionPatternDescription is shared between the two attribute
+// validators below so the wording cannot drift between them.
+const groupNameAndDescriptionPatternDescription = "must contain only letters, numbers, spaces, and the characters - _ . ,"
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -81,16 +103,28 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"organization_id": deprecatedOrgIDAttribute("this group", true),
 			"org_id":          orgIDAttribute("this group", true),
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Name of the group. Changing this value forces a new resource to be created.",
-				Required:            true,
+				MarkdownDescription: "Name of the group. Changing this value forces a new resource to be created.\n\n" +
+					"CircleCI's group service rejects a name that is empty, is 100 characters or longer, or " +
+					groupNameAndDescriptionPatternDescription + ".",
+				Required: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
+				Validators: []validator.String{
+					// The service's own check is `len(s) >= 100` (rejected), which
+					// allows at most 99 characters even though its error message
+					// advertises "1-100" — read from source, not the message; see
+					// groupNameAndDescriptionPattern.
+					stringvalidator.LengthBetween(1, 99),
+					stringvalidator.RegexMatches(groupNameAndDescriptionPattern, groupNameAndDescriptionPatternDescription),
+				},
 			},
 			"description": schema.StringAttribute{
-				MarkdownDescription: "Description of the group. Changing this value forces a new resource to be created.",
-				Optional:            true,
-				Computed:            true,
+				MarkdownDescription: "Description of the group. Changing this value forces a new resource to be created.\n\n" +
+					"CircleCI's group service rejects a description that is 200 characters or longer, or " +
+					groupNameAndDescriptionPatternDescription + " (an empty description is accepted).",
+				Optional: true,
+				Computed: true,
 				PlanModifiers: []planmodifier.String{
 					// RequiresReplaceIfConfigured rather than RequiresReplace,
 					// because this attribute is also computed: dropping it from
@@ -98,6 +132,12 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					// instead of destroying the group.
 					stringplanmodifier.RequiresReplaceIfConfigured(),
 					stringplanmodifier.UseStateForUnknown(),
+				},
+				Validators: []validator.String{
+					// Same off-by-one as name: the service rejects `len(s) >= 200`,
+					// so 199 is the longest description it actually accepts.
+					stringvalidator.LengthAtMost(199),
+					stringvalidator.RegexMatches(groupNameAndDescriptionPattern, groupNameAndDescriptionPatternDescription),
 				},
 			},
 		},
@@ -172,16 +212,23 @@ func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 			return
 		}
 
-		// A group that does not exist answers 403 "Permission denied.", not 404 —
-		// the same answer as a group in another organization, or a token without
-		// access. That conflation is deliberate, to avoid confirming whether an id
-		// exists, which means it is not possible to tell "deleted outside
-		// Terraform" from "this token cannot see it".
+		// 403 "Permission denied." is a *different* condition from the 404 above,
+		// and both have to be handled.
 		//
-		// Removing the resource from state on 403 would mean a token that loses
-		// permission silently causes Terraform to recreate live groups. Erroring is
-		// the safer default, so the diagnostic names both causes instead of
-		// guessing.
+		// Re-checked against source: absence really is 404. The service behind this
+		// route resolves the group and maps "no such group" — including a group
+		// belonging to a different organization — to a not-found error, which the
+		// public API relays as 404. The 403 comes from earlier: the route sits
+		// behind an organization-level permission check that runs before the
+		// handler, so a token that cannot view the organization's access
+		// configuration, or an organization it cannot see at all, is refused
+		// without the group ever being looked up.
+		//
+		// So a 403 says nothing about whether the group still exists, which is
+		// exactly why it must not drop state: a token that loses permission would
+		// otherwise silently cause Terraform to recreate live groups. Erroring is
+		// the safer default, and the diagnostic names every cause rather than
+		// guessing between them.
 		if circleci.IsUnauthorized(err) {
 			resp.Diagnostics.AddError(
 				"Unable to read CircleCI group "+state.Id.ValueString(),
@@ -251,9 +298,16 @@ func (r *groupResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 
 	err := r.client.Groups().Delete(ctx, effectiveOrgID(state.OrganizationId, state.OrgId), state.Id.ValueString())
 	if err != nil {
-		// Already gone is the desired end state. 403 counts: the API answers
-		// "Permission denied." for a group that does not exist, so it is the
-		// response a already-deleted group produces.
+		// Already gone is the desired end state, so a 404 is a success.
+		//
+		// 403 is tolerated too, but for a weaker reason than Read's comment used to
+		// claim: a deleted group answers 404, and the 403 comes from the
+		// organization-level permission check in front of the route. Treating it as
+		// success here is still right — the alternative is a destroy that can never
+		// complete, stranding the resource in state — and unlike Read this direction
+		// is safe, because failing to delete something that may still exist is
+		// visible the next time anything reads it, whereas silently dropping state
+		// on Read would quietly recreate a live group.
 		if circleci.IsNotFound(err) || circleci.IsUnauthorized(err) {
 			return
 		}

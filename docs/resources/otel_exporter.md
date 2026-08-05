@@ -9,11 +9,15 @@ description: |-
 
 Manages an OTLP exporter: where CircleCI sends OpenTelemetry traces for an organization's pipelines.
 
-Works on **CircleCI Cloud**. Server availability is **unverified**: the route is v2, which
-Server does serve in general, but that is not sufficient evidence on its own — a Server
-installation only routes a subset of paths to the service behind this endpoint, which is
-why `circleci_pipeline_definition` is v2 and yet unavailable there. No Server installation
-has been available to settle it.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | **No.** The provider gates this and reports an explicit error rather than attempting the request. Settled by route ownership rather than API version: `/api/v2/otel` is proxied to a backend that a CircleCI Server installation does not deploy, and its gateway has no route for this path either. Note that being v2 is not evidence either way on its own: some v2 routes are forwarded by a Server installation's gateway and others are not — `circleci_pipeline_definition` is v2 and unavailable, while the URL orb allow list is v2 and available. |
+| **API** | `GET` and `POST /api/v2/otel/exporters`, `PATCH` and `DELETE /api/v2/otel/exporters/{id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 !> **Experimental.** CircleCI flags the OTLP exporter endpoints as experimental. Their request and response shapes may change, or they may be withdrawn, without the deprecation notice the rest of the v2 API carries. Pin the provider version if that matters to you.
 
@@ -152,7 +156,12 @@ See [Managing secrets](../guides/managing-secrets) for the whole picture.
 
 ### Required
 
-- `endpoint` (String) The OTLP endpoint spans are sent to, as `host:port` — for example `otel.example.com:4317`. Do **not** include a scheme: `https://` or `grpc://` is rejected. Changing this value forces a new resource to be created.
+- `endpoint` (String) Where CircleCI sends spans. Two forms are accepted:
+
+- a bare host and port, such as `otel.example.com:4317` — the port is required; or
+- an `http://` or `https://` URL, such as `https://otel.example.com/v1/traces`, which is only valid together with `protocol = "http"`.
+
+Any other scheme, `grpc://` included, is rejected. The host must resolve publicly: CircleCI refuses an endpoint that resolves to a private, loopback or link-local address. Changing this value forces a new resource to be created.
 - `protocol` (String) The OTLP transport: `grpc` (usually port 4317) or `http` (usually port 4318). Changing this value forces a new resource to be created.
 
 ### Optional
@@ -170,11 +179,11 @@ Because nothing derived from the headers is stored, Terraform cannot see that th
 
 Set at most one of `headers` and `headers_wo`. Setting neither sends no headers.
 
-~> **On this path no header drift is detected at all.** `headers` at least notices a header added or removed outside Terraform, because CircleCI returns header names in full; `headers_wo` stores no names to compare against, so it notices neither that nor a changed value.
+~> **A changed header value is never detected on either path.** CircleCI never discloses a header's value, only its name. A header *added or removed* outside Terraform is detected here too, through the computed `headers_wo_names` attribute, and — because `headers` already forces replacement — detecting one recreates the exporter, the same as it does on the `headers` path.
 - `headers_wo_version` (Number) Rotation counter for `headers_wo`. Increment it whenever any header in `headers_wo` changes: a write-only value leaves no trace in state, so this is the only thing Terraform has to compare, and changing `headers_wo` on its own is not a change as far as Terraform is concerned.
 
 Required when `headers_wo` is set, and must be at least 1. Incrementing it forces a new resource to be created, exactly as changing `headers` does: CircleCI has no route that updates an exporter in place. The exporter gets a new `id` and traces are not exported during the gap.
-- `insecure` (Boolean) Whether to connect to the endpoint without transport security. Defaults to `false`. Leave it false unless the collector is reachable only over a private network: headers, including any credentials, travel in the clear otherwise. Changing this value forces a new resource to be created.
+- `insecure` (Boolean) Whether to connect to the endpoint without transport security. CircleCI defaults this to `false`. Leave it false unless the collector is reachable only over a private network: headers, including any credentials, travel in the clear otherwise. Changing this value forces a new resource to be created.
 - `org_id` (String) The unique identifier (UUID) of the organization that owns this exporter.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.
@@ -186,6 +195,9 @@ Changing this value forces a new resource to be created.
 
 ### Read-Only
 
+- `headers_wo_names` (Set of String) The header names CircleCI reports for this exporter, populated only when headers are managed through `headers_wo`. CircleCI discloses every header name in full — only the values are masked — so recording the names here reveals nothing that reading the exporter does not already reveal, and it is what lets a read detect a header added or removed outside Terraform on this path, the way `headers` already does on its own.
+
+~> **An added or removed header recreates the exporter.** Detecting one adopts CircleCI's header map into `headers`, and `headers` already forces replacement — the same behavior the `headers` path has always had for this kind of drift, not something new here. A changed header *value* is still undetectable on both paths: CircleCI never discloses values, only names.
 - `id` (String) Unique identifier (UUID) of the exporter, assigned by CircleCI.
 - `issues` (List of String) Validation problems CircleCI has detected with this exporter, such as an endpoint that no longer resolves. Empty when there are none.
 

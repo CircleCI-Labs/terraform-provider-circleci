@@ -5,9 +5,9 @@ package circleci
 
 import "context"
 
-// Routes for notification channel configs. Served by the API
-// behind the public API's v3 façade; CircleCI Server does not route /api/v3, so
-// every call here is Cloud-only.
+// Routes for notification channel configs, served behind the public API's
+// v3 façade; CircleCI Server does not route /api/v3, so every call here is
+// Cloud-only.
 const (
 	notificationChannelConfigsRoute      = "/notification/channel-configs"
 	notificationChannelConfigRoute       = "/notification/channel-configs/%s"

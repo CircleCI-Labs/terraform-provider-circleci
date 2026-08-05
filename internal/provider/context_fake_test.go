@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -18,39 +19,38 @@ import (
 // internal/circleci.Client; the name is kept only because every sibling
 // _test.go file already refers to it).
 //
-// The wire shapes and status codes are copied from the API's
-// the CircleCI API and middleware, not from any Go client's structs, so
-// a mock cannot merely agree with a client that disagrees with production:
-//   - the API (postOrgContext): create response is only {id,name,created_at}
-//   - the API (getOrgContext): read response also carries org_id,
-//     environment_variables and restrictions
-//   - the API (getContexts): list response is {items,next_page_token},
-//     accepting either owner-id+owner-type or owner-slug
-//   - the API: {"message":"Context deleted."}
-//   - context_restrictions_get.go (getContextRestrictions): {"items":[...]} with
-//     NO next_page_token key at all, and project_id present only for "project"
+// The wire shapes and status codes are copied from the real API's handlers
+// and middleware, not from any Go client's structs, so a mock cannot merely
+// agree with a client that disagrees with production:
+//   - create response is only {id,name,created_at}
+//   - read response also carries org_id, environment_variables and
 //     restrictions
-//   - context_restriction_post.go (postContextRestrictions): 201 response is
-//     {context_id,id,restriction_type,restriction_value,project_id?} — deliberately
-//     WITHOUT a "name" key. The API never reports a restriction's name on
-//     create; only a subsequent list/read does. See contextRestrictionResource.Create.
-//   - context_restriction_delete.go: {"message":"Context restriction deleted."}
-//   - context_env_vars_get.go (getContextEnvVars): {"items":[...],"next_page_token":null},
-//     each item carrying "truncated_value" rather than "value" (the raw value is
+//   - list response is {items,next_page_token}, accepting either
+//     owner-id+owner-type or owner-slug
+//   - delete: {"message":"Context deleted."}
+//   - restriction list response is {"items":[...]} with NO next_page_token
+//     key at all, and project_id present only for "project" restrictions
+//   - restriction create (201) response is
+//     {context_id,id,restriction_type,restriction_value,project_id?} —
+//     deliberately WITHOUT a "name" key. The API never reports a
+//     restriction's name on create; only a subsequent list/read does. See
+//     contextRestrictionResource.Create.
+//   - restriction delete: {"message":"Context restriction deleted."}
+//   - env var list response is {"items":[...],"next_page_token":null}, each
+//     item carrying "truncated_value" rather than "value" (the raw value is
 //     never returned by the API)
-//   - context_env_var_put.go (putContextEnvVar): {variable,context_id,created_at,updated_at}
-//   - context_env_var_delete.go: {"message":"Environment variable deleted."}
+//   - env var put response is {variable,context_id,created_at,updated_at}
+//   - env var delete: {"message":"Environment variable deleted."}
 //
 // The most consequential shape modeled here is not a JSON field but a status
 // code: every one of the routes above that addresses a context by id sits
-// behind the API's context-resolution step
-// (the CircleCI API), which resolves the id to its owning
-// organization through a *separate* lookup and maps ANY failure of that
-// lookup — a context that never existed, one that was deleted, one in
-// another organization, or a token that cannot see it — to HTTP 403, before
-// the route's own handler (which might otherwise 404) ever runs. resolveOrFail
-// below is that middleware. Only the collection routes (list, create), which
-// carry no context id, are exempt.
+// behind a middleware that resolves the id to its owning organization
+// through a *separate* lookup and maps ANY failure of that lookup — a context
+// that never existed, one that was deleted, one in another organization, or a
+// token that cannot see it — to HTTP 403, before the route's own handler
+// (which might otherwise 404) ever runs. resolveOrFail below is that
+// middleware. Only the collection routes (list, create), which carry no
+// context id, are exempt.
 type contextFakeAPI struct {
 	t  *testing.T
 	mu sync.Mutex
@@ -63,7 +63,7 @@ type contextFakeAPI struct {
 	// missingContexts makes a lookup on these context ids answer 403, on every
 	// route addressed by context id, simulating a context deleted outside
 	// Terraform (or one this token can no longer see — the API does not
-	// distinguish the two; see the context-resolution step above).
+	// distinguish the two; see resolveOrFail below).
 	missingContexts map[string]bool
 
 	requests []string
@@ -286,8 +286,8 @@ func (a *contextFakeAPI) failed(w http.ResponseWriter) bool {
 	return true
 }
 
-// resolveOrFail stands in for the API's context-resolution step
-// (the CircleCI API): every route below that addresses a context
+// resolveOrFail stands in for the middleware the real API puts in front of
+// every context route: every route below that addresses a context
 // by id calls this before doing anything else, and a context this token
 // cannot resolve — deleted, never existed, or in another organization —
 // answers 403 "Forbidden" here, before the route-specific handler runs at
@@ -348,7 +348,7 @@ func (a *contextFakeAPI) postContext(w http.ResponseWriter, r *http.Request) {
 	a.contexts[id] = ctx
 	a.mu.Unlock()
 
-	// the API's response only ever carries these three fields.
+	// The create response only ever carries these three fields.
 	a.write(w, http.StatusOK, map[string]any{
 		"id":         ctx.id,
 		"name":       ctx.name,
@@ -370,17 +370,24 @@ func (a *contextFakeAPI) getContexts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.mu.Lock()
-	var items []map[string]any
-	ids := make([]string, 0, len(a.contexts))
-	for id := range a.contexts {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		ctx := a.contexts[id]
+	// Sorted by lower-cased name, which is the order the owning contexts service
+	// imposes — not by id, and not insertion order. Nothing depends on it today;
+	// answering in an order of the API's own choosing is the property that stopped
+	// the events/pr_only_branch_overrides permanent diff being invisible here (see
+	// reorderedLikeTheAPI), so it is worth getting right before something does.
+	matching := make([]*fakeContext, 0, len(a.contexts))
+	for _, ctx := range a.contexts {
 		if ownerID != "" && ctx.orgID != ownerID {
 			continue
 		}
+		matching = append(matching, ctx)
+	}
+	sort.Slice(matching, func(i, j int) bool {
+		return strings.ToLower(matching[i].name) < strings.ToLower(matching[j].name)
+	})
+
+	items := make([]map[string]any, 0, len(matching))
+	for _, ctx := range matching {
 		items = append(items, map[string]any{
 			"id":         ctx.id,
 			"name":       ctx.name,
@@ -388,10 +395,6 @@ func (a *contextFakeAPI) getContexts(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	a.mu.Unlock()
-
-	if items == nil {
-		items = []map[string]any{}
-	}
 
 	a.write(w, http.StatusOK, map[string]any{"items": items, "next_page_token": nil})
 }
@@ -509,7 +512,7 @@ func (a *contextFakeAPI) postRestriction(w http.ResponseWriter, r *http.Request)
 	ctx.restrictions = append(ctx.restrictions, res)
 	a.mu.Unlock()
 
-	// context_restriction_post.go's response struct has no "name" field at all.
+	// The create response has no "name" field at all.
 	resp := map[string]any{
 		"context_id":        ctx.id,
 		"id":                res.id,
@@ -548,10 +551,9 @@ func (a *contextFakeAPI) deleteRestriction(w http.ResponseWriter, r *http.Reques
 	a.mu.Unlock()
 
 	if !found {
-		// The context resolved fine, but this particular restriction did not:
-		// the API.ErrNotFound, mapped to a real 404 by the API
-		// — distinct from the context-level 403 above, which never reached the
-		// handler at all.
+		// The context resolved fine, but this particular restriction did not, so
+		// the API answers a real 404 here — distinct from the context-level 403
+		// above, which is decided before the route's own logic runs.
 		a.write(w, http.StatusNotFound, map[string]any{"message": "restriction not found"})
 
 		return
@@ -583,7 +585,7 @@ func (a *contextFakeAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{
 			"variable":        name,
 			"context_id":      ctx.id,
-			"truncated_value": "xxxx" + ev.value[max(0, len(ev.value)-4):],
+			"truncated_value": truncateContextEnvVarValue(ev.value),
 			"created_at":      ev.createdAt,
 			"updated_at":      ev.updatedAt,
 		})
@@ -650,6 +652,27 @@ func (a *contextFakeAPI) deleteEnvVar(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	a.write(w, http.StatusOK, map[string]any{"message": "Environment variable deleted."})
+}
+
+// truncateContextEnvVarValue reproduces what the owning contexts service puts in
+// a context environment variable's truncated_value.
+//
+// It is the tail of the value ON ITS OWN, with no mask prefix: the last four
+// characters, or the last floor(len/2) when the value is eight characters or
+// shorter. The service documents "FOO" → "O", "FOOBAR" → "BAR" and "FOOBARBAZ"
+// → "RBAZ", and its own tests pin "hgfedcba" → "dcba" and "" → "".
+//
+// This fake used to answer "xxxx" plus the last four characters, borrowing the
+// *project* environment variable convention (which does prefix the tail with
+// "xxxx"). The two look alike and are not, and the client's own doc comment
+// carried the same mistake — a shape agreed on by the client and the mock and by
+// neither service, which is the exact failure mode the fakes here exist to
+// avoid. Nothing surfaces truncated_value to a practitioner today, so this cost
+// nothing; the point is that it would have if anything ever had.
+func truncateContextEnvVarValue(value string) string {
+	revealed := min(4, len(value)/2)
+
+	return value[len(value)-revealed:]
 }
 
 func (a *contextFakeAPI) write(w http.ResponseWriter, status int, body any) {

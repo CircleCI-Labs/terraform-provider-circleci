@@ -9,7 +9,15 @@ description: |-
 
 Manages the advanced settings of an existing CircleCI project: the toggles found under Project Settings > Advanced in the CircleCI web application.
 
-Works against both **CircleCI Cloud and CircleCI Server** — project settings are served by the v2 API, which both provide.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The route is served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `PATCH /api/v2/project/{project-slug}/settings` |
+| **Organization type** | Any. GitLab, GitHub App and GitHub Enterprise Server projects address the slug as `circleci/{org-id}/{project-id}`. **Individual toggles vary by VCS integration** — `build_fork_prs`, `oss` and `set_github_status` are not uniformly available; see the compatibility matrix in the README. |
+| **Token** | A personal API token with permission to change the project's settings. |
 
 ## `circleci_project_settings` or `circleci_project`?
 

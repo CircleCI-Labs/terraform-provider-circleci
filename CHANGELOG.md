@@ -2,7 +2,7 @@
 
 ## 0.5.0 (Unreleased)
 
-The provider goes from 11 resources and 10 data sources to **31 resources, 63 data
+The provider goes from 11 resources and 10 data sources to **35 resources, 66 data
 sources, 2 ephemeral resources and 3 provider functions**, and stops depending on
 `circleci-sdk-go`.
 
@@ -29,10 +29,10 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   Fixed by migrating the resource onto the provider's own API client.
   `TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire` asserts both that the
   correct keys are sent, on create *and* on rotation, and that the hyphenated ones
-  are absent, so this cannot silently regress. ([#25](../../issues/25))
+  are absent, so this cannot silently regress.
 
   Note `circleci_webhook`'s `signing_secret` still cannot be read back — the API
-  masks it. That is a separate, cosmetic issue ([#21](../../issues/21)).
+  masks it. That is a separate, cosmetic issue.
 
 ### SECURITY (dependencies)
 
@@ -80,10 +80,10 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   * fields simply absent from the SDK's structs, making settings such as
     `build_prs_only` unreachable from Terraform no matter what the provider did
 
-  Wire shapes were re-derived from what the API accepts and returns rather than ported
-  from the SDK, since porting would have carried the tag bugs across intact.
+  Wire shapes were re-derived from what the API actually accepts and returns rather than
+  ported from the SDK, since porting would have carried the tag bugs across intact.
   `CircleCI-Public/circleci-cli`'s `internal/apiclient` was the main reference — MIT and
-  actively maintained — plus the API and the API the real wire format.
+  actively maintained — plus what the API itself accepts and returns.
 
   The SDK had zero releases, zero tags and no maintainer; this provider was effectively
   its only consumer.
@@ -244,6 +244,63 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   did survive — see BUG FIXES — so such a configuration was already producing a plan
   that never converged. Use `for` / `contains` / `tolist(...)` instead.
 
+* **Changing `pipeline_definition_id` (or the deprecated `pipeline_id`) on
+  `circleci_trigger` now destroys and recreates the trigger.** It used to plan an
+  in-place update and do nothing at all.
+
+  The definition id is a path segment on the create route and appears nowhere else:
+  `PATCH /api/v2/projects/{project_id}/triggers/{trigger_id}` has no field for it, and
+  the `GET` does not return one. So editing the attribute produced a PATCH the API
+  accepted and ignored — `terraform apply` reported success, state recorded the new
+  value, and **the trigger was still attached to the old pipeline definition**. No
+  refresh could catch it either: with no definition in the read response, the provider
+  carries the value forward from state, so state confidently reported a definition the
+  API had discarded.
+
+  What to expect now: `terraform plan` shows `# forces replacement`, and applying it
+  **deletes the trigger and creates a new one**. The new trigger has a **new id**, and
+  for a `webhook` event source a **new `event_source_web_hook_url`** — so anything
+  posting to the old URL has to be reconfigured. Any pipeline runs in flight from the
+  old trigger are unaffected; nothing else about the trigger is lost, because a trigger
+  holds no history of its own.
+
+  This is the right trade — silently discarding a change the practitioner asked for is
+  worse than making the cost visible — but it is a behaviour change, so it is here
+  rather than in BUG FIXES. Renaming `pipeline_id` to `pipeline_definition_id` is
+  unaffected: that is still not a change and still replaces nothing
+  (`TestTriggerResourceUnit_SwitchingPipelineAttributeIsNoop`), and neither is the
+  first plan after upgrading from 0.4.0, whose state predates
+  `pipeline_definition_id` entirely (`TestTriggerPlanUpgradingFrom04StateDoesNotReplace`).
+
+* **`circleci_trigger` now validates per-provider attribute combinations at plan time
+  instead of during apply**, and one combination it used to reject is now accepted.
+
+  Rules such as "`parameters` is only valid for `schedule`", "`github_app` requires
+  `event_source_repo_external_id`" and "`event_preset` must be omitted for `webhook`"
+  need nothing from the API to decide, but they lived in `Create` and `Update`, so
+  `terraform plan` succeeded and `terraform apply` failed — after review, and for
+  anyone running plan and apply as separate stages, after the point of no return. They
+  now run in `ValidateConfig`, and `event_source_provider` and `event_preset` have
+  `OneOf` validators built from one exported list each
+  (`circleci.TriggerEventSourceProviders`, `circleci.TriggerEventPresets`), so a typo
+  is caught with the accepted values named.
+
+  Breaking in two directions, both small. A configuration that used to reach `apply`
+  before failing now fails earlier, with a diagnostic naming the attribute rather than
+  the resource. And two rules changed:
+
+  * `event_source_provider = "github_oauth"` **now works.** It was documented, and
+    rejected at apply by a `default` arm that listed the other four providers.
+  * `event_preset` is **no longer required** for `github_app` and `github_server`. The
+    old check ran the preset through a validity test that an empty string fails, making
+    it mandatory in code while every piece of documentation in this repository — and
+    the API — called it optional. It is optional now, and still required for
+    `github_oauth`, where only `all-pushes` and `only-build-prs` are accepted.
+
+  One rule was dropped as unimplementable rather than moved: `Create` also tested
+  `event_source_web_hook_url` for null, which could never fire (the attribute is
+  Computed, so it is unknown in a plan and null in every configuration).
+
 Nothing else in this release is breaking. In particular, the renames required by
 CircleCI's v3 API conventions (`organization_id` → `org_id`, `pipeline` → `run`) are
 deliberately **not** here; they are batched into a planned 1.0 with a state migration
@@ -254,11 +311,43 @@ each breaking something.
 
 Access control and organization management:
 
-* **New resource:** `circleci_group`, `circleci_group_membership`,
-  `circleci_project_group`
+* **New resource:** `circleci_group`, `circleci_project_group`
 * **New resource:** `circleci_organization_settings`
+* **New resource:** `circleci_organization_contacts` — manages an
+  organization's technical (primary) and security contact email lists via
+  `GET`/`PUT /api/private/organization/{org_id}/contacts`, an unofficial route
+  with no published specification. CircleCI Cloud only.
+* **New resource:** `circleci_storage_retention` — manages how many days
+  CircleCI retains an organization's build cache, workspace data and job
+  artifacts via `GET`/`PUT /private/orgs/{org_id}/storage-retention-controls`,
+  another unofficial route with no published specification. CircleCI Cloud
+  only. CircleCI clamps a value outside the organization's plan-enforced
+  bounds rather than rejecting it, so this resource always reads the record
+  back after writing it and warns when the stored value differs from what was
+  configured.
+* **New resource:** `circleci_budget` — manages a CircleCI spend budget, for
+  an organization or for one project within it, via
+  `GET`/`PUT /private/orgs/{org_id}/budgets` and
+  `DELETE /private/orgs/{org_id}/budgets/{budget_id}`, another unofficial
+  route with no published specification. CircleCI Cloud only. `credits` is
+  the only field the write route accepts — `enforcement_type` (`warn` or
+  `block`) is reported read-only, since there is nowhere to send a change to
+  it; it can only be set in the CircleCI web UI.
+* **New data source:** `circleci_budgets`
+* **New resource:** `circleci_group_membership` — manages the full member list
+  of a CircleCI group. This was briefly implemented against the public-looking
+  `/api/v2/organizations/{org_id}/groups/{group_id}/users` family and removed
+  after a live probe showed it 404ing for a group that demonstrably exists (the
+  published spec confirms it, with a per-route host override pointing at
+  internal-only traffic). It is restored here against
+  `GET`/`POST /private/ciam/orgs/{org_id}/groups/{group_id}/users`,
+  `add-users` and `delete-users` — the routes CircleCI's own web application
+  uses for its group management UI, plus CircleCI's org-migration tooling,
+  which adds users to a group in production the same way. CircleCI Cloud only,
+  and only for `circleci` type (standalone) organizations, same as
+  `circleci_group`.
 * **New data source:** `circleci_group`, `circleci_groups`,
-  `circleci_group_membership`, `circleci_project_groups`,
+  `circleci_project_groups`, `circleci_group_membership`,
   `circleci_organization_settings`
 * `circleci_context_restriction` now accepts `type = "group"` in addition to
   `project` and `expression`
@@ -327,7 +416,8 @@ Plural list data sources — there was not a single one before this release, des
 every API entity having a `List`:
 
 * **New data source:** `circleci_contexts`, `circleci_context_restrictions`,
-  `circleci_webhooks`, `circleci_project_environment_variables`
+  `circleci_context_environment_variables`, `circleci_webhooks`,
+  `circleci_project_environment_variables`
 
 Ephemeral resources and functions — both interfaces were asserted on the provider
 and returning empty lists:
@@ -617,7 +707,6 @@ and returning empty lists:
   installation either failed or silently followed a project on Cloud. It now honours
   `host`. The follow is also correctly skipped for standalone
   (`circleci/<uuid>`) organizations, which follow the project as part of creating it.
-  ([#5](../../issues/5))
 * **`circleci_organization` destroy deleted organizations it had merely adopted.**
   Create is a find-or-create for VCS-backed organizations, but destroy issued an
   unconditional `DELETE` — which tears down VCS connections and deletes every
@@ -637,22 +726,20 @@ and returning empty lists:
   API normalises `ttl` on write (`90m` is stored as `1h30m0s`), so every apply
   failed with "Provider produced inconsistent result after apply". `ttl` now uses
   semantic equality, so `90m`, `1h30m` and `5400s` all compare equal to the stored
-  form. ([#10](../../issues/10))
+  form.
 * **Every config policy that existed read as absent.** `GetPolicyDocument` decoded
   the single-document route as if it returned the bundle route's name-keyed map.
-  ([#11](../../issues/11))
 * **An orb version could not be resolved by reference.** `filter[ref]` requires a
   fully qualified `namespace/orb@version`; a bare version was being sent, and the
   server ignores `filter[orb_id]` when `filter[ref]` is present.
-  ([#12](../../issues/12))
 * **A missing group answers HTTP 403, not 404**, so drift detection never worked for
   groups. Note the provider deliberately does *not* treat 403 as "gone" in general:
   the conflation is intentional anti-enumeration on CircleCI's side, and treating a
   permission loss as a deletion would let the provider recreate live objects.
 * **Contexts answer 403 for absence too, and nothing modelled it.** Every route that
-  addresses a context by id sits behind the API's `the context-resolution step` middleware, which
-  resolves the id and maps *every* failure — deleted, wrong organization, or no
-  permission — to **403**, before the route's own handler runs. Context drift detection
+  addresses a context by id resolves that id in a preliminary step which maps *every*
+  failure — deleted, wrong organization, or no permission — to **403**, before the
+  route's own logic runs. Context drift detection
   therefore never worked. `Read` now reports a diagnostic naming all three causes rather
   than silently removing the context from state, because a token that merely lost
   permission must not cause Terraform to recreate a live context and its environment
@@ -664,7 +751,7 @@ and returning empty lists:
   success while moving nothing. There is no API route that moves a context between
   organizations, so it now forces replacement.
 * **`circleci_pipeline_definition` fixes enabled by dropping the SDK** (all four previously
-  characterized in tests as known-broken, [#26](../../issues/26)): `project_id` and
+  characterized in tests as known-broken): `project_id` and
   `config_source_repo_external_id` now force replacement instead of planning an in-place
   update that silently does nothing or targets the wrong project; a definition deleted
   outside Terraform now produces a clean recreate plan instead of a permanent refresh
@@ -694,5 +781,5 @@ and returning empty lists:
   routes are the only way to resolve `owner/repo` to the numeric `external_id` that
   `circleci_pipeline_definition` and `circleci_trigger` require.
 * `API-COVERAGE.md` is a route-by-route inventory of the CircleCI API and what this
-  provider does with each route, built from the API' own route
-  registration tables. `DESIGN.md` records why the provider is shaped the way it is.
+  provider does with each route, built from the routes CircleCI actually serves.
+  `DESIGN.md` records why the provider is shaped the way it is.

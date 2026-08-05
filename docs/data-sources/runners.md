@@ -44,7 +44,7 @@ output "outdated_agents" {
 
 ### Optional
 
-- `namespace` (String) Only return runners in this runner namespace.
+- `namespace` (String) Only return runners in this runner namespace. Cannot be combined with `resource_class` — the API takes exactly one of the two.
 - `org_id` (String) The unique identifier (UUID) of the organization to read runners from.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.
@@ -69,5 +69,7 @@ Read-Only:
 - `last_used` (String) Timestamp at which the runner last claimed a task.
 - `name` (String) The runner's name, as reported by the agent.
 - `resource_class` (String) The resource class the runner is registered to, in `namespace/name` format.
-- `status` (String) The agent's status as reported by the API, for example `running` or `idle`.
+- `status` (String) Whether the agent is currently executing a task: `busy` or `idle`.
+
+~> **Only populated when listing by `org_id`.** The API computes this by cross-referencing the organization's in-flight tasks, which it only does for an organization-scoped listing. Listing by `resource_class` or `namespace` leaves this empty.
 - `version` (String) Version of the runner agent.

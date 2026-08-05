@@ -14,11 +14,10 @@ change while the job runs. Use this data source for inspection and in `check` bl
 a resource attribute will cause a perpetual diff.
 
 -> **Addressed by number, not by the id the API reference documents.** The CircleCI v2 API reference
-documents `GET /api/v2/jobs/{id}`, but that route is a bare reverse-proxy pass-through to the API
-(via the API) with no CircleCI Server equivalent: the API does not exist there, and the
-route is entirely absent from CircleCI Server's gateway routes served. `GET
-/api/v2/project/{slug}/job/{job-number}` is used instead — it is implemented by the API, which
-*is* deployed on CircleCI Server and routed there. That is why `project_slug` and `job_number`, not a job
+documents `GET /api/v2/jobs/{id}`, but that route is a pass-through to a backend that only exists on
+CircleCI Cloud, and the route is entirely absent from CircleCI Server's gateway. `GET
+/api/v2/project/{slug}/job/{job-number}` is used instead — it is implemented by a backend that *is*
+deployed on CircleCI Server and routed there. That is why `project_slug` and `job_number`, not a job
 id, identify a job here.
 
 Per-step detail (each parallel run's individual steps) and artifacts/test results are not exposed: they
@@ -30,7 +29,7 @@ a job summary. Use the CircleCI web UI or the REST API directly for those.
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | Yes — the API is deployed and routed on both. |
+| **CircleCI Server** | Yes — the backend behind this route is deployed and routed on both. |
 | **API** | `GET /api/v2/project/{project-slug}/job/{job-number}` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token with permission to view the project's builds. |

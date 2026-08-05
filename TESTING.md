@@ -24,7 +24,7 @@ radius, and the tests exercise all of them:
 | `circleci_oidc_custom_claims` | Destroy resets the org's OIDC claims, changing what cloud providers will accept. |
 | `circleci_orb_version` | **Publishing an orb version is irreversible** — there is no delete endpoint. Test runs permanently add versions to a namespace. |
 | `circleci_orb_namespace` | Deleting a namespace destroys every orb under it. Organizations are normally limited to one namespace. |
-| `circleci_group`, `circleci_group_membership`, `circleci_project_group` | Creates and deletes groups and re-writes their full membership and project role grants — i.e. permissions. |
+| `circleci_group`, `circleci_project_group` | Creates and deletes groups and re-writes their full project role grants — i.e. permissions. |
 | `circleci_project`, `circleci_checkout_key` | Creates and deletes projects and their deploy/user keys. |
 | `circleci_runner_resource_class` | Deletes resource classes, with `force` cascading to their tokens. |
 
@@ -139,10 +139,61 @@ TF_ACC=1 task test
 Any variable left unset skips the tests that need it, naming it in the skip
 message. There is no way to make a test silently pass without its fixture.
 
-## Open design work
+## What a run covers, and how to tell
 
-The suite does not yet key its skips off `CIRCLECI_TEST_VCS_TYPE`. Until it
-does, running it against GitLab or Bitbucket will produce failures for features
-those integrations genuinely do not have — which is indistinguishable from a
-real regression. Adding that gating is a prerequisite for a per-VCS CI matrix,
-and is tracked as an issue.
+Most resources behave identically on every VCS integration, so most
+acceptance tests carry no VCS branching at all: the same `CIRCLECI_TEST_*`
+variable names resolve to a GitHub App project in one run and a Bitbucket
+project in another, and the test never needs to know which. That is by
+design — see "Credentials layout" above.
+
+A few resources genuinely do not (README.md's compatibility matrix), and a
+test that exercises one of those calls `testRequireVCSType(t, ...)` before it
+builds any Terraform configuration. It skips, naming both what the test needs
+and what `CIRCLECI_TEST_VCS_TYPE` was actually set to, when the configured
+fixture cannot support the feature — so pointing the whole suite at, say, a
+GitLab organization produces named skips instead of real-API failures that
+read like regressions. Currently gated this way:
+
+| Test | Requires |
+|---|---|
+| `TestAccCircleCiProjectResource` | `github_oauth` or `bitbucket` — `build_fork_prs = true` is unconfirmed on GitLab and a documented **no** on GitHub App, GitHub Enterprise Server and GitLab self-managed |
+| `TestAccTriggerResourceWebhook` | `github_app`, `github_oauth` or `github_server` — `circleci_trigger` does not exist at all on GitLab, GitLab self-managed or Bitbucket Cloud |
+| `TestAccScheduledTriggerDataSource` | `github_app`, `github_oauth` or `github_server` — a scheduled trigger is a `circleci_trigger` |
+
+Every other acceptance test either behaves the same everywhere, or already
+depends on a fixture variable TESTING.md documents as set in one context only
+(`CIRCLECI_TEST_GITHUB_APP_REPO_EXTERNAL_ID`, `CIRCLECI_TEST_GITHUB_SERVER_*`,
+...) — those skip on an unrelated integration for free, with no VCS check
+needed, because the variable itself is simply unset there.
+
+At the end of a run, `TestMain` prints which of the VCS-gated tests above ran
+against the configured integration and which skipped because the fixture was
+a different one:
+
+```
+=== VCS integration coverage (CIRCLECI_TEST_VCS_TYPE=github_app) ===
+Exercised by this run (2):
+  TestAccScheduledTriggerDataSource (github_app)
+  TestAccTriggerResourceWebhook (github_app)
+Skipped, configured fixture is a different integration (1):
+  TestAccCircleCiProjectResource (needs github_oauth/bitbucket, got github_app)
+```
+
+(A test appears in "Exercised" once `CIRCLECI_TEST_VCS_TYPE` is a supported
+value for it — the summary says nothing about whether its assertions passed;
+`go test`'s own output is still the source of truth for that.) This block is
+printed once per invocation and only when at least one VCS-gated test ran, so
+a credential-less checkout stays silent.
+
+**What this does not give you.** The gate stops a test from running somewhere
+it cannot possibly pass; it does not make the test run anywhere it *can*. A
+single CI job still only ever has one `CIRCLECI_TEST_VCS_TYPE` configured, so
+a single green run still only measures one integration — the "Exercised by
+this run" list above is that run's honest ceiling, not the suite's. Turning
+that into actual per-integration evidence needs seven CI jobs, each pointed at
+a different context (see "Credentials layout" above); this gating is what
+makes such a matrix meaningful instead of merely green. Until that matrix
+exists, GitHub Enterprise Server, Bitbucket Cloud and CircleCI Server in
+particular remain reasoned rather than measured, exactly as README.md's
+compatibility matrix says.

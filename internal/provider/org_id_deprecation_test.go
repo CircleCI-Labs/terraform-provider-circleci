@@ -109,25 +109,6 @@ resource "circleci_context" "test" {
 			},
 		},
 
-		"circleci_group_membership": {
-			address:   "circleci_group_membership.test",
-			orgID:     testMembershipOrgID,
-			factories: testAccProtoV6ProviderFactories,
-			setup: func(t *testing.T) func(string) string {
-				_, host := newMockMembershipAPI(t)
-
-				return func(attr string) string {
-					return testAccMembershipProviderConfig(host, "cloud") + fmt.Sprintf(`
-resource "circleci_group_membership" "test" {
-  %s       = %q
-  group_id = %q
-  user_ids = [%q]
-}
-`, attr, testMembershipOrgID, testMembershipGroupID, testUserA)
-				}
-			},
-		},
-
 		"circleci_project_group": {
 			address:   "circleci_project_group.test",
 			orgID:     testPGOrgID,

@@ -91,7 +91,20 @@ jobs:
       - run: task build
       - go/with-cache:
           steps:
-            - run: task ci:test
+            - run:
+                name: task ci:test
+                # CircleCI kills a step that emits nothing for 10 minutes, and this
+                # one can. `gotestsum --junitfile` uses its pkgname format, which
+                # prints a single line per package, so with three packages the step
+                # is silent for minutes at a stretch — and internal/provider alone
+                # takes about ten, because its tests drive a real terraform binary.
+                # The suite was passing on the merits and being killed anyway.
+                #
+                # Go's own -timeout is already 120m; this is purely CircleCI's
+                # no-output guard, so it needs to be looser than the whole suite
+                # rather than looser than any one gap in the output.
+                no_output_timeout: 30m
+                command: task ci:test
       - run:
           name: Summarize coverage
           when: always
@@ -101,6 +114,78 @@ jobs:
               | tee test-reports/coverage.txt \
               | tail -1
       - store_results
+
+  # Runs GoReleaser against a `v*` tag: builds the cross-platform archives,
+  # signs the checksum file, and creates the GitHub release the Terraform
+  # Registry ingests via webhook. See the `release` workflow below for the
+  # context this needs and for the manual cutover steps.
+  release:
+    executor: go
+    steps:
+      - checkout
+      - run:
+          name: Fetch full git history and tags
+          command: |
+            # GoReleaser diffs against the previous tag and reads full tag
+            # history; CircleCI's checkout can leave a shallow clone.
+            git fetch --unshallow || true
+            git fetch --tags --force
+      - run:
+          name: Import GPG signing key
+          command: |
+            set -euo pipefail
+
+            # Needs $GPG_PRIVATE_KEY and $PASSPHRASE from the context — see
+            # the `release` workflow below for exactly how to create them.
+            command -v gpg-connect-agent >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y gnupg)
+
+            mkdir -p ~/.gnupg
+            chmod 700 ~/.gnupg
+            # allow-preset-passphrase lets the step below seed the agent's
+            # passphrase cache, so .goreleaser.yml's `signs:` step (`gpg
+            # --batch --local-user ... --detach-sign`) never hits an
+            # interactive passphrase prompt. This reproduces, by hand, what
+            # crazy-max/ghaction-import-gpg did on the GitHub Actions side.
+            # Not a heredoc: a literal double angle bracket in a run command
+            # is CircleCI's parameter-substitution syntax, and the config
+            # compiler fails to parse the file if one shows up unescaped.
+            printf '%s\n' \
+              'default-cache-ttl 21600' \
+              'max-cache-ttl 31536000' \
+              'allow-preset-passphrase' \
+              > ~/.gnupg/gpg-agent.conf
+            gpgconf --kill gpg-agent || true
+
+            echo "$GPG_PRIVATE_KEY" | base64 --decode | gpg --batch --yes --import
+
+            # GPG_FINGERPRINT feeds .goreleaser.yml's `signs.args`
+            # ("--local-user {{ .Env.GPG_FINGERPRINT }}"): it must be the
+            # fingerprint of the key just imported, and that key must be
+            # capable of signing (the primary key, unless it has been
+            # stripped down to certify-only with a separate signing subkey).
+            FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10; exit}')
+            KEYGRIP=$(gpg --batch --with-colons --with-keygrip --list-secret-keys "$FPR" | awk -F: '$1=="grp"{print $10; exit}')
+            HEX_PASSPHRASE=$(printf '%s' "$PASSPHRASE" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+            gpg-connect-agent "PRESET_PASSPHRASE $KEYGRIP -1 $HEX_PASSPHRASE" /bye >/dev/null
+
+            echo "export GPG_FINGERPRINT=$FPR" >> "$BASH_ENV"
+      - run:
+          name: Run GoReleaser
+          command: |
+            # Pinned by version on the command line, not added to go.mod:
+            # `go run pkg@version` builds and runs an ephemeral binary
+            # without touching this module's go.mod/go.sum. To bump it, change
+            # the version below and run `go run
+            # github.com/goreleaser/goreleaser/v2@<version> check` locally
+            # against .goreleaser.yml first.
+            #
+            # Also needs $GITHUB_TOKEN from the context, with `contents:
+            # write` on this repo: GoReleaser creates the GitHub release and
+            # uploads assets to it directly. GitHub Actions got this for free
+            # from `secrets.GITHUB_TOKEN`; CircleCI has no equivalent, so this
+            # must be a real token (a fine-grained PAT scoped to this repo
+            # with "Contents: Read and write" is enough).
+            go run github.com/goreleaser/goreleaser/v2@v2.17.1 release --clean
 
 workflows:
   build-and-test:
@@ -125,6 +210,51 @@ workflows:
                 - "1.13.5"
                 # renovate: terraform
                 - "1.14.6"
+
+  release:
+    jobs:
+      - release:
+          context: terraform-provider-release
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+
+# Setting up releases (moved here from GitHub Actions)
+#
+# The `release` job needs a context named `terraform-provider-release`
+# (rename it above too, if you call it something else) holding three
+# environment variables:
+#
+#   GPG_PRIVATE_KEY  The ASCII-armored GPG private key export
+#                    (`gpg --export-secret-keys --armor <fingerprint>`),
+#                    base64-encoded to a single line
+#                    (`| base64 | tr -d '\n'`) so it survives CircleCI's
+#                    env var input. This is the same key the Terraform
+#                    Registry already has the public half of; do not
+#                    generate a new one unless the Registry's key is also
+#                    being rotated.
+#   PASSPHRASE       That key's passphrase, as plain text.
+#   GITHUB_TOKEN     A GitHub token with `contents: write` on this repo
+#                    (a fine-grained PAT scoped to this repo, "Contents:
+#                    Read and write", is enough). GoReleaser uses it to
+#                    create the GitHub release and upload the signed
+#                    archives, checksums and manifest to it.
+#
+# Registry precondition, not something this config can arrange: the
+# Terraform Registry only ingests releases from a *public* GitHub repository.
+#
+# Cutover, by hand, in order:
+#   1. Create the context and the three variables above.
+#   2. Push a `v*` tag and confirm the `release` job here produces a real,
+#      correctly signed GitHub release (check the Registry picks it up).
+#   3. Only then delete .github/workflows/release.yml. Until step 2 has
+#      succeeded at least once, leave it in place — see the comment at the
+#      top of that file. Note that if its GPG_PRIVATE_KEY/PASSPHRASE GitHub
+#      secrets are still configured from before this move, both workflows
+#      will attempt to release the same tag; remove those secrets (or the
+#      workflow) rather than leaving both live any longer than step 2 takes.
 
 # Enabling the acceptance tests against a real organization
 #

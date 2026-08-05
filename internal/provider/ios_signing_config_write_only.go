@@ -101,8 +101,8 @@ import (
 //
 // vault#2900 DOES NOT APPLY
 //
-// There is no update route for a signing configuration at all: the routes served
-// is GET/POST /signing/configs and DELETE /signing/configs/{id},
+// There is no update route for a signing configuration at all: the routes are
+// GET/POST /signing/configs and DELETE /signing/configs/{id},
 // iosSigningConfigResource.Update is an empty method, and every attribute
 // carries RequiresReplace. Only Create ever sends a profile, so there is no
 // "update triggered by an unrelated field" for a version-gated send to omit the
@@ -114,9 +114,10 @@ import (
 // write-only because the framework requires all of them to be.
 func iosSigningProfilesWriteOnlyAttribute() schema.ListNestedAttribute {
 	return schema.ListNestedAttribute{
-		MarkdownDescription: "The provisioning profiles paired with the certificate, as a " +
-			"write-only argument: Terraform sends them to CircleCI but never records them in state " +
-			"or in a plan file. Requires Terraform 1.11 or later.\n\n" +
+		MarkdownDescription: "The provisioning profiles paired with the certificate — the same " +
+			"list as `provisioning_profiles`, with the same bounds — as a write-only argument: " +
+			"Terraform sends them to CircleCI but never records them in state or in a plan file. " +
+			"Requires Terraform 1.11 or later.\n\n" +
 			"Because nothing derived from the list is stored, Terraform cannot see that it " +
 			"changed. `provisioning_profiles_wo_version` is required alongside it, and must be " +
 			"incremented every time any profile changes, or the new profiles are never sent — " +
@@ -133,6 +134,10 @@ func iosSigningProfilesWriteOnlyAttribute() schema.ListNestedAttribute {
 		WriteOnly: true,
 		Validators: []validator.List{
 			listvalidator.SizeAtLeast(1),
+			// The API's own cap, kept identical to `provisioning_profiles`: the two
+			// spellings must accept exactly the same lists, or which one a
+			// configuration uses would change what CircleCI is asked to do.
+			listvalidator.SizeAtMost(iosSigningConfigMaxProfiles),
 			// Both directions are required, not just version-implies-profiles. A
 			// `provisioning_profiles_wo` with no version can be created but can never be
 			// rotated: every later edit to it is a no-op that Terraform reports as no

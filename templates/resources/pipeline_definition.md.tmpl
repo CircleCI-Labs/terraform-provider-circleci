@@ -19,18 +19,27 @@ covers the move.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-~> **Not available on CircleCI Server** This resource uses the
-`/api/v2/projects/{project_id}/pipeline-definitions` endpoints, which a CircleCI
-Server installation does not expose. Server installations should define
-workflows in `.circleci/config.yml` instead.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — and **not** for the v3 reason that covers orbs and organization settings. `pipeline-definitions` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. v3 arriving on Server would therefore not make this work. `deployment = "server"` is refused at plan time. Define workflows in `.circleci/config.yml` on Server instead. |
+| **API** | `GET` and `POST /api/v2/projects/{project_id}/pipeline-definitions`, `GET`, `PATCH` and `DELETE .../pipeline-definitions/{id}` |
+| **Organization type** | Any for **read**. **Create, update and delete require GitHub App or GitHub Enterprise Server**: on GitHub OAuth, GitLab and Bitbucket Cloud CircleCI synthesises a definition from the project id rather than storing one, so there is nothing to write. See the compatibility table in the README. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
+`config_source_provider` has a second branch beyond the two VCS-backed ones: a
+CircleCI-hosted configuration, with no repository at all. Each is shown separately
+below.
+
+### VCS-backed configuration
+
 {{ tffile "examples/resources/circleci_pipeline_definition/resource.tf" }}
+
+### CircleCI-hosted configuration
+
+{{ tffile "examples/resources/circleci_pipeline_definition/circleci_config_source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
 

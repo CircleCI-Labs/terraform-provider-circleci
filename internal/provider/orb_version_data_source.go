@@ -79,8 +79,12 @@ func (d *orbVersionDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 				Computed: true,
 			},
 			"orb_name": schema.StringAttribute{
-				MarkdownDescription: "Fully qualified name of the orb, `<namespace>/<orb>`.",
-				Computed:            true,
+				MarkdownDescription: "Fully qualified name of the orb, `<namespace>/<orb>`.\n\n" +
+					"No orb version route reports this, so it is resolved from the orb itself. " +
+					"Looking a version up by `orb_id` and `version` gets it for free, because the " +
+					"orb has to be read anyway to build the reference the API needs; looking one up " +
+					"by `id` costs one extra request.",
+				Computed: true,
 			},
 			"source": schema.StringAttribute{
 				MarkdownDescription: "The YAML source CircleCI stored for this version.",

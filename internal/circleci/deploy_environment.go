@@ -10,17 +10,15 @@ import (
 
 // Deploy environment routes.
 //
-// These are served by the API behind the the API facade,
-// which proxies /api/v2/deploy/environments to the API's
-// /private/the API/v1/environment BFF route. Environments are declared
-// in a project's .circleci/config.yml (the `environment` key on a deploy job),
-// not created through this API, so there is deliberately no create, update or
-// delete here.
+// These are served by a backend behind a proxy facade, which forwards
+// /api/v2/deploy/environments to that backend's own private route.
+// Environments are declared in a project's .circleci/config.yml (the
+// `environment` key on a deploy job), not created through this API, so there
+// is deliberately no create, update or delete here.
 //
-// the API is not deployed on CircleCI Server: the gateway routes served
-// (the CircleCI Server deployment configuration) routes
-// the API for project settings, pipeline/run, groups, usage export
-// jobs and orbs/namespaces only, never for /api/v2/deploy/*. Callers must gate
+// The backend is not deployed on CircleCI Server: Server's gateway routes only
+// project settings, pipeline/run, groups, usage export jobs and
+// orbs/namespaces through its proxy, never /api/v2/deploy/*. Callers must gate
 // on Client.IsCloud (see requireCloud in internal/provider).
 const (
 	deployEnvironmentsRoute = "/deploy/environments"

@@ -146,11 +146,10 @@ func (r *contextResource) Read(ctx context.Context, req resource.ReadRequest, re
 		}
 
 		// A context that no longer exists answers 403, not 404: every route
-		// addressing a context by id sits behind the API's the context-resolution step
-		// middleware, which maps a context that cannot be resolved — deleted,
-		// in another organization, or simply inaccessible to this token — to
-		// the same Forbidden response (see internal/circleci/context.go's
-		// GetContext comment).
+		// addressing a context by id maps a context that cannot be resolved —
+		// deleted, in another organization, or simply inaccessible to this
+		// token — to the same Forbidden response (see
+		// internal/circleci/context.go's GetContext comment).
 		//
 		// Silently removing the resource on 403 would mean a token that merely
 		// lost permission causes Terraform to recreate a live context on the
@@ -225,8 +224,8 @@ func (r *contextResource) Delete(ctx context.Context, req resource.DeleteRequest
 	if err != nil {
 		// Already gone is the desired end state. 403 counts as gone here,
 		// unlike in Read: DeleteContext documents that a missing context
-		// answers 403 through the same context-resolution step as GetContext,
-		// so it is the response an already-deleted context produces on delete.
+		// answers 403 the same way GetContext does, so it is the response an
+		// already-deleted context produces on delete.
 		// A destroy is not expected to distinguish "gone" from "never had
 		// permission" the way a refresh is, because there is no live resource
 		// left to protect either way.

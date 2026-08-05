@@ -56,8 +56,11 @@ func (d *iosSigningCertificatesDataSource) Metadata(_ context.Context, req datas
 func (d *iosSigningCertificatesDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every iOS signing certificate uploaded to a CircleCI " +
-			"organization, including certificates uploaded outside Terraform. Pagination is " +
-			"followed internally, so the result covers every certificate rather than one page.\n\n" +
+			"organization, including certificates uploaded outside Terraform.\n\n" +
+			"Pagination is followed internally. The signing routes do not paginate today -- the " +
+			"handler renders the whole collection with no cursor set, so the response carries no " +
+			"page object at all -- but a cursor would be followed if one appeared, so the whole " +
+			"collection is covered either way.\n\n" +
 			"~> **CircleCI Cloud only.** Signing certificates are served by the CircleCI v3 API, " +
 			"which CircleCI Server does not route.\n\n" +
 			"-> **Certificate content is not returned.** Neither this data source nor the API " +
@@ -83,8 +86,10 @@ func (d *iosSigningCertificatesDataSource) Schema(_ context.Context, _ datasourc
 							Computed:            true,
 						},
 						"cert_type": schema.StringAttribute{
-							MarkdownDescription: "The certificate's type, `distribution` or " +
-								"`development`.",
+							MarkdownDescription: "The certificate's type: one of `distribution`, " +
+								"`development`, `developer-id-application`, " +
+								"`developer-id-installer`, `mac-development`, " +
+								"`mac-app-distribution` or `mac-installer-distribution`.",
 							Computed: true,
 						},
 						"fingerprint": schema.StringAttribute{

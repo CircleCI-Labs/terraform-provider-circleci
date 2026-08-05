@@ -55,10 +55,10 @@ func (r *groupMembershipResource) Metadata(_ context.Context, req resource.Metad
 //
 // The resource owns the whole membership of one group rather than a single
 // user-in-group edge. That follows from the API: there is no endpoint that
-// replaces a membership, only bulk add and bulk remove actions, so converging on
-// a desired state requires knowing the full intended list. It is the same shape
-// as aws_iam_group_membership, and carries the same caveat that two of these
-// pointed at one group will fight.
+// replaces a membership, only bulk add-users and bulk delete-users actions, so
+// converging on a desired state requires knowing the full intended list. It is
+// the same shape as aws_iam_group_membership, and carries the same caveat that
+// two of these pointed at one group will fight.
 func (r *groupMembershipResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages the full set of users in a CircleCI group. " +
@@ -70,8 +70,10 @@ func (r *groupMembershipResource) Schema(_ context.Context, _ resource.SchemaReq
 			"complete member list, so any user added to the group outside Terraform is removed on the " +
 			"next apply. Do not declare more than one `circleci_group_membership` for the same " +
 			"`group_id`, and do not combine it with membership changes made in the CircleCI web UI.\n\n" +
-			"~> **These endpoints are not part of the published CircleCI OpenAPI specification** and may " +
-			"change without notice.",
+			"~> **This resource is backed by a private, unofficial CircleCI API** with no published " +
+			"specification: the same routes the CircleCI web app's own group management UI calls, not " +
+			"anything in the public OpenAPI spec. They may change without notice, and are only reachable " +
+			"on CircleCI Cloud — a Server installation's gateway does not route them at all.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Identifier of this membership, in the form `organization_id/group_id`.",
@@ -248,6 +250,20 @@ func (r *groupMembershipResource) Update(ctx context.Context, req resource.Updat
 // group, so destroying it empties out the users it put there. Only the users
 // recorded in state are removed, so a member added outside Terraform after the
 // last apply survives.
+//
+// This is gated on requireStandaloneCapable, like every other method here and
+// like circleci_group and circleci_project_group's own Delete — unlike
+// otel_exporter_resource.go's Delete, which is deliberately left ungated so a
+// resource stranded by a `deployment` change stays removable. That exemption
+// does not transfer here: an OTel exporter sits on Client.Host(), so a real
+// record can still exist on Cloud while the provider points at a Server
+// installation, and gating Delete would strand it in state with no way back.
+// A circleci_group_membership can only ever have been created while
+// requireStandaloneCapable passed — deployment = "server" makes this resource
+// entirely uncreatable, not merely unreachable — so gating Delete the same way
+// does not strand anything new; it only reports the same clear error here as
+// everywhere else, and the resource stays exactly as removable as it always
+// was: via `terraform state rm`, same as its siblings.
 func (r *groupMembershipResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	if !requireStandaloneCapable(r.client, "circleci_group_membership", &resp.Diagnostics) {
 		return

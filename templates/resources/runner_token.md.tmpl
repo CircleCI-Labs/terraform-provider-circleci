@@ -25,4 +25,6 @@ Import is supported using `resource_class/token_id` (e.g., `my-namespace/my-runn
 terraform import circleci_runner_token.example "my-namespace/my-runner/<token_id>"
 ```
 
-> **Warning:** After import, the `token` value will be empty because the CircleCI API does not return token values after creation. Importing a runner token is only useful for tracking the token's lifecycle in Terraform state. The actual token value cannot be recovered.
+> **Warning:** After import, the `token` value is null because the CircleCI API does not return token values after creation. Importing a runner token is only useful for tracking the token's lifecycle in Terraform state. The actual token value cannot be recovered — provision a fresh token and update your runner agents' configuration if you need the value.
+
+`organization_id`/`org_id` are also null after import — the token representation carries no organization for a read to recover one from — but supplying one afterwards is a genuine, one-time in-place update, not a replacement: this resource does not force replacement on an organization change (see the schema documentation above), and there is nothing to invalidate by updating it. `resource_class` and `nickname` both come back from the subsequent read and match the values already in state, so once the organization is supplied the plan settles to empty.

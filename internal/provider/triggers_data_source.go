@@ -50,6 +50,14 @@ type triggerItemModel struct {
 	EventSourceScheduleAttributionActor types.String `tfsdk:"event_source_schedule_attribution_actor"`
 	Disabled                            types.Bool   `tfsdk:"disabled"`
 	Parameters                          types.Map    `tfsdk:"parameters"`
+
+	// The three attributes below carry the same values as
+	// EventSourceRepositoryName, EventSourceRepositoryExternalID and
+	// EventSourceWebhookURL, spelled the way `circleci_trigger` (the resource)
+	// spells them. See trigger_event_source_spelling.go.
+	EventSourceRepoFullName   types.String `tfsdk:"event_source_repo_full_name"`
+	EventSourceRepoExternalID types.String `tfsdk:"event_source_repo_external_id"`
+	EventSourceWebHookURL     types.String `tfsdk:"event_source_web_hook_url"`
 }
 
 // NewTriggersDataSource is a helper function to simplify the provider implementation.
@@ -69,6 +77,13 @@ func (d *triggersDataSource) Metadata(_ context.Context, req datasource.Metadata
 
 // Schema defines the schema for the data source.
 func (d *triggersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	// See trigger_event_source_spelling.go: each pair is the deprecated
+	// data-source spelling and the current, resource-matching one, both Computed
+	// and always carrying the same value.
+	eventSourceRepoFullNameDeprecatedAttr, eventSourceRepoFullNameCurrentAttr := eventSourceRepoFullNameAttributes()
+	eventSourceRepoExternalIDDeprecatedAttr, eventSourceRepoExternalIDCurrentAttr := eventSourceRepoExternalIDAttributes()
+	eventSourceWebhookURLDeprecatedAttr, eventSourceWebhookURLCurrentAttr := eventSourceWebhookURLAttributes()
+
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every trigger attached to a CircleCI pipeline definition, including " +
 			"triggers created outside Terraform.\n\n" +
@@ -131,21 +146,14 @@ func (d *triggersDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 								"`bitbucket_dc`, `webhook` or `schedule`.",
 							Computed: true,
 						},
-						"event_source_repository_name": schema.StringAttribute{
-							MarkdownDescription: "Full name (`owner/repo`) of the repository the events come " +
-								"from. Empty for webhook and schedule triggers.",
-							Computed: true,
-						},
-						"event_source_repository_external_id": schema.StringAttribute{
-							MarkdownDescription: "Provider-side identifier of the repository the events come from.",
-							Computed:            true,
-						},
-						"event_source_webhook_url": schema.StringAttribute{
-							MarkdownDescription: "Inbound URL for a webhook trigger. Empty for other providers. " +
-								"The API redacts the embedded secret unless the token is allowed to see it.",
-							Computed:  true,
-							Sensitive: true,
-						},
+						"event_source_repository_name": eventSourceRepoFullNameDeprecatedAttr,
+						"event_source_repo_full_name":  eventSourceRepoFullNameCurrentAttr,
+
+						"event_source_repository_external_id": eventSourceRepoExternalIDDeprecatedAttr,
+						"event_source_repo_external_id":       eventSourceRepoExternalIDCurrentAttr,
+
+						"event_source_webhook_url":  eventSourceWebhookURLDeprecatedAttr,
+						"event_source_web_hook_url": eventSourceWebhookURLCurrentAttr,
 						"event_source_webhook_sender": schema.StringAttribute{
 							MarkdownDescription: "Expected sender of a webhook trigger. Empty for other providers.",
 							Computed:            true,
@@ -237,8 +245,13 @@ func (d *triggersDataSource) Read(ctx context.Context, req datasource.ReadReques
 			EventSourceWebhookSender:            types.StringValue(trigger.EventSource.Webhook.Sender),
 			EventSourceScheduleCronExpression:   types.StringValue(trigger.EventSource.Schedule.CronExpression),
 			EventSourceScheduleAttributionActor: types.StringValue(trigger.EventSource.Schedule.AttributionActor.ID),
-			Disabled:                            types.BoolValue(trigger.IsDisabled()),
-			Parameters:                          parameters,
+			// Same values as the three deprecated attributes above, spelled the way
+			// `circleci_trigger` (the resource) spells them.
+			EventSourceRepoFullName:   types.StringValue(trigger.EventSource.Repo.FullName),
+			EventSourceRepoExternalID: types.StringValue(trigger.EventSource.Repo.ExternalID),
+			EventSourceWebHookURL:     types.StringValue(trigger.EventSource.Webhook.URL),
+			Disabled:                  types.BoolValue(trigger.IsDisabled()),
+			Parameters:                parameters,
 		})
 	}
 

@@ -11,11 +11,13 @@ Manages a CircleCI notification channel config: where notifications for a user o
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Channel configs are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/notification/channel-configs`, `GET` and `DELETE /api/v3/notification/channel-configs/{id}`, `POST .../{id}/update` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## A user-scoped config always belongs to the caller
 

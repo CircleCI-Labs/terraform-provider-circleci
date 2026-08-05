@@ -18,9 +18,9 @@ const (
 	testAuditLogUserID = "223e4127-e89b-12d3-a456-426123417400"
 )
 
-// auditLogConfigBody is a single config, in the API's
-// FileNotificationResponse shape: a flat object with no data/attributes
-// envelope, "items" only wrapping a list.
+// auditLogConfigBody is a single config, in the shape the API accepts: a
+// flat object with no data/attributes envelope, "items" only wrapping a
+// list.
 const auditLogConfigBody = `{
   "id": "123e4127-e89b-12d3-a456-426123417400",
   "org_id": "b9291e0d-a11e-41fb-8517-c545388b5953",

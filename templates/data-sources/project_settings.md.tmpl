@@ -21,7 +21,7 @@ settings attributes on [`circleci_project`](../resources/project).
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | Yes — served by the v2 API on both deployments. |
+| **CircleCI Server** | Yes. The route is served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
 | **API** | `GET /api/v2/project/{vcs}/{org}/{project}/settings` |
 | **Organization type** | Any. GitLab and standalone projects address the slug as `circleci/{org-id}/{project-id}`. |
 | **Token** | Any valid API token with permission to view the project's settings. |

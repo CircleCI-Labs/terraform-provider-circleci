@@ -6,6 +6,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
@@ -188,12 +190,35 @@ func (m *mockProjectGroupAPI) list(w http.ResponseWriter, projectID string) {
 	}{Items: items})
 }
 
+// The exact sets of keys the two project-group write bodies may carry.
+//
+// Both are validated against the published OpenAPI document before the handler
+// runs — the assign schema is `additionalProperties: false` with role and
+// group_ids both required, the update-role schema the same with only role — so an
+// unrecognised key is a 400 rather than a silently dropped field. Without this a
+// fake accepts "groupIds" or "roles" and the suite reports success for a request
+// production refuses.
+var (
+	assignProjectGroupsFields = map[string][]string{
+		"": {"role", "group_ids"},
+	}
+
+	updateProjectGroupRoleFields = map[string][]string{
+		"": {"role"},
+	}
+)
+
 func (m *mockProjectGroupAPI) assign(w http.ResponseWriter, r *http.Request, projectID string) {
+	raw, ok := m.decodeStrict(w, r, assignProjectGroupsFields)
+	if !ok {
+		return
+	}
+
 	var body struct {
 		Role     string   `json:"role"`
 		GroupIDs []string `json:"group_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
 		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
 
 		return
@@ -226,10 +251,15 @@ func (m *mockProjectGroupAPI) assign(w http.ResponseWriter, r *http.Request, pro
 }
 
 func (m *mockProjectGroupAPI) updateRole(w http.ResponseWriter, r *http.Request, projectID, groupID string) {
+	raw, ok := m.decodeStrict(w, r, updateProjectGroupRoleFields)
+	if !ok {
+		return
+	}
+
 	var body struct {
 		Role string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
 		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
 
 		return
@@ -256,12 +286,58 @@ func (m *mockProjectGroupAPI) updateRole(w http.ResponseWriter, r *http.Request,
 	m.write(w, http.StatusOK, map[string]string{"message": "Project group role updated."})
 }
 
+// decodeStrict reads the request body, rejects any key the real routes would not
+// accept, and returns the raw bytes for a second decode.
+//
+// It answers the 400 itself and reports false when it does.
+func (m *mockProjectGroupAPI) decodeStrict(
+	w http.ResponseWriter, r *http.Request, allowed map[string][]string,
+) ([]byte, bool) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
+
+		return nil, false
+	}
+
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil {
+		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
+
+		return nil, false
+	}
+
+	if rejectUnexpectedFields(w, object, allowed) {
+		return nil, false
+	}
+
+	return raw, true
+}
+
 func (m *mockProjectGroupAPI) write(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		m.t.Errorf("encoding mock response: %v", err)
 	}
+}
+
+// testAccMembershipProviderConfig points the provider at a fake by host and
+// deployment.
+//
+// The name is a holdover from circleci_group_membership, which is where this
+// helper originated; it moved here when that resource was removed (see
+// CHANGELOG.md) because circleci_project_group and circleci_project_groups
+// still depend on it. Renaming it would only churn every call site below for no
+// behavioural gain.
+func testAccMembershipProviderConfig(host, deployment string) string {
+	return fmt.Sprintf(`
+provider "circleci" {
+  host       = %[1]q
+  key        = "fake-token"
+  deployment = %[2]q
+}
+`, host, deployment)
 }
 
 // testAccProjectGroupConfig renders the resource. The deployment is always cloud:
@@ -481,13 +557,24 @@ func TestAccProjectGroupResource_correctsRoleDrift(t *testing.T) {
 			{
 				Config: testAccProjectGroupConfig(host, circleci.ProjectRoleViewer),
 			},
-			// A role changed in the web UI is drift.
+			// A role changed in the web UI is drift. Asserting the action rather
+			// than just "the plan was non-empty": a bare RefreshState step has no
+			// configuration to plan against, so ExpectNonEmptyPlan is satisfied
+			// unconditionally and proves nothing.
+			//
+			// Update, not replacement: `role` is Required with no plan modifier and
+			// the resource has a real Update method, so Read adopts the drifted role
+			// and the plan corrects it in place.
 			{
 				PreConfig: func() {
 					api.setRole(testPGProjectID, testPGGroupA, circleci.ProjectRoleAdmin)
 				},
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				Config: testAccProjectGroupConfig(host, circleci.ProjectRoleViewer),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_project_group.test", plancheck.ResourceActionUpdate),
+					},
+				},
 			},
 			// The next apply puts it back.
 			{
@@ -515,10 +602,17 @@ func TestAccProjectGroupResource_revokedGrantLeavesState(t *testing.T) {
 			},
 			// A grant revoked in the web UI must be detected through the list,
 			// since there is no route for reading a single grant.
+			// Create, not Update: Read calls RemoveResource when the grant is gone
+			// from the list, so there is nothing left to update and the next plan
+			// recreates it. ExpectNonEmptyPlan alone could not tell those apart.
 			{
-				PreConfig:          func() { api.revoke(testPGProjectID, testPGGroupA) },
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				PreConfig: func() { api.revoke(testPGProjectID, testPGGroupA) },
+				Config:    testAccProjectGroupConfig(host, circleci.ProjectRoleViewer),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_project_group.test", plancheck.ResourceActionCreate),
+					},
+				},
 			},
 		},
 	})

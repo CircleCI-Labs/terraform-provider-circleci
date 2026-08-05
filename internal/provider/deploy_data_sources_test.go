@@ -19,15 +19,12 @@ import (
 )
 
 // The deploy/release data sources — environments, components and project
-// settings — are exercised against an in-process stand-in for
-// the API/the API rather than a real installation. Every
+// settings — are exercised against an in-process stand-in for the backend
+// behind /api/v2/deploy/* rather than a real installation. Every
 // one of them is a pure read with no writable counterpart in this provider,
 // so there is nothing to create first.
 //
-// The response bodies are the shapes the API's BFF handlers send
-// (the CircleCI API and the API), fetched through
-// the API's /api/v2/deploy/* proxy
-// (the CircleCI API the API).
+// The response bodies are the shapes production sends.
 
 // deployProvider serves only the deploy/release data sources.
 //

@@ -13,7 +13,15 @@ This is the usual way to get the `namespace_id` that `circleci_orb` needs for a 
 
 Set exactly one of `id` and `name`.
 
-~> **CircleCI Cloud only.** Namespaces are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/namespaces/{id}`, or `GET /api/v3/namespaces` filtered by name |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. |
 
 ## Example Usage
 

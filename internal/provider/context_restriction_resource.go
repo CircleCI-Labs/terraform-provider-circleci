@@ -170,7 +170,8 @@ func (r *contextRestrictionResource) Read(ctx context.Context, req resource.Read
 		}
 
 		// See context_resource.go's Read for why 403 is not folded into
-		// IsNotFound: the same context-resolution step fronts this route.
+		// IsNotFound: this route resolves the context id the same way, so a
+		// missing context answers 403 rather than 404.
 		if circleci.IsUnauthorized(err) {
 			resp.Diagnostics.AddError(
 				"Unable to read CircleCI context restriction from context "+state.ContextId.ValueString(),
@@ -242,8 +243,8 @@ func (r *contextRestrictionResource) Delete(ctx context.Context, req resource.De
 
 	err := r.client.DeleteContextRestriction(ctx, state.ContextId.ValueString(), state.Id.ValueString())
 	// Already gone is the desired end state. 403 counts, for the same reason as
-	// circleci_context's Delete: the context-resolution step fronting this
-	// route answers 403 for a context that no longer exists, and the
+	// circleci_context's Delete: this route resolves the context id the same
+	// way, so it answers 403 for a context that no longer exists, and the
 	// restriction cannot outlive its context.
 	if err != nil && !circleci.IsNotFound(err) && !circleci.IsUnauthorized(err) {
 		resp.Diagnostics.AddError(

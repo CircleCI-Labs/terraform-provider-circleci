@@ -365,6 +365,35 @@ func TestAccCheckoutKeyResource_RejectsInvalidType(t *testing.T) {
 	})
 }
 
+// TestAccCheckoutKeyResource_RejectsStandaloneSlug covers the account-type
+// condition confirmed against the real API: any circleci/-prefixed slug (GitHub
+// App, GitLab, or standalone) answers 400 "This API is not supported for this
+// project." The slug shape is knowable purely from configuration, so it is
+// rejected at plan time instead, and no request should ever reach the API.
+func TestAccCheckoutKeyResource_RejectsStandaloneSlug(t *testing.T) {
+	api := &checkoutKeyAPI{}
+	srv := newCheckoutKeyServer(t, api)
+
+	cfg := checkoutKeyProviderConfig(srv.URL) + `
+resource "circleci_checkout_key" "test" {
+  project_slug = "circleci/aaaaaaaa-0000-0000-0000-000000000001/bbbbbbbb-0000-0000-0000-000000000002"
+  type         = "deploy-key"
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      cfg,
+			ExpectError: regexp.MustCompile(`(?s)Checkout keys are not available.*GitHub OAuth.*Bitbucket`),
+		}},
+	})
+
+	if requests := api.recorded(); len(requests) != 0 {
+		t.Errorf("got requests %v, want none: the configuration never passed validation", requests)
+	}
+}
+
 func TestAccCheckoutKeyResource_RejectsInvalidProjectSlug(t *testing.T) {
 	cfg := checkoutKeyProviderConfig("http://127.0.0.1:1") + `
 resource "circleci_checkout_key" "test" {

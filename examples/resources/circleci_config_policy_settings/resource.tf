@@ -41,7 +41,7 @@ resource "circleci_config_policy_bundle" "config" {
 
 # `policy_context` is optional and defaults to "config". Setting it explicitly is
 # fine, but "config" is the only accepted value: CircleCI documents a "custom"
-# policy context and every the API route rejects it with a 400. A policy
+# policy context and every policy route rejects it with a 400. A policy
 # context is also not a CircleCI context — it has nothing to do with
 # circleci_context or the environment variables that live there.
 #

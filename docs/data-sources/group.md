@@ -12,16 +12,17 @@ Fetches information about a single CircleCI group by id. Use
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — groups require a `circleci` type (standalone) organization, and a CircleCI Server installation is always a `github` type organization. Using this data source with `deployment = "server"` reports an explicit error. |
+| **API** | `GET /api/v2/organizations/{org_id}/groups/{group_id}` |
+| **Organization type** | `circleci` (standalone) only. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud. |
+| **Token** | A personal API token with read access to the organization. |
 
-Groups require a `circleci` type (standalone) organization, so this is Cloud
-only. A CircleCI Server installation is always a `github` type organization.
-
--> **Members are a separate data source** This data source reports the group
-itself, not its members. Use
-[`circleci_group_membership`](./group_membership) to read them.
+-> **Members cannot be read through this provider** This data source reports
+the group itself, not its members: the membership routes exist but answer 404
+outside a separate internal ingress the public API does not expose.
 
 ## Example Usage
 

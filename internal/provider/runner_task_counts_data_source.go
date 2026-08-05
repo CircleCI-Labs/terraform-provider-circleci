@@ -70,7 +70,7 @@ func (d *runnerTaskCountsDataSource) Schema(_ context.Context, _ datasource.Sche
 					"format (e.g. `myorg/myrunner`).",
 				Required: true,
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerResourceClassPattern, "must be in the format 'namespace/name'"),
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
 				},
 			},
 			"unclaimed_task_count": schema.Int64Attribute{

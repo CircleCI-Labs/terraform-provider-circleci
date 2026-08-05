@@ -9,9 +9,17 @@ description: |-
 
 Fetches every OTLP exporter configured for a CircleCI organization, including exporters created outside Terraform.
 
-Works against both **CircleCI Cloud and CircleCI Server** — OTLP exporters are served by the v2 API, which both provide.
-
 !> **Experimental.** CircleCI flags the OTLP exporter endpoints as experimental. Their request and response shapes may change, or they may be withdrawn, without the deprecation notice the rest of the v2 API carries.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | **No.** The provider gates this and reports an explicit error rather than attempting the request. Settled by route ownership rather than API version: `/api/v2/otel` is proxied to a backend that a CircleCI Server installation does not deploy, and its gateway has no route for this path either. Note that being v2 is not evidence either way on its own: some v2 routes are forwarded by a Server installation's gateway and others are not — `circleci_pipeline_definition` is v2 and unavailable, while the URL orb allow list is v2 and available. |
+| **API** | `GET /api/v2/otel/exporters?org-id={org_id}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 ## Example Usage
 
@@ -63,7 +71,7 @@ This is the same field as the deprecated `organization_id`; set exactly one of t
 
 Read-Only:
 
-- `endpoint` (String) The OTLP endpoint spans are sent to, as `host:port`.
+- `endpoint` (String) Where CircleCI sends spans: either a bare `host:port` or an `http://`/`https://` URL.
 - `headers` (Map of String, Sensitive) The names of the extra headers sent with each export. Every value reads back as `xxxx`, never the configured secret.
 - `id` (String) Unique identifier (UUID) of the exporter.
 - `insecure` (Boolean) Whether the exporter connects without transport security.

@@ -11,17 +11,18 @@ Manages a CircleCI group. A group is a named collection of organization members 
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — a CircleCI Server installation is always a `github` type organization, and group creation is documented as "currently only supported for standalone organizations". Using this resource with `deployment = "server"` reports an explicit error at plan time. |
+| **API** | `POST /api/v2/organizations/{org_id}/groups`, `GET .../groups/{group_id}`, `DELETE .../groups/{group_id}` |
+| **Organization type** | `circleci` (standalone) only. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud, and the provider cannot detect that from an organization UUID alone — the request fails against the API instead. |
+| **Token** | A personal API token belonging to an organization admin. |
 
-Groups require a `circleci` type (standalone) organization. The API documents
-group creation as "currently only supported for standalone organizations", and a
-CircleCI Server installation is always a `github` type organization, so this is
-Cloud only.
-
--> **Managing who is in a group** This resource manages the group itself. Use
-[`circleci_group_membership`](./group_membership) to manage its members, and
+-> **Managing who is in a group** This resource manages the group itself, not
+its membership. Populating a group is not possible through the public API — the
+routes exist but answer 404 outside a separate internal ingress — so adding
+members remains a web-application step. Use
 [`circleci_project_group`](./project_group) to grant a group a role on a project.
 
 ~> **Groups cannot be updated in place** The API has no update endpoint, so
@@ -55,9 +56,13 @@ output "circleci_group_id" {
 
 - `name` (String) Name of the group. Changing this value forces a new resource to be created.
 
+CircleCI's group service rejects a name that is empty, is 100 characters or longer, or must contain only letters, numbers, spaces, and the characters - _ . ,.
+
 ### Optional
 
 - `description` (String) Description of the group. Changing this value forces a new resource to be created.
+
+CircleCI's group service rejects a description that is 200 characters or longer, or must contain only letters, numbers, spaces, and the characters - _ . , (an empty description is accepted).
 - `org_id` (String) The unique identifier (UUID) of the organization that owns this group.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.

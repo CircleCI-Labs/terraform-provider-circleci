@@ -11,11 +11,13 @@ Pairs a [`circleci_ios_signing_certificate`](./ios_signing_certificate) with one
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-~> **Not available on CircleCI Server.** Signing configurations are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. The configuration itself is only useful to a **macOS executor** building and signing an iOS app.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/signing/configs` and `DELETE /api/v3/signing/configs/{id}`, read back by listing `GET /api/v3/signing/configs` |
+| **Organization type** | Any. The configuration is only usable by a **macOS executor**. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -210,10 +212,12 @@ Changing this value forces a new resource to be created.
 - `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this signing configuration.
 
 ~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
-- `provisioning_profiles` (Attributes List) The provisioning profiles paired with the certificate. Changing this list in any way -- adding, removing or reordering a profile -- forces a new resource to be created, since there is no update route.
+- `provisioning_profiles` (Attributes List) The provisioning profiles paired with the certificate: between 1 and 100 of them. Changing this list in any way -- adding, removing or reordering a profile -- forces a new resource to be created, since there is no update route.
 
-Each `blob` is recorded in Terraform state in cleartext. Use `provisioning_profiles_wo` instead to keep the list out of state, at the cost of having to bump `provisioning_profiles_wo_version` to change it. Set exactly one of the two. (see [below for nested schema](#nestedatt--provisioning_profiles))
-- `provisioning_profiles_wo` (Attributes List, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) The provisioning profiles paired with the certificate, as a write-only argument: Terraform sends them to CircleCI but never records them in state or in a plan file. Requires Terraform 1.11 or later.
+Each `blob` is recorded in Terraform state in cleartext. Use `provisioning_profiles_wo` instead to keep the list out of state, at the cost of having to bump `provisioning_profiles_wo_version` to change it. Set exactly one of the two.
+
+~> CircleCI parses every profile and checks it against the certificate. A profile that does not authorize `certificate_id`'s certificate is rejected, as are two profiles sharing a bundle identifier and profile type — the list is a set keyed on parsed contents, not on `file_name`. See the resource documentation for which certificate types accept profiles at all. (see [below for nested schema](#nestedatt--provisioning_profiles))
+- `provisioning_profiles_wo` (Attributes List, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) The provisioning profiles paired with the certificate — the same list as `provisioning_profiles`, with the same bounds — as a write-only argument: Terraform sends them to CircleCI but never records them in state or in a plan file. Requires Terraform 1.11 or later.
 
 Because nothing derived from the list is stored, Terraform cannot see that it changed. `provisioning_profiles_wo_version` is required alongside it, and must be incremented every time any profile changes, or the new profiles are never sent — incrementing it forces a new resource to be created, exactly as editing `provisioning_profiles` does, since there is no update route.
 
@@ -229,7 +233,7 @@ Required when `provisioning_profiles_wo` is set, and must be at least 1. Increme
 ### Read-Only
 
 - `certificate_file_name` (String) The paired certificate's display name, as CircleCI reports it back on this configuration.
-- `certificate_type` (String) The paired certificate's type, `distribution` or `development`, as CircleCI reports it back on this configuration.
+- `certificate_type` (String) The paired certificate's type, as CircleCI reports it back on this configuration: one of `distribution`, `development`, `developer-id-application`, `developer-id-installer`, `mac-development`, `mac-app-distribution` or `mac-installer-distribution`. See `circleci_ios_signing_certificate`'s `cert_type`, which is the same value.
 - `id` (String) Unique identifier (UUID) of the signing configuration.
 
 <a id="nestedatt--provisioning_profiles"></a>
@@ -249,9 +253,29 @@ Required:
 - `blob` (String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) The profile's `.mobileprovision` file, base64-encoded (standard encoding), for example `filebase64("release.mobileprovision")`.
 - `file_name` (String, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) A display name for the profile, for example `release.mobileprovision`. Limited to 40 characters by the API.
 
+## What CircleCI validates
+
+A signing configuration is not stored as written. CircleCI parses every provisioning profile — a `.mobileprovision` file is a CMS-wrapped plist, and it reads the plist — and cross-checks each one against the certificate. Four rules follow, and each is a refusal at apply rather than something this provider can see at plan time:
+
+| Rule | How it fails |
+| --- | --- |
+| `name` must be unique within the organization | Conflict; the existing configuration is not replaced |
+| each profile must authorize `certificate_id`'s certificate (its fingerprint must appear in the profile's `DeveloperCertificates`) | Bad request, `invalid provisioning profile` |
+| no two profiles may share a bundle identifier and profile type | Conflict; the list is a set keyed on parsed contents, not on `file_name` |
+| the profile count must match the certificate's type — see below | Bad request, in either direction |
+
+That last rule is the one that decides whether this resource is usable at all. CircleCI derives it from the referenced certificate's `cert_type`, which is derived from the certificate itself, and it has two sides:
+
+* For a `distribution`, `development`, `mac-development` or `mac-app-distribution` certificate, **at least one** provisioning profile is required.
+* For a `developer-id-application`, `developer-id-installer` or `mac-installer-distribution` certificate, **any** provisioning profile is refused — Apple's workflow has no provisioning profile for those.
+
+This resource requires at least one profile, so it can only be used with the first group. A certificate in the second group has nothing to pair with it here, and the failure is a CircleCI error at apply reading `provisioning profiles are not allowed for this certificate type`. It cannot be caught at plan time: `cert_type` is unknown while the certificate is itself being created in the same apply. See [`circleci_ios_signing_certificate`](./ios_signing_certificate)'s "Certificate types" section for the full table.
+
+`provisioning_profiles` and `provisioning_profiles_wo` both accept between 1 and 100 entries, which is the API's own cap, and both are checked at plan time so a 101st profile is not a mid-apply refusal.
+
 ## Immutability
 
-The CircleCI API has no update endpoint for a signing configuration: the routes served is `GET`/`POST /signing/configs` and `DELETE /signing/configs/{id}` — there is not even a `GET /signing/configs/{id}` to read one back by itself (see "No singular data source" below). Every attribute is therefore `RequiresReplace`, `provisioning_profiles_wo_version` included: adding, removing or renewing a provisioning profile, renaming the configuration, or repointing it at a different certificate are all a new resource, not an update.
+The CircleCI API has no update endpoint for a signing configuration: the routes are `GET`/`POST /signing/configs` and `DELETE /signing/configs/{id}` — there is not even a `GET /signing/configs/{id}` to read one back by itself (see "No singular data source" below). Every attribute is therefore `RequiresReplace`, `provisioning_profiles_wo_version` included: adding, removing or renewing a provisioning profile, renaming the configuration, or repointing it at a different certificate are all a new resource, not an update.
 
 `provisioning_profiles_wo` itself carries no such marker, and could not usefully: a write-only attribute is null in both the plan and the state, so a plan modifier comparing the two never fires. `provisioning_profiles_wo_version` is what Terraform can see, so it is what drives the replacement.
 
@@ -268,3 +292,17 @@ A provisioning profile is less sensitive than a certificate's private key — it
 ## No singular data source
 
 There is no `GET /signing/configs/{id}` route, so there is also no singular `circleci_ios_signing_config` data source. Use [`circleci_ios_signing_configs`](../data-sources/ios_signing_configs) and match on `name` or `id` in your configuration — which is exactly what this resource's own `Read` does internally, since it has no more direct route available either.
+
+## Import
+
+Import is supported using `<organization_id>/<config_id>`, because there is no route to look a signing configuration up by id alone — reading one means listing the organization's configurations and matching on id:
+
+```shell
+terraform import circleci_ios_signing_config.release "00000000-0000-0000-0000-000000000000/11111111-1111-1111-1111-111111111111"
+```
+
+`organization_id`, `name`, `certificate_id`, `certificate_file_name` and `certificate_type` all come back from the subsequent read. `provisioning_profiles` does not: the list route reports each profile's `file_name` but never its `blob`, and populating the list with entries that carry a null `blob` would conflict with `blob` being `Required` inside every element — so the whole attribute is left null after import, exactly as `certificate_blob` is on `circleci_ios_signing_certificate`.
+
+!> **The very next plan replaces the imported configuration.** Every configurable attribute here is `RequiresReplace` (see "Immutability" above), including `provisioning_profiles` and `provisioning_profiles_wo_version`, and `RequiresReplace` fires on *any* change to the attribute's value, including from null (what import leaves behind) to whatever the configuration supplies. A configuration written after import — by either spelling, since the list is required to have at least one entry — plans a **destroy and recreate** on the first `terraform plan` that follows, not an empty plan. This mirrors `circleci_ios_signing_certificate` exactly, and was confirmed the same way, against a real plan; see `TestAccIOSSigningConfigResource_ImportForcesReplacement` and its write-only counterpart.
+
+Practically, that leaves import useful for carrying the identity and the read-only attributes into state without a create call — for example while migrating a hand-managed configuration — rather than for adopting the specific configuration object CircleCI already has: the replacement creates a new one with a new `id` and deletes the old one. If keeping the exact existing configuration matters, do not import; leave it unmanaged instead.

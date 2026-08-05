@@ -20,10 +20,8 @@ import (
 const testPipelineValuesRunID = "5034460f-c7c4-4c43-9457-de07e2029e7b"
 
 // newMockPipelineValuesAPI serves GET /api/v2/pipeline/{id}/values with a
-// fixture matching
-// the CircleCI API's "200 response with
-// pipeline values" case: a flat object mixing strings and a JSON number
-// (pipeline.number).
+// fixture matching the shape a real pipeline values response takes: a flat
+// object mixing strings and a JSON number (pipeline.number).
 func newMockPipelineValuesAPI(t *testing.T) string {
 	t.Helper()
 
@@ -40,7 +38,7 @@ func newMockPipelineValuesAPI(t *testing.T) string {
 		_, _ = w.Write([]byte(`{
   "pipeline.id": "` + testPipelineValuesRunID + `",
   "pipeline.number": 42,
-  "pipeline.project.git_url": "https://github.com/circleci/example",
+  "pipeline.project.git_url": "https://github.com/example-org/example-repo",
   "pipeline.git.branch": "main",
   "pipeline.git.tag": ""
 }`))

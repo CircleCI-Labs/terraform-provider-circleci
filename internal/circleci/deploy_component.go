@@ -11,11 +11,10 @@ import (
 // Deploy component routes.
 //
 // Like deploy environments (see deploy_environment.go), these are served by
-// the API behind the API, which proxies
-// /api/v2/deploy/components to the API's
-// /private/the API/v1/component BFF routes. Components are declared in
-// a project's .circleci/config.yml (the `component` key on a deploy job), so
-// there is no create, update or delete here.
+// a backend behind a proxy, which forwards /api/v2/deploy/components to that
+// backend's own private routes. Components are declared in a project's
+// .circleci/config.yml (the `component` key on a deploy job), so there is no
+// create, update or delete here.
 //
 // CircleCI Cloud only; see the comment on deployEnvironmentsRoute.
 const (
@@ -27,7 +26,7 @@ const (
 // DeployComponent is a CircleCI deploy/release component: a named deployable
 // unit tracked across its versions and environments.
 //
-// ProjectID is a pointer because the API encodes it as a nullable
+// ProjectID is a pointer because the backend encodes it as a nullable
 // UUID (Go's uuid.NullUUID), sent as either a quoted string or JSON null —
 // never omitted — so a component with no associated CircleCI project decodes
 // to a nil pointer here rather than a zero UUID string.
@@ -46,7 +45,7 @@ type DeployComponent struct {
 // last observed in a given environment.
 //
 // PipelineID, WorkflowID and JobID are plain (non-nullable) UUID fields on the
-// wire: the API's Go type uses uuid.UUID rather than uuid.NullUUID for
+// wire: the backend's Go type uses uuid.UUID rather than uuid.NullUUID for
 // these three, so encoding/json's omitempty never applies (a fixed-size array
 // type is never "empty") and an unset association serializes as the all-zero
 // UUID string rather than being omitted or null. ZeroUUID reports that
@@ -63,7 +62,7 @@ type DeployComponentVersion struct {
 	LastDeployedAt time.Time `json:"last_deployed_at"`
 }
 
-// ZeroUUID is the all-zero UUID string the API sends for a
+// ZeroUUID is the all-zero UUID string the backend sends for a
 // DeployComponentVersion association (pipeline, workflow or job) that was
 // never recorded. See the comment on DeployComponentVersion.
 const ZeroUUID = "00000000-0000-0000-0000-000000000000"

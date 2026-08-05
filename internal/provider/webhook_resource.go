@@ -483,4 +483,18 @@ func (r *webhookResource) ImportState(ctx context.Context, req resource.ImportSt
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	resp.Diagnostics.AddWarning(
+		"Webhook signing secret cannot be read from API",
+		"CircleCI never returns a webhook's signing secret, on any route, so this import leaves it "+
+			"unset. Set 'signing_secret' (or 'signing_secret_wo' plus 'signing_secret_wo_version', to "+
+			"keep the secret out of state) in your Terraform configuration before running plan or "+
+			"apply: the resource requires exactly one of the two, and there is nothing to fall back "+
+			"on. UpdateWebhook is a full-replace PUT, so whatever value your configuration sets is "+
+			"written back on the very next apply, even one triggered by an unrelated field — a "+
+			"configuration whose secret differs from the one actually in use silently overwrites it, "+
+			"with no read able to catch the mismatch first. Source the value from wherever the real "+
+			"secret already lives (a secret manager, through 'signing_secret_wo') rather than retyping "+
+			"it by hand.",
+	)
 }

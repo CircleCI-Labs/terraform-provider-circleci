@@ -49,11 +49,27 @@ type SigningConfig struct {
 }
 
 // CreateSigningConfigRequest is the input to CreateSigningConfig.
+//
+// ProvisioningProfiles is capped at 100 entries by the API's request binding.
+// Its lower bound is not fixed: it depends on the referenced certificate's
+// cert_type, which the caller does not send and cannot choose. See
+// SigningCertificateTypeRequiresProvisioningProfile -- for four of the seven
+// types at least one profile is required, and for the other three any profile at
+// all is refused. Both refusals are a 400 carrying the service's own wording.
+//
+// Each profile is also really parsed (the .mobileprovision CMS wrapper is
+// unpacked and its plist read) and cross-checked against the certificate: a
+// profile that does not list the certificate's SHA-1 fingerprint among its
+// DeveloperCertificates is a 400, and two profiles sharing a bundle identifier
+// and profile type are a 409 -- which means the list is a set keyed on parsed
+// contents, not on FileName.
 type CreateSigningConfigRequest struct {
 	OrganizationID string
 	CertificateID  string
-	// Name may only contain letters, numbers and hyphens, and is capped at 50
-	// characters by the API.
+	// Name may only contain letters, numbers and hyphens (^[A-Za-z0-9-]+$), and is
+	// capped at 50 characters by the API.
+	// Name must be unique within the organization: a repeat is a 409, not an
+	// overwrite.
 	Name                 string
 	ProvisioningProfiles []CreateSigningProvisioningProfile
 }
@@ -80,8 +96,8 @@ type signingConfigProfileAttributes struct {
 // signingConfigItem is the v3 wire shape of one entry of GET
 // .../signing/configs.
 //
-// There is no GET .../signing/configs/{id}: the routes served has only GET
-// (collection), POST and DELETE for signing configs. A single configuration is
+// There is no GET .../signing/configs/{id}: the only routes for signing configs
+// are GET (collection), POST and DELETE. A single configuration is
 // therefore looked up by listing an organization's configs and filtering
 // client-side by id -- see getSigningConfigByID.
 type signingConfigItem struct {
@@ -208,6 +224,10 @@ func (c *Client) getSigningConfigByID(ctx context.Context, organizationID, id st
 
 // ListSigningConfigs returns every signing configuration belonging to an
 // organization, following the v3 cursor to the last page.
+//
+// filter[org_id] is required, exactly as on ListSigningCertificates, and the
+// drain is defensive for the same reason: the handler sets no cursor, so the
+// response carries no "page" object and there is only ever one page today.
 func (c *Client) ListSigningConfigs(ctx context.Context, organizationID string) ([]SigningConfig, error) {
 	return DrainV3(ctx, func(ctx context.Context, cursor string) (List[SigningConfig], error) {
 		var page List[signingConfigItem]

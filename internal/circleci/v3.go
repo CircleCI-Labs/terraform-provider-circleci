@@ -3,7 +3,10 @@
 
 package circleci
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Entity is the v3 envelope for a single resource:
 //
@@ -53,11 +56,31 @@ type PaginatedResponse[T any] struct {
 	NextPageToken string `json:"next_page_token"`
 }
 
+// ErrPaginationDidNotAdvance reports that a collection endpoint handed back the
+// same page token it was given, so draining it would never finish.
+//
+// This is not hypothetical. The context environment variable route reads its page
+// token from the *path* parameters on a route that has no such parameter, so the
+// token supplied in the query string is never seen: every request returns the
+// first page alongside the same token. Before this guard, a context with more than
+// one page of variables hung Terraform and grew the slice until the process died.
+//
+// Draining stops with this error rather than returning what it has. A partial
+// collection is indistinguishable from a complete one to every caller here, and
+// several of them feed lists that Terraform would then reconcile — so silently
+// short-changing the list is a worse failure than refusing to produce one.
+var ErrPaginationDidNotAdvance = errors.New(
+	"the API returned the same page token it was given, so pagination cannot advance; " +
+		"this is a bug in the endpoint rather than in the configuration",
+)
+
 // DrainV3 accumulates every page of a v3 collection. fetch is called once per
 // page with the cursor to request; an empty cursor requests the first page.
 //
-// A page that reports a next cursor but returns no items terminates the loop, so
-// a server that always echoes a cursor cannot spin forever.
+// Terminates on an empty page, and on a cursor that repeats — see
+// ErrPaginationDidNotAdvance. The empty-page check alone is not enough: an
+// endpoint that returns a full first page forever satisfies it on every
+// iteration.
 func DrainV3[T any](ctx context.Context, fetch func(ctx context.Context, cursor string) (List[T], error)) ([]T, error) {
 	var (
 		all    []T
@@ -77,12 +100,19 @@ func DrainV3[T any](ctx context.Context, fetch func(ctx context.Context, cursor 
 			return all, nil
 		}
 
+		if next == cursor {
+			return nil, ErrPaginationDidNotAdvance
+		}
+
 		cursor = next
 	}
 }
 
 // DrainV2 accumulates every page of a v2 collection. fetch is called once per
 // page with the page token to request; an empty token requests the first page.
+//
+// Terminates on an empty page, and on a token that repeats — see
+// ErrPaginationDidNotAdvance.
 func DrainV2[T any](ctx context.Context, fetch func(ctx context.Context, pageToken string) (PaginatedResponse[T], error)) ([]T, error) {
 	var (
 		all   []T
@@ -99,6 +129,10 @@ func DrainV2[T any](ctx context.Context, fetch func(ctx context.Context, pageTok
 
 		if page.NextPageToken == "" || len(page.Items) == 0 {
 			return all, nil
+		}
+
+		if page.NextPageToken == token {
+			return nil, ErrPaginationDidNotAdvance
 		}
 
 		token = page.NextPageToken

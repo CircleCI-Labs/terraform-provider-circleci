@@ -13,7 +13,15 @@ Publishes a version of a CircleCI orb.
 
 Read the [Lifecycle](#lifecycle) section before using this resource. Its behaviour differs from an ordinary Terraform resource in ways that matter.
 
-~> **CircleCI Cloud only.** Orb versions are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/orb/versions`, `GET /api/v3/orb/versions/{id}`, `GET /api/v3/orb/versions/{id}/source` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -92,6 +100,8 @@ Changing this forces a new resource, which the API accepts only for a `dev:<labe
 - `created_at` (String) When the version was published, as an RFC 3339 timestamp.
 - `id` (String) Unique identifier (UUID) of the orb version.
 - `orb_name` (String) Fully qualified name of the orb this version belongs to, `<namespace>/<orb>`.
+
+No orb version route reports this, so it is resolved with a second request against the orb itself. That lookup is best effort: if it fails the version is still recorded, with this attribute empty, rather than a just-published version being lost.
 - `source` (String) The YAML source CircleCI stored for this version, as returned by the API. It may differ from `yaml` by normalization.
 
 ## Import

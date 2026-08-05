@@ -14,7 +14,7 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// newRunnerClient starts a fake runner admin API and returns a Client whose
+// newRunnerClient starts a fake runner API and returns a Client whose
 // runner_host points at it. Host is deliberately unroutable: every method
 // under test goes to the runner host, never the main API host, and a
 // connection error there is a clearer failure than a silent success.
@@ -53,9 +53,8 @@ func TestListResourceClasses(t *testing.T) {
 			name:  "by org id",
 			orgID: "00000000-1111-2222-3333-444444444444",
 			body:  `{"items":[{"id":"11111111-2222-3333-4444-555555555555","resource_class":"acme/linux","description":""}]}`,
-			// Confirmed against the CircleCI API's
-			// the API: org-id is checked before namespace and
-			// namespace is not sent at all when both are set.
+			// org-id is checked before namespace, and namespace is not sent
+			// at all when both are set.
 			wantQuery: "org-id=00000000-1111-2222-3333-444444444444",
 			wantLen:   1,
 		},
@@ -101,6 +100,85 @@ func TestListResourceClasses(t *testing.T) {
 				t.Fatalf("len(classes) = %d, want %d", len(classes), tt.wantLen)
 			}
 		})
+	}
+}
+
+// TestListResourceClassesIgnoresListOnlyFields pins down the fact that the list
+// route and the create route answer with different shapes.
+//
+// The list route renders id, resource_class, description plus active_tasks
+// and an embedded runners array, while the create route renders only the
+// narrower id, resource_class, description. ResourceClass decodes both
+// because it names only the three fields they have in common, and the two
+// extras are dropped rather than causing an error. The fixture below is the
+// *list* shape, so this fails if the struct ever grows a strict decoder or if
+// someone "simplifies" the fixture to the create shape and thereby stops
+// covering the route the client actually calls.
+func TestListResourceClassesIgnoresListOnlyFields(t *testing.T) {
+	t.Parallel()
+
+	client := newRunnerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[{
+			"id": "11111111-2222-3333-4444-555555555555",
+			"resource_class": "acme/linux",
+			"description": "linux runners",
+			"active_tasks": 2,
+			"runners": [
+				{"name":"acme/linux/agent-1","hostname":"host-1","resource_class":"acme/linux","first_connected":"2026-01-01T00:00:00Z","last_connected":"2026-01-02T00:00:00Z","last_used":null,"version":"1.2.3","status":"busy"}
+			]
+		}]}`)
+	})
+
+	classes, err := client.ListResourceClasses(context.Background(), "acme", "")
+	if err != nil {
+		t.Fatalf("ListResourceClasses returned error: %v", err)
+	}
+
+	if len(classes) != 1 {
+		t.Fatalf("len(classes) = %d, want 1", len(classes))
+	}
+	if classes[0].ResourceClass != "acme/linux" {
+		t.Errorf("ResourceClass = %q, want %q", classes[0].ResourceClass, "acme/linux")
+	}
+	if classes[0].Description != "linux runners" {
+		t.Errorf("Description = %q, want %q", classes[0].Description, "linux runners")
+	}
+}
+
+// TestListRunnersOmitsStatusOutsideAnOrgListing records that `status` is not a
+// property of a runner but of the listing it came from.
+//
+// Only an org-id-scoped listing populates a runner's status; a resource-class
+// or namespace listing never does, and the field is `json:"status,omitempty"`
+// — so the key is absent from the response, not present and empty. Status must
+// therefore decode to "" rather than the client inventing a value, and the two
+// values an org-scoped listing does send are "busy" and "idle" — never
+// "running", which the API never produces.
+func TestListRunnersOmitsStatusOutsideAnOrgListing(t *testing.T) {
+	t.Parallel()
+
+	client := newRunnerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// No status key: this is a resource-class-scoped listing.
+		_, _ = io.WriteString(w, `{"items":[
+			{"name":"acme/linux/agent-1","hostname":"host-1","resource_class":"acme/linux","first_connected":"2026-01-01T00:00:00Z","last_connected":"2026-01-02T00:00:00Z","last_used":null,"ip":"10.0.0.1","version":"1.2.3"}
+		]}`)
+	})
+
+	runners, err := client.ListRunners(context.Background(), circleci.ListRunnersParams{ResourceClass: "acme/linux"})
+	if err != nil {
+		t.Fatalf("ListRunners returned error: %v", err)
+	}
+
+	if len(runners) != 1 {
+		t.Fatalf("len(runners) = %d, want 1", len(runners))
+	}
+	if runners[0].Status != "" {
+		t.Errorf("Status = %q, want empty: only an org-scoped listing carries one", runners[0].Status)
+	}
+	if runners[0].Hostname != "host-1" {
+		t.Errorf("Hostname = %q, want %q", runners[0].Hostname, "host-1")
 	}
 }
 
@@ -223,9 +301,8 @@ func TestDeleteResourceClass(t *testing.T) {
 func TestDeleteResourceClassNotFound(t *testing.T) {
 	t.Parallel()
 
-	// the CircleCI API's the API answers 404 for both a
-	// genuinely missing resource class and an unauthorized caller
-	// (middleware.AccessDeniedMsg), so this is the same status either way.
+	// The delete route answers 404 for both a genuinely missing resource class
+	// and an unauthorized caller, so this is the same status either way.
 	client := newRunnerClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"message":"not found with provided token: check permissions to view or admin self-hosted runners"}`)
@@ -310,9 +387,9 @@ func TestListTokensOmitsSecret(t *testing.T) {
 		gotQuery = r.URL.RawQuery
 
 		w.Header().Set("Content-Type", "application/json")
-		// The runner admin API never sends the secret on a list response; the
-		// field is entirely absent (json:"token,omitempty" on an empty string),
-		// not present-and-empty.
+		// The API never sends the secret on a list response; the field is
+		// entirely absent (json:"token,omitempty" on an empty string), not
+		// present-and-empty.
 		_, _ = io.WriteString(w, `{"items":[
 			{"id":"11111111-2222-3333-4444-555555555555","resource_class":"acme/linux","nickname":"ci-1","created_at":"2026-01-01T00:00:00Z"}
 		]}`)
@@ -409,8 +486,8 @@ func TestUnclaimedTaskCount(t *testing.T) {
 func TestUnclaimedTaskCountNotFound(t *testing.T) {
 	t.Parallel()
 
-	// the CircleCI API's authedForResourceClassOnQuery answers 404
-	// "resource class not found" when the resource class does not resolve.
+	// The route answers 404 "resource class not found" when the resource
+	// class does not resolve.
 	client := newRunnerClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"message":"resource class not found"}`)
@@ -474,9 +551,9 @@ func TestRunningTaskCountNotFound(t *testing.T) {
 func TestListRunnersEnvelope(t *testing.T) {
 	t.Parallel()
 
-	// Regression coverage for the bug DESIGN.md records: the runner admin API
-	// answers `{"items": [...]}`, not a bare array, and both circleci-sdk-go and
-	// its own test fake decoded a bare array, so ListRunners always returned
+	// Regression coverage for the bug DESIGN.md records: the API answers
+	// `{"items": [...]}`, not a bare array, and both circleci-sdk-go and its
+	// own test fake decoded a bare array, so ListRunners always returned
 	// empty against production.
 	var gotPath, gotQuery string
 

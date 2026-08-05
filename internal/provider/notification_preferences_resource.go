@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -24,9 +25,10 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource               = &notificationPreferencesResource{}
-	_ resource.ResourceWithConfigure  = &notificationPreferencesResource{}
-	_ resource.ResourceWithModifyPlan = &notificationPreferencesResource{}
+	_ resource.Resource                = &notificationPreferencesResource{}
+	_ resource.ResourceWithConfigure   = &notificationPreferencesResource{}
+	_ resource.ResourceWithModifyPlan  = &notificationPreferencesResource{}
+	_ resource.ResourceWithImportState = &notificationPreferencesResource{}
 )
 
 // notificationPreferencesTypeName is the Terraform type name.
@@ -401,6 +403,49 @@ func (r *notificationPreferencesResource) Configure(_ context.Context, req resou
 	}
 
 	r.client = client
+}
+
+// ImportState imports the preferences for the calling user or for a project.
+//
+// The import id is "user" for the calling user's own preferences, or
+// "<org_id>/<project_id>" for a project's -- the same two shapes `scope`
+// distinguishes, since there is no single id that names this resource: unlike
+// circleci_organization_settings, which is keyed on one organization,
+// scope = "project" needs both org_id and project_id to read the matrix back
+// (see validateNotificationPreferencesScope).
+//
+// updates is left null on purpose, exactly as every toggle is on
+// circleci_organization_settings' ImportState: it is Optional-only, never
+// Computed, and manages a sparse, configuration-chosen set of rows rather than
+// the whole matrix. Leaving it null means the first plan after import shows
+// only the rows the configuration actually names, not a diff for every row
+// CircleCI happens to report. preferences needs no help here: it is Computed,
+// so the Read that follows this populates it from the API like any other
+// attribute.
+func (r *notificationPreferencesResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	if req.ID == circleci.NotificationScopeUser {
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("scope"), circleci.NotificationScopeUser)...)
+
+		return
+	}
+
+	orgID, projectID, ok := strings.Cut(req.ID, "/")
+	if !ok || orgID == "" || projectID == "" || strings.Contains(projectID, "/") {
+		resp.Diagnostics.AddError(
+			"Invalid import ID for circleci_notification_preferences",
+			fmt.Sprintf(
+				`Expected "user" for the calling user's own preferences, or `+
+					`"<org_id>/<project_id>" for a project's. Got %q.`,
+				req.ID,
+			),
+		)
+
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("scope"), circleci.NotificationScopeProject)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), orgID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project_id"), projectID)...)
 }
 
 // ModifyPlan rejects CircleCI Server at plan time. Destroy is exempt.

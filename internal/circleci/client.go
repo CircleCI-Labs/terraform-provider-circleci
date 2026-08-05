@@ -68,6 +68,10 @@ type Config struct {
 	// CircleCI Cloud that is a different origin from Host; on CircleCI Server the
 	// installation serves it itself. Defaults to DefaultRunnerHost.
 	RunnerHost string
+	// PrivateHost overrides the origin serving the private routes, for tests only.
+	// It is deliberately not a provider attribute — see private.go. Defaults to
+	// DefaultPrivateHost.
+	PrivateHost string
 	// UserAgent is sent on every request. Defaults to "terraform-provider-circleci".
 	UserAgent string
 	// Transport overrides the HTTP transport, for tests.
@@ -79,10 +83,11 @@ type Client struct {
 	http *httpcl.Client
 	// raw carries no base URL, for the APIs that live on another origin — today
 	// only the self-hosted runner admin API.
-	raw        *httpcl.Client
-	deployment Deployment
-	host       string
-	runnerHost string
+	raw         *httpcl.Client
+	deployment  Deployment
+	host        string
+	runnerHost  string
+	privateHost string
 }
 
 // NormalizeHost trims trailing slashes and any /api/vN suffix from a host, so
@@ -122,6 +127,11 @@ func New(cfg Config) *Client {
 		runnerHost = DefaultRunnerHost
 	}
 
+	privateHost, _ := NormalizeHost(cfg.PrivateHost)
+	if privateHost == "" {
+		privateHost = DefaultPrivateHost
+	}
+
 	transport := httpcl.Config{
 		AuthToken:  cfg.Token,
 		AuthHeader: authHeader,
@@ -133,11 +143,12 @@ func New(cfg Config) *Client {
 	main.BaseURL = host
 
 	return &Client{
-		http:       httpcl.New(main),
-		raw:        httpcl.New(transport),
-		deployment: deployment,
-		host:       host,
-		runnerHost: runnerHost,
+		http:        httpcl.New(main),
+		raw:         httpcl.New(transport),
+		deployment:  deployment,
+		host:        host,
+		runnerHost:  runnerHost,
+		privateHost: privateHost,
 	}
 }
 

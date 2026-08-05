@@ -6,6 +6,7 @@ package circleci_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"testing"
@@ -277,5 +278,144 @@ func TestOTelExporterLimit(t *testing.T) {
 
 	if circleci.OTelExporterLimit != 5 {
 		t.Errorf("OTelExporterLimit = %d, want 5", circleci.OTelExporterLimit)
+	}
+}
+
+// TestGetOTelExporterDistinguishesAbsenceFromA404 is the assertion the resource's
+// drift handling rests on.
+//
+// GetOTelExporter reports the ErrNotFound *sentinel* when the exporter is absent
+// from a successful listing, and an ordinary HTTP error when the listing itself
+// answered 404. Both satisfy IsNotFound, so only errors.Is against the sentinel
+// can tell them apart — and only the sentinel may drop a resource from state,
+// because the list route answers 404 "Org not found" for a token that cannot
+// manage the organization just as it does for one that does not exist.
+func TestGetOTelExporterDistinguishesAbsenceFromA404(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent from the listing", func(t *testing.T) {
+		t.Parallel()
+
+		srv, _ := newRecordingServer(t, http.StatusOK, otelExporterListBody)
+		c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+		_, err := c.GetOTelExporter(context.Background(), testOTelOrgID, "no-such-exporter")
+		if !errors.Is(err, circleci.ErrNotFound) {
+			t.Errorf("errors.Is(err, ErrNotFound) = false for an absent exporter, err = %v", err)
+		}
+		if _, ok := circleci.StatusCode(err); ok {
+			t.Errorf("an absent exporter carried an HTTP status code: %v", err)
+		}
+	})
+
+	t.Run("404 from the listing", func(t *testing.T) {
+		t.Parallel()
+
+		srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Org not found"}`)
+		c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+		_, err := c.GetOTelExporter(context.Background(), testOTelOrgID,
+			"123e4127-e89b-12d3-a456-426123417400")
+		if err == nil {
+			t.Fatal("GetOTelExporter returned no error for a 404 listing")
+		}
+		if errors.Is(err, circleci.ErrNotFound) {
+			t.Error("a 404 on the listing satisfied errors.Is(err, ErrNotFound); the resource " +
+				"would drop a live exporter from state and create a duplicate")
+		}
+		if !circleci.HasStatus(err, http.StatusNotFound) {
+			t.Errorf("HasStatus(err, 404) = false, err = %v", err)
+		}
+		// Still IsNotFound, which is exactly why the resource must not use it here.
+		if !circleci.IsNotFound(err) {
+			t.Errorf("IsNotFound(%v) = false, want true", err)
+		}
+	})
+}
+
+// TestCreateOTelExporterSendsAURLEndpointVerbatim covers the second endpoint form.
+//
+// The published OpenAPI description says "Don't include https:// or grpc://", but
+// the service that validates the request parses the value with net/url first and
+// accepts an http or https URL, with a path, as long as protocol is "http". The
+// provider used to reject that form at plan time; this asserts the client puts it
+// on the wire untouched.
+func TestCreateOTelExporterSendsAURLEndpointVerbatim(t *testing.T) {
+	t.Parallel()
+
+	const endpoint = "https://otel.example.com:4318/v1/traces"
+
+	var gotBody map[string]any
+
+	srv := newGovernanceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+		  "id": "123e4127-e89b-12d3-a456-426123417400",
+		  "org_id": "b9291e0d-a11e-41fb-8517-c545388b5953",
+		  "endpoint": "https://otel.example.com:4318/v1/traces",
+		  "protocol": "http",
+		  "insecure": false
+		}`))
+	})
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	exporter, err := c.CreateOTelExporter(context.Background(), circleci.CreateOTelExporterRequest{
+		OrgID:    testOTelOrgID,
+		Endpoint: endpoint,
+		Protocol: circleci.OTelProtocolHTTP,
+	})
+	if err != nil {
+		t.Fatalf("CreateOTelExporter returned error: %v", err)
+	}
+
+	if got := gotBody["endpoint"]; got != endpoint {
+		t.Errorf("endpoint sent = %v, want %q", got, endpoint)
+	}
+	if exporter.Endpoint != endpoint {
+		t.Errorf("Endpoint = %q, want %q", exporter.Endpoint, endpoint)
+	}
+}
+
+// TestOTelExporterOmittedCollectionsDecodeAsNil pins the two omitempty fields on
+// the response side. An exporter with no headers omits "headers" entirely rather
+// than sending {}, and only the list route computes "issues" — the create response
+// never carries it — so both decode as nil and everything downstream has to cope
+// with that rather than with an empty map or slice.
+func TestOTelExporterOmittedCollectionsDecodeAsNil(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newRecordingServer(t, http.StatusOK, `[
+	  {
+	    "id": "123e4127-e89b-12d3-a456-426123417400",
+	    "org_id": "b9291e0d-a11e-41fb-8517-c545388b5953",
+	    "endpoint": "otel.example.com:4317",
+	    "protocol": "grpc",
+	    "insecure": false
+	  }
+	]`)
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	exporters, err := c.ListOTelExporters(context.Background(), testOTelOrgID)
+	if err != nil {
+		t.Fatalf("ListOTelExporters returned error: %v", err)
+	}
+	if len(exporters) != 1 {
+		t.Fatalf("len(exporters) = %d, want 1", len(exporters))
+	}
+	if exporters[0].Headers != nil {
+		t.Errorf("Headers = %#v, want nil for an exporter with no headers", exporters[0].Headers)
+	}
+	if exporters[0].Issues != nil {
+		t.Errorf("Issues = %#v, want nil when the API omits the field", exporters[0].Issues)
+	}
+}
+
+// TestOTelExporterHeaderLimit pins the header cap alongside the exporter cap.
+func TestOTelExporterHeaderLimit(t *testing.T) {
+	t.Parallel()
+
+	if circleci.OTelExporterHeaderLimit != 5 {
+		t.Errorf("OTelExporterHeaderLimit = %d, want 5", circleci.OTelExporterHeaderLimit)
 	}
 }

@@ -22,10 +22,9 @@ func newChannelConfigServer(t *testing.T, status int, body string) (*httptest.Se
 	return newSettingsServer(t, status, body)
 }
 
-// userScopedChannelConfigResponse is a literal fixture matching the shape
-// asserted by the API's
-// TestV3ChannelConfigByIDUserScope/"get returns the config": a user-scoped
-// email config, with the org and user references but no project reference.
+// userScopedChannelConfigResponse is a literal fixture for the shape a
+// user-scoped channel config read returns: a user-scoped email config, with
+// the org and user references but no project reference.
 const userScopedChannelConfigResponse = `{
   "data": {
     "id": "cc-1",
@@ -127,8 +126,8 @@ func TestGetNotificationChannelConfigProjectScope(t *testing.T) {
 func TestGetNotificationChannelConfigNotFound(t *testing.T) {
 	t.Parallel()
 
-	// the API's the API answers a missing or
-	// denied config with {"error":{"id","title"}} and no "detail" field.
+	// A missing or denied config answers with {"error":{"id","title"}} and no
+	// "detail" field.
 	srv, _ := newChannelConfigServer(t, http.StatusNotFound, `{"error":{"id":"trace-1","title":"Not found."}}`)
 	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
@@ -163,8 +162,7 @@ func TestCreateNotificationChannelConfigUserScope(t *testing.T) {
 		t.Errorf("path = %q, want %q", got.path, want)
 	}
 
-	// The wire body must match the API's
-	// TestV3CreateChannelConfig/"creates a user-scoped config" fixture exactly:
+	// The wire body must match the create route's fixture exactly:
 	// data.attributes.scope, no data.references.project, and data.references.org.
 	var sent struct {
 		Data struct {

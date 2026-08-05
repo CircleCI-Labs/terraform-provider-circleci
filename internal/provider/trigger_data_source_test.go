@@ -87,7 +87,15 @@ func TestAccTriggerDataSource(t *testing.T) {
 	})
 }
 
+// A scheduled trigger is a circleci_trigger, which does not exist at all on
+// GitLab, GitLab self-managed or Bitbucket Cloud (README.md's compatibility
+// matrix). This test's fixtures (CIRCLECI_TEST_SCHEDULED_TRIGGER_ID,
+// CIRCLECI_TEST_STATIC_PROJECT_ID) are documented as set in every context, so
+// without this gate the test would read against the real API on those
+// integrations rather than skip.
 func TestAccScheduledTriggerDataSource(t *testing.T) {
+	testRequireVCSType(t, "github_app", "github_oauth", "github_server")
+
 	triggerID := testScheduledTriggerID(t)
 	projectID := testStaticProjectID(t)
 	dateRegex, err := regexp.Compile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$`)
@@ -157,6 +165,62 @@ func TestAccScheduledTriggerDataSource(t *testing.T) {
 						tfjsonpath.New("disabled"),
 						knownvalue.Bool(true),
 					),
+				},
+			},
+		},
+	})
+}
+
+// TestTriggerDataSourceUnit_BothEventSourceSpellingsAgree is the fake-backed
+// companion to TestAccTriggerDataSource, for the one thing that test cannot
+// assert without a live account: that the deprecated event source attributes
+// (`event_source_repository_name`, `event_source_repository_external_id`,
+// `event_source_webhook_url`) and their resource-matching replacements
+// (`event_source_repo_full_name`, `event_source_repo_external_id`,
+// `event_source_web_hook_url`) report exactly the same values from one read. See
+// trigger_event_source_spelling.go.
+func TestTriggerDataSourceUnit_BothEventSourceSpellingsAgree(t *testing.T) {
+	api, host := newFakeTriggerAPI(t)
+
+	const seededTriggerID = "t1"
+
+	api.mu.Lock()
+	api.triggers[fakeTriggerProjectID+"/"+seededTriggerID] = map[string]any{
+		"id": seededTriggerID,
+		"event_source": map[string]any{
+			"provider": "github_app",
+			"repo":     map[string]any{"full_name": "acme/api", "external_id": "123456"},
+		},
+	}
+	api.mu.Unlock()
+
+	config := fmt.Sprintf(`
+provider "circleci" {
+  host       = %[1]q
+  key        = "fake-token"
+  deployment = "cloud"
+}
+
+data "circleci_trigger" "test" {
+  id         = %[2]q
+  project_id = %[3]q
+}
+`, host, seededTriggerID, fakeTriggerProjectID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("data.circleci_trigger.test",
+						tfjsonpath.New("event_source_repository_name"), knownvalue.StringExact("acme/api")),
+					statecheck.ExpectKnownValue("data.circleci_trigger.test",
+						tfjsonpath.New("event_source_repo_full_name"), knownvalue.StringExact("acme/api")),
+					statecheck.ExpectKnownValue("data.circleci_trigger.test",
+						tfjsonpath.New("event_source_repository_external_id"), knownvalue.StringExact("123456")),
+					statecheck.ExpectKnownValue("data.circleci_trigger.test",
+						tfjsonpath.New("event_source_repo_external_id"), knownvalue.StringExact("123456")),
 				},
 			},
 		},

@@ -13,9 +13,17 @@ A namespace is the globally unique prefix that owns a set of orbs, as in `<names
 
 A namespace is also what a self-hosted runner resource class is named after: a resource class is always `<namespace>/<class>`. That makes this resource the way to create the namespace a `circleci_runner_resource_class` needs.
 
-~> **CircleCI Cloud only.** Namespaces are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
-
 !> **Deleting a namespace deletes its orbs.** There is no way to recover them, and published orb versions cannot be republished under the same namespace and version.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/namespaces`, `GET /api/v3/namespaces/{id}`, `POST /api/v3/namespaces/{id}/rename`, `DELETE /api/v3/namespaces/{id}` |
+| **Organization type** | Any. An organization is normally limited to one namespace. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 

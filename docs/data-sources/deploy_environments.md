@@ -18,7 +18,7 @@ Pagination is followed internally, so the result covers every environment rather
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server; its routes are absent from the Server gateway routes served entirely. Using this data source with `deployment = "server"` reports an explicit error. |
+| **CircleCI Server** | No — deploy/release tracking is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
 | **API** | `GET /api/v2/deploy/environments` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token. |

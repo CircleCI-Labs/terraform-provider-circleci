@@ -29,7 +29,7 @@ diff once the run's state changes on a later refresh.
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | Yes — this route is implemented directly in the same v2 API application on both deployments (`the CircleCI API`, the process CircleCI Server's gateway catch-all for `/api` routes to), so no `deployment`-specific gating applies. |
+| **CircleCI Server** | Yes — this route is implemented directly in the same v2 API application on both deployments, so no `deployment`-specific gating applies. |
 | **API** | `GET /api/v2/pipeline/{id}`, or `GET /api/v2/project/{project-slug}/pipeline/{number}` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token with permission to view the project's builds. |

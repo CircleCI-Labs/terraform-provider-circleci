@@ -19,7 +19,7 @@ and in `check` blocks; using it to derive a resource attribute will cause a perp
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments (`the CircleCI API`); see [`circleci_pipeline_run`](pipeline_run). |
+| **CircleCI Server** | Yes — implemented directly in the same v2 API application on both deployments; see [`circleci_pipeline_run`](pipeline_run). |
 | **API** | `GET /api/v2/workflow/{id}/job` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token with permission to view the project's builds. |

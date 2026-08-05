@@ -6,6 +6,10 @@
 # `event_preset` must be omitted. `event_source_web_hook_sender` names who is
 # expected to call the URL; it is a free-form label, not a fixed enumeration.
 #
+# Note that the URL belongs to this trigger: anything that replaces the trigger —
+# including changing `pipeline_definition_id` — mints a new one, and whatever posts
+# to it has to be repointed.
+#
 # `data.circleci_project.api` and `circleci_pipeline_definition.build` are declared
 # in the primary example above.
 resource "circleci_trigger" "release" {

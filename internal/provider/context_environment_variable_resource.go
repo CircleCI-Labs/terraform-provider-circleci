@@ -180,9 +180,9 @@ func (r *contextEnvironmentVariableResource) Read(ctx context.Context, req resou
 		}
 
 		// See context_resource.go's Read for why 403 is not folded into
-		// IsNotFound: the same context-resolution step fronts this route (see
-		// internal/circleci/environment_variable.go), so a context that no
-		// longer exists and a token that lost permission look identical.
+		// IsNotFound: this route resolves the context id the same way, so a
+		// context that no longer exists and a token that lost permission look
+		// identical.
 		if circleci.IsUnauthorized(err) {
 			resp.Diagnostics.AddError(
 				"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
@@ -312,8 +312,8 @@ func (r *contextEnvironmentVariableResource) Delete(ctx context.Context, req res
 
 	err := r.client.DeleteContextEnvironmentVariable(ctx, state.ContextId.ValueString(), state.Name.ValueString())
 	// Already gone is the desired end state. 403 counts, for the same reason as
-	// circleci_context's Delete: the context-resolution step fronting this
-	// route answers 403 for a context that no longer exists.
+	// circleci_context's Delete: this route resolves the context id the same
+	// way, so it answers 403 for a context that no longer exists.
 	if err != nil && !circleci.IsNotFound(err) && !circleci.IsUnauthorized(err) {
 		resp.Diagnostics.AddError(
 			"Error deleting CircleCI context environment variable",

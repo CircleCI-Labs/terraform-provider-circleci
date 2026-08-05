@@ -17,9 +17,10 @@ import (
 // durationType is a string attribute type that compares its values as durations
 // rather than as text.
 //
-// It exists because CircleCI reformats the durations it stores. the API
-// formats a TTL with time.Duration.String(), so a configured "1h" is returned as
-// "1h0m0s" and "90m" as "1h30m0s". With a plain string attribute that produces
+// It exists because CircleCI reformats the durations it stores: a TTL is
+// formatted with Go's time.Duration.String(), so a configured "1h" is
+// returned as "1h0m0s" and "90m" as "1h30m0s". With a plain string
+// attribute that produces
 // "Provider produced inconsistent result after apply" on create and a diff on
 // every subsequent plan, even though nothing has changed.
 //

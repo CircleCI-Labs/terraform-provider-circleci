@@ -328,8 +328,8 @@ func TestCheckoutKeyRejectsMalformedProjectSlug(t *testing.T) {
 // The struct tags were originally `public-key` and `created-at`, so PublicKey and
 // CreatedAt were silently empty against production for every read, list and
 // create. The bug was invisible because the mocks used the same hyphenated keys.
-// The v2 API force-converts its kebab-case keywords to snake_case in the
-// response middleware, so the wire format is `public_key` and `created_at`.
+// The API force-converts its kebab-case keywords to snake_case before
+// responding, so the wire format is `public_key` and `created_at`.
 //
 // This fixture is written in the production shape deliberately: if the tags
 // regress, this test fails even if every mock is changed to match.
@@ -368,7 +368,7 @@ func TestCheckoutKeyDecodesUnderscoreFieldNames(t *testing.T) {
 
 // TestCheckoutKeyInputTypeHandlesAnyVCS covers the type the API echoes back.
 //
-// The v2 API rewrites a requested `user-key` to "<vcs-type>-user-key", so a
+// The API rewrites a requested `user-key` to "<vcs-type>-user-key", so a
 // Bitbucket project answers `bitbucket-user-key`, not `github-user-key`. Mapping
 // only the GitHub form meant the type round-tripped wrong on Bitbucket, producing
 // a permanent diff.

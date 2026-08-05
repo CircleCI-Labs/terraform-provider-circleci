@@ -92,6 +92,8 @@ Changing this value forces a new resource to be created.
 
 ~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
 - `pr_only_branch_overrides` (Set of String) Branches that override the PR-only build setting. Order is not significant: CircleCI does not preserve the order branches are sent in.
+
+~> **Cannot be cleared.** Setting this to `[]` is rejected at plan time. CircleCI's API accepts an empty list with HTTP 200 but silently leaves the existing branches in place, so there is no way to clear the list through this route. Remove the attribute from the configuration instead: that stops managing it and leaves the existing branches as they are.
 - `set_github_status` (Boolean) Whether to set GitHub commit status on builds.
 - `setup_workflows` (Boolean) Whether setup workflows are enabled.
 - `write_settings_requires_admin` (Boolean) Whether admin permissions are required to change project settings.
@@ -116,6 +118,8 @@ Import is supported using the project slug (`vcs-type/org-name/repo-name`):
 ```shell
 terraform import circleci_project.example "github/my-org/my-repo"
 ```
+
+Only `slug` is populated by the import itself. Every setting — every boolean toggle and `pr_only_branch_overrides` alike — starts `null`, the same as when this resource is created against a configuration that names none of them: see "Settings you leave out" below. So a configuration generated from the import (for example with `terraform plan -generate-config-out`) mentions no settings either, and `terraform plan` against it is empty. Add a setting to the generated configuration only once you actually want this resource to manage it; adding one that already holds the value CircleCI reports is a no-op, but adding one with a different value writes it on the next apply.
 
 ## Settings you leave out
 

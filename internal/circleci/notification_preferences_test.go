@@ -13,10 +13,9 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// userPreferencesMatrixResponse is a literal fixture matching the shape built
-// by the API's preferences.the API for a user-scoped
-// row: preference_name, channel, scope ("actor"), display order and group
-// fields, no section, and a bare user reference.
+// userPreferencesMatrixResponse is a literal fixture for the shape of a
+// user-scoped preference row: preference_name, channel, scope ("actor"),
+// display order and group fields, no section, and a bare user reference.
 const userPreferencesMatrixResponse = `{
   "data": [
     {
@@ -256,7 +255,7 @@ func TestListNotificationPreferencesMissingScope(t *testing.T) {
 	t.Parallel()
 
 	// filter[scope] missing entirely maps to a 400 with the v3 error envelope
-	// (no "detail", per the API's the API path).
+	// (no "detail" field).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -272,5 +271,147 @@ func TestListNotificationPreferencesMissingScope(t *testing.T) {
 	}
 	if circleci.IsNotFound(err) {
 		t.Error("IsNotFound(err) = true, want false: a 400 is not a not-found")
+	}
+}
+
+// sectionedPreferencesMatrixResponse is the shape the API sends for a
+// preference row that *does* belong to a section.
+//
+// Two things about it are taken from the API rather than invented. First,
+// none of the section_* fields carry omitempty, so they are always present
+// and are explicitly null for a row with no section — the fixtures above,
+// which omit the keys entirely, exercise only the absent case and would not
+// notice a wrong tag name. Second, the API sends two more section fields
+// than this client models (section_description and section_docs_ref); they
+// are included here so the response the client is asked to decode is the
+// real one, unknown fields and all.
+const sectionedPreferencesMatrixResponse = `{
+  "data": [
+    {
+      "id": "pref-3",
+      "attributes": {
+        "preference_name": "Deploy Finished",
+        "channel": "slack",
+        "scope": "actor",
+        "preference_display_order": 3,
+        "preference_experimental": true,
+        "group_id": "group-2",
+        "group_name": "Deploys",
+        "group_display_order": 2,
+        "group_experimental": false,
+        "section_id": "section-1",
+        "section_name": "Release tracking",
+        "section_display_order": 4,
+        "section_experimental": true,
+        "section_description": "Notifications about releases",
+        "section_docs_ref": "https://circleci.com/docs/deploy",
+        "user_configurable": false,
+        "is_enabled": true
+      },
+      "references": {
+        "user": {"id": "user-1"}
+      }
+    }
+  ]
+}`
+
+// TestListNotificationPreferencesSectionFields covers the section_* block of a
+// preference row, which no other test reaches: every other fixture describes a
+// row with no section, so a misspelled section tag would decode to nil there
+// and look correct. A read-only attribute that is silently null forever is the
+// hardest kind of wrong field name to notice, so it is asserted directly.
+func TestListNotificationPreferencesSectionFields(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sectionedPreferencesMatrixResponse))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	prefs, err := c.ListNotificationPreferences(context.Background(), circleci.ListNotificationPreferencesOptions{
+		Scope: circleci.NotificationScopeUser,
+	})
+	if err != nil {
+		t.Fatalf("ListNotificationPreferences returned error: %v", err)
+	}
+	if len(prefs) != 1 {
+		t.Fatalf("got %d preferences, want 1", len(prefs))
+	}
+
+	p := prefs[0]
+	if p.SectionID == nil || *p.SectionID != "section-1" {
+		t.Errorf("SectionID = %v, want %q", p.SectionID, "section-1")
+	}
+	if p.SectionName == nil || *p.SectionName != "Release tracking" {
+		t.Errorf("SectionName = %v, want %q", p.SectionName, "Release tracking")
+	}
+	if p.SectionDisplayOrder == nil || *p.SectionDisplayOrder != 4 {
+		t.Errorf("SectionDisplayOrder = %v, want 4", p.SectionDisplayOrder)
+	}
+	if p.SectionExperimental == nil || !*p.SectionExperimental {
+		t.Errorf("SectionExperimental = %v, want true", p.SectionExperimental)
+	}
+
+	// The rest of the row is asserted here too: preference_display_order,
+	// preference_experimental, the group_* block and user_configurable are
+	// otherwise only ever read from a fixture where they hold their zero value,
+	// which a wrong tag name would also produce.
+	if p.DisplayOrder != 3 {
+		t.Errorf("DisplayOrder = %d, want 3", p.DisplayOrder)
+	}
+	if !p.Experimental {
+		t.Error("Experimental = false, want true")
+	}
+	if p.GroupID != "group-2" || p.GroupName != "Deploys" {
+		t.Errorf("group = %q/%q, want group-2/Deploys", p.GroupID, p.GroupName)
+	}
+	if p.GroupDisplayOrder != 2 {
+		t.Errorf("GroupDisplayOrder = %d, want 2", p.GroupDisplayOrder)
+	}
+	if p.UserConfigurable {
+		t.Error("UserConfigurable = true, want false")
+	}
+}
+
+// TestListNotificationPreferencesExplicitNullSection covers the same fields on
+// the other side of the branch: the service sends them as explicit nulls rather
+// than omitting them, and a null must decode to a nil pointer, not to a zero
+// value that would read as "section 0" in Terraform state.
+func TestListNotificationPreferencesExplicitNullSection(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"pref-4","attributes":{
+			"preference_name":"Email Status","channel":"email","scope":"actor",
+			"preference_display_order":1,"preference_experimental":false,
+			"group_id":"group-1","group_name":"Group","group_display_order":1,
+			"group_experimental":false,
+			"section_id":null,"section_name":null,"section_display_order":null,
+			"section_experimental":null,"section_description":null,"section_docs_ref":null,
+			"user_configurable":true,"is_enabled":true
+		},"references":{"user":{"id":"user-1"}}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	prefs, err := c.ListNotificationPreferences(context.Background(), circleci.ListNotificationPreferencesOptions{
+		Scope: circleci.NotificationScopeUser,
+	})
+	if err != nil {
+		t.Fatalf("ListNotificationPreferences returned error: %v", err)
+	}
+	if len(prefs) != 1 {
+		t.Fatalf("got %d preferences, want 1", len(prefs))
+	}
+
+	p := prefs[0]
+	if p.SectionID != nil || p.SectionName != nil || p.SectionDisplayOrder != nil || p.SectionExperimental != nil {
+		t.Errorf("section fields = %v/%v/%v/%v, want all nil for an explicit null section",
+			p.SectionID, p.SectionName, p.SectionDisplayOrder, p.SectionExperimental)
 	}
 }

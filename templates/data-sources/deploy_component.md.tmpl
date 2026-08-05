@@ -16,7 +16,7 @@ up by name.
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
+| **CircleCI Server** | No — deploy/release tracking is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
 | **API** | `GET /api/v2/deploy/components/{id}` and `GET /api/v2/deploy/components/{id}/versions` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token. |

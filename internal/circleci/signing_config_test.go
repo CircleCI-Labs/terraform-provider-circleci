@@ -23,11 +23,9 @@ const (
 // signingConfigListBody is the GET .../signing/configs shape for one config.
 //
 // The certificate reference's attributes carry file_name and cert_type. The
-// published OpenAPI spec (docs/apispec/v3.yaml in circleci/the API)
-// documents that object as empty ("attributes: {}"), but the handler that
-// actually renders it -- listSigningConfigsV3 in circleci/the API, via
-// signingCertRefAttrs -- populates both fields. This fixture follows the
-// handler, per the project's rule to derive shapes from production source
+// published OpenAPI spec documents that object as empty ("attributes: {}"),
+// but production actually populates both fields. This fixture follows
+// production, per the project's rule to derive shapes from production source
 // rather than the spec.
 const signingConfigListBody = `{
   "data": [
@@ -55,12 +53,11 @@ const signingConfigListBody = `{
 // TestCreateSigningConfigSendsEnvelopeAndHydratesFromList is the load-bearing
 // test for the create path.
 //
-// POST .../signing/configs answers 201 with only {"data":{"id"}} (see
-// post_signing_config_v3.go in circleci/the API), and unlike a
-// certificate there is no GET .../signing/configs/{id} route at all -- the
-// routes served (v3/api.go in circleci/the API) has only GET
-// (collection), POST and DELETE. CreateSigningConfig must hydrate the result
-// by listing and matching on id instead of a direct GET.
+// POST .../signing/configs answers 201 with only {"data":{"id"}}, and unlike
+// a certificate there is no GET .../signing/configs/{id} route at all -- the
+// API only supports GET (collection), POST and DELETE. CreateSigningConfig
+// must hydrate the result by listing and matching on id instead of a direct
+// GET.
 func TestCreateSigningConfigSendsEnvelopeAndHydratesFromList(t *testing.T) {
 	t.Parallel()
 

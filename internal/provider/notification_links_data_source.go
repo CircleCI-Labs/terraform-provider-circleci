@@ -63,9 +63,9 @@ func (d *notificationLinksDataSource) Schema(_ context.Context, _ datasource.Sch
 			"step Terraform cannot drive. A resource whose Create could never run would be worse than no " +
 			"resource at all. Its DELETE also takes no ID — it unlinks by criteria — so even destroy-only " +
 			"management would not map onto a Terraform resource cleanly.\n\n" +
-			"~> **Experimental upstream.** The API's own documentation states that field " +
-			"names, request and response shapes, and pagination semantics are not yet stable, and asks " +
-			"clients not to depend on the endpoint in production. Treat this data source the same way.\n\n" +
+			"~> **Experimental upstream.** This is an experimental API: field names, request and " +
+			"response shapes, and pagination semantics are not yet stable, and clients are asked not " +
+			"to depend on it in production. Treat this data source the same way.\n\n" +
 			"-> **You cannot read another user's links.** `user_id` accepts only `me` or the calling " +
 			"user's own UUID; anything else is refused with HTTP 403. This is a privilege boundary in the " +
 			"API, not a provider limitation.\n\n" +

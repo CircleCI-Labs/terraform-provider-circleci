@@ -9,7 +9,15 @@ description: |-
 
 Fetches every audit log streaming config configured for a CircleCI organization, including configs created outside Terraform. An organization has at most one config per `target_type`, so this never needs paginating.
 
-!> **CircleCI Cloud only, and only on a Scale plan.** See [`circleci_audit_log_config`](../resources/audit_log_config.md) for why.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on a Scale plan. |
+| **CircleCI Server** | No, for two independent reasons. First, audit log streaming is gated behind a CircleCI Cloud billing plan tier (Scale) that a Server installation has no concept of; this is the one `requireCloud` gate in the provider that is not about the v3 API, and it fails with a clear error rather than an ambiguous 404. Second, the route itself is not implemented on CircleCI Server at all — it belongs to a backend CircleCI Server does not deploy — so even without the billing-tier gate, `/api/v2/organizations/{org_id}/audit-log/configs` would not work there. |
+| **API** | `GET /api/v2/organizations/{org_id}/audit-log/configs` |
+| **Organization type** | Any. Entitlement is a billing-plan property, not an organization-type one. |
+| **Token** | Any valid API token with read access to the organization. |
 
 ## Example Usage
 

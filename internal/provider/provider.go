@@ -234,7 +234,6 @@ func (p *CircleCiProvider) Resources(ctx context.Context) []func() resource.Reso
 		NewCheckoutKeyResource,
 		NewProjectSettingsResource,
 		NewGroupResource,
-		NewGroupMembershipResource,
 		NewProjectGroupResource,
 		NewURLOrbAllowListEntryResource,
 		NewOIDCCustomClaimsResource,
@@ -256,6 +255,25 @@ func (p *CircleCiProvider) Resources(ctx context.Context) []func() resource.Reso
 		// CircleCI Cloud only: v2, but gated behind a Scale-plan billing tier
 		// CircleCI Server does not have. See DESIGN.md.
 		NewAuditLogConfigResource,
+
+		// CircleCI Cloud only: an unofficial /api/private route with no published
+		// specification. See internal/circleci/org_contacts.go.
+		NewOrganizationContactsResource,
+
+		// CircleCI Cloud only: an unofficial /api/private route with no published
+		// specification. See internal/circleci/storage_retention.go.
+		NewStorageRetentionResource,
+
+		// CircleCI Cloud only: an unofficial private route with no published
+		// specification, distinct from the /api/private routes above — served on
+		// Client.PrivateHost() rather than Client.Host(). See
+		// internal/circleci/group_membership.go.
+		NewGroupMembershipResource,
+
+		// CircleCI Cloud only: an unofficial private route with no published
+		// specification, on Client.PrivateHost() like circleci_group_membership
+		// above. See internal/circleci/budget.go.
+		NewBudgetResource,
 
 		// Deprecated type names, still registered so existing configurations keep
 		// working. Delete this block in the next major release; see
@@ -293,7 +311,6 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		NewRunnerTaskCountsDataSource,
 		NewGroupDataSource,
 		NewGroupsDataSource,
-		NewGroupMembershipDataSource,
 		NewProjectGroupsDataSource,
 		NewURLOrbAllowListDataSource,
 		NewOTelExportersDataSource,
@@ -309,6 +326,7 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		// exposed.
 		NewContextsDataSource,
 		NewContextRestrictionsDataSource,
+		NewContextEnvironmentVariablesDataSource,
 		NewWebhooksDataSource,
 		NewProjectEnvironmentVariablesDataSource,
 
@@ -349,6 +367,16 @@ func (p *CircleCiProvider) DataSources(ctx context.Context) []func() datasource.
 		// CircleCI Server does not have. See DESIGN.md.
 		NewAuditLogConfigsDataSource,
 		NewAuditLogAccessDataSource,
+
+		// CircleCI Cloud only: an unofficial private route with no published
+		// specification, served on Client.PrivateHost() rather than Client.Host().
+		// See internal/circleci/group_membership.go.
+		NewGroupMembershipDataSource,
+
+		// CircleCI Cloud only: an unofficial private route with no published
+		// specification, on Client.PrivateHost() like circleci_group_membership
+		// above. See internal/circleci/budget.go.
+		NewBudgetsDataSource,
 
 		// Deprecated type name, still registered so existing configurations keep
 		// working. Delete this block in the next major release; see

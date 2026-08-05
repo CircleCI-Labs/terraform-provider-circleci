@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"terraform-provider-circleci/internal/circleci"
 )
@@ -208,17 +209,58 @@ func TestDeleteOIDCCustomClaimsRequiresClaimsQuery(t *testing.T) {
 func TestOIDCTTLPattern(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{"1h", "30m", "1h30m", "500ms", "1w", "1d12h", "10s"}
+	valid := []string{"1h", "30m", "1h30m", "500ms", "10s", "1.5h", "1us", "100ns", "1h30m10s"}
 	for _, ttl := range valid {
 		if !circleci.OIDCTTLPattern.MatchString(ttl) {
 			t.Errorf("OIDCTTLPattern rejected %q, want it accepted", ttl)
 		}
 	}
 
-	invalid := []string{"", "1", "h", "1.5h", "1us", "1 h", "-1h", "1y"}
+	invalid := []string{"", "1", "h", "1 h", "-1h", "+1h", "1y", ".5h", "1.h"}
 	for _, ttl := range invalid {
 		if circleci.OIDCTTLPattern.MatchString(ttl) {
 			t.Errorf("OIDCTTLPattern accepted %q, want it rejected", ttl)
+		}
+	}
+}
+
+// TestOIDCTTLPatternRejectsDaysAndWeeks is separate from the table above because
+// it is the bug, not a case.
+//
+// The published OpenAPI document for these routes gives the ttl schema
+// `pattern: ^([0-9]+(ms|s|m|h|d|w)){1,7}$`, so "d" and "w" look supported and a
+// validator written from the specification accepts them. Nothing enforces that
+// pattern: the API accepts exactly the durations Go's time.ParseDuration accepts,
+// which has no unit longer than an hour, so "7d" fails with 400 once the apply is
+// already running. Anything that reintroduces those units from the specification has to
+// fail here.
+func TestOIDCTTLPatternRejectsDaysAndWeeks(t *testing.T) {
+	t.Parallel()
+
+	for _, ttl := range []string{"1d", "1w", "7d", "1d12h", "2w3d"} {
+		if circleci.OIDCTTLPattern.MatchString(ttl) {
+			t.Errorf("OIDCTTLPattern accepted %q; the API rejects it with 400 because "+
+				"time.ParseDuration has no d or w unit, so accepting it at plan time only "+
+				"moves the failure into the apply", ttl)
+		}
+	}
+
+	// The same claim, stated against the parser the API actually uses, so this
+	// test still means something if the pattern is replaced by another mechanism.
+	for _, ttl := range []string{"1d", "1w"} {
+		if _, err := time.ParseDuration(ttl); err == nil {
+			t.Errorf("time.ParseDuration(%q) succeeded; this test's premise no longer holds", ttl)
+		}
+	}
+
+	// And every value the pattern does accept must be parseable, since the API
+	// hands it straight to ParseDuration.
+	for _, ttl := range []string{"1h", "90m", "1h30m", "500ms", "1.5h", "1us", "100ns"} {
+		if !circleci.OIDCTTLPattern.MatchString(ttl) {
+			t.Fatalf("OIDCTTLPattern rejected %q, which the API accepts", ttl)
+		}
+		if _, err := time.ParseDuration(ttl); err != nil {
+			t.Errorf("time.ParseDuration(%q) failed (%v), so the pattern is looser than the API", ttl, err)
 		}
 	}
 }

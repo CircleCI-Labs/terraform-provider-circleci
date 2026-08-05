@@ -22,7 +22,7 @@ import (
 const testAuditLogConfigOrg = "b9291e0d-a11e-41fb-8517-c545388b5953"
 
 // auditLogConfigAPI is an in-memory stand-in for the audit-log/configs v2
-// endpoints, which are proxied straight through to the API.
+// endpoints.
 type auditLogConfigAPI struct {
 	mu       sync.Mutex
 	configs  []map[string]any
@@ -33,6 +33,19 @@ type auditLogConfigAPI struct {
 	connectionFails bool
 	// hasAccess answers the .../audit-log/access route.
 	hasAccess bool
+	// updateStatus is the connection_status an update reports. The real API
+	// re-verifies connectivity during an update whenever is_disabled is false, so
+	// this genuinely can differ from what the last read returned. Every fixture here
+	// used to hardcode CONNECTED on both create and update, which is exactly why a
+	// plan carrying the stale value forward never failed in tests.
+	updateStatus string
+}
+
+// setUpdateStatus makes the next update report a different connection_status.
+func (a *auditLogConfigAPI) setUpdateStatus(status string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.updateStatus = status
 }
 
 func newAuditLogConfigServer(t *testing.T, api *auditLogConfigAPI) *httptest.Server {
@@ -193,7 +206,7 @@ func (a *auditLogConfigAPI) handleUpdate(t *testing.T, w http.ResponseWriter, r 
 			"created_by":        config["created_by"],
 			"created_at":        config["created_at"],
 			"updated_at":        "2024-02-03T04:05:06Z",
-			"connection_status": "CONNECTED",
+			"connection_status": a.connectionStatusForUpdate(),
 		}
 		a.configs[i] = updated
 
@@ -516,5 +529,54 @@ resource "circleci_audit_log_config" "test" {
 			PlanOnly:    true,
 			ExpectError: regexp.MustCompile(auditLogConfigTypeName + ` requires CircleCI Cloud`),
 		}},
+	})
+}
+
+// connectionStatusForUpdate reports what an update should answer with. Caller holds mu.
+func (a *auditLogConfigAPI) connectionStatusForUpdate() string {
+	if a.updateStatus != "" {
+		return a.updateStatus
+	}
+
+	return "CONNECTED"
+}
+
+// TestAccAuditLogConfigResource_ConnectionStatusMayChangeOnUpdate pins the fix for a
+// crash in this resource's own headline workflow.
+//
+// connection_status reports real delivery outcomes, and the API re-verifies
+// connectivity during an update whenever is_disabled is false. The plan, though,
+// carried the value from the last read forward — a plain Computed attribute is
+// proposed as its prior value, never as unknown — so re-enabling a config whose status
+// was DISCONNECTED planned DISCONNECTED, the API answered CONNECTED, and apply died
+// with "Provider produced inconsistent result after apply".
+//
+// The resource now marks the attribute unknown in ModifyPlan when, and only when,
+// something else is actually changing. The "only when" matters as much as the "when":
+// marking a computed attribute unknown is itself a change, so doing it unconditionally
+// manufactured a permanent diff and broke four other tests in this file.
+func TestAccAuditLogConfigResource_ConnectionStatusMayChangeOnUpdate(t *testing.T) {
+	api := &auditLogConfigAPI{}
+	srv := newAuditLogConfigServer(t, api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: auditLogConfigResourceConfig(srv.URL, "S3", "us-east-1", "", false),
+			},
+			{
+				// The destination went unreachable and then came back: the update
+				// re-verifies and answers a status the plan could not have known.
+				PreConfig: func() { api.setUpdateStatus("DISCONNECTED") },
+				Config:    auditLogConfigResourceConfig(srv.URL, "S3", "us-east-1", "", true),
+			},
+			{
+				// And a plan with nothing changed must still be empty — the guard
+				// against manufacturing a diff.
+				Config:   auditLogConfigResourceConfig(srv.URL, "S3", "us-east-1", "", true),
+				PlanOnly: true,
+			},
+		},
 	})
 }

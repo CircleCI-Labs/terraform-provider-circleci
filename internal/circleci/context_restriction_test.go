@@ -17,9 +17,9 @@ const testRestrictionContextID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
 func TestListContextRestrictions(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the API's the CircleCI API:
-	// an {"items": [...]} envelope with no next_page_token at all, whose entries
-	// carry project_id only for project restrictions.
+	// The shape matches what the API actually returns: an {"items": [...]}
+	// envelope with no next_page_token at all, whose entries carry project_id
+	// only for project restrictions.
 	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeListJSON(w, `{"items":[
 			{"context_id":"`+testRestrictionContextID+`","id":"r1","name":"acme/api","restriction_type":"project","restriction_value":"22222222-2222-2222-2222-222222222222","project_id":"22222222-2222-2222-2222-222222222222"},
@@ -127,8 +127,7 @@ func TestCreateContextRestriction(t *testing.T) {
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		// the API's postContextRestrictions (context_restriction_post.go)
-		// response struct has no "name" field at all.
+		// The create response has no "name" field at all.
 		writeListJSON(w, `{"context_id":"`+testRestrictionContextID+`","id":"r1",`+
 			`"restriction_type":"project","restriction_value":"proj-1","project_id":"proj-1"}`)
 	})
@@ -196,9 +195,9 @@ func TestDeleteContextRestriction(t *testing.T) {
 }
 
 // TestDeleteContextRestrictionMissingContextAnswers403 documents the same
-// the context-resolution step anti-enumeration behavior as context_test.go's
-// TestDeleteContextMissingAnswers403: a restriction on a context that no
-// longer exists cannot be told apart from an unauthorized request.
+// anti-enumeration behavior as context_test.go's TestDeleteContextMissingAnswers403:
+// a restriction on a context that no longer exists cannot be told apart from an
+// unauthorized request.
 func TestDeleteContextRestrictionMissingContextAnswers403(t *testing.T) {
 	t.Parallel()
 

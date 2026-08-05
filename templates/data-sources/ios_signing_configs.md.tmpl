@@ -7,15 +7,19 @@ description: |-
 
 # circleci_ios_signing_configs (Data Source)
 
-Fetches every iOS signing configuration in a CircleCI organization, including configurations created outside Terraform. Pagination is followed internally, so the result covers every configuration rather than one page.
+Fetches every iOS signing configuration in a CircleCI organization, including configurations created outside Terraform.
+
+Pagination is followed internally. The signing routes do not paginate today — the handler renders the whole collection with no cursor set, so the response carries no page object at all — but a cursor would be followed if one appeared, so the whole collection is covered either way.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-~> **Not available on CircleCI Server.** Signing configurations are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/signing/configs` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 -> **There is no singular data source.** The API has no route to fetch one signing configuration by id (only `GET /signing/configs`, `POST /signing/configs` and `DELETE /signing/configs/{id}`), so there is nothing for a singular `circleci_ios_signing_config` data source to call. Match on `name` or `id` against this data source's result instead.
 

@@ -38,9 +38,16 @@ const (
 
 // CheckoutKey is an SSH key CircleCI uses to check out a project's source.
 //
-// The JSON field names are hyphenated, unlike the rest of v2. CreatedAt is kept
-// as the string the API sent (an RFC 3339 timestamp) so that it round-trips into
-// Terraform state exactly as received.
+// The JSON field names are snake_case, like the rest of v2, and this is worth
+// stating explicitly because getting it wrong here has already cost the provider
+// a bug. Internally the object is built with kebab-case keys — public-key,
+// created-at — and the API rewrites every key to snake_case on the way out,
+// which it does for all of v2 unless a route opts out. `public-key`/`created-at`
+// tags left PublicKey and CreatedAt permanently empty, because the API simply
+// has no such keys to match.
+//
+// CreatedAt is kept as the string the API sent (an RFC 3339 timestamp) so that
+// it round-trips into Terraform state exactly as received.
 type CheckoutKey struct {
 	PublicKey   string `json:"public_key"`
 	Type        string `json:"type"`
@@ -167,7 +174,21 @@ func (c *Client) ListCheckoutKeys(ctx context.Context, projectSlug, digest strin
 // (CheckoutKeyTypeDeployKey or CheckoutKeyTypeUserKey) and returns it, including
 // the fingerprint that identifies it from then on.
 //
-// Creating a user key requires a user API token; a project token is rejected.
+// Three ways this fails that the request itself looks fine for, all of them HTTP
+// 4xx from the API rather than anything this client can pre-empt:
+//
+//   - A standalone project — one whose slug begins "circleci/", i.e. GitHub App
+//     or GitLab — is rejected outright with 400 "This API is not supported for
+//     this project." Checkout keys exist only for classic GitHub OAuth and
+//     Bitbucket projects. The read, list and delete routes carry no such check,
+//     so a standalone project can still be listed (it simply has no keys).
+//   - Creating a user key requires a user API token; a project token answers 403
+//     "User authentication required."
+//   - An organization may switch user checkout keys off. Creating one then
+//     answers 400 "User checkout keys are disabled for this organization."
+//     Deploy keys are unaffected, and the *list* route quietly changes behaviour
+//     under the same flag: it stops marking any user key as Preferred, so the
+//     preferred key reported matches the one checkout would really use.
 func (c *Client) CreateCheckoutKey(ctx context.Context, projectSlug, keyType string) (*CheckoutKey, error) {
 	route, err := checkoutKeyRoute(projectSlug, "")
 	if err != nil {

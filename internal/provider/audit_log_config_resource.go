@@ -34,7 +34,7 @@ var (
 // and for the Cloud-only error.
 const auditLogConfigTypeName = "circleci_audit_log_config"
 
-// auditLogARNPattern mirrors the API's own validation (an AWS or
+// auditLogARNPattern mirrors the validation the API applies (an AWS or
 // MinIO IAM role ARN), turning what would otherwise be an opaque 400 at apply
 // time into a plan-time error.
 var auditLogARNPattern = regexp.MustCompile(
@@ -92,12 +92,12 @@ func (r *auditLogConfigResource) Schema(_ context.Context, _ resource.SchemaRequ
 		MarkdownDescription: "Manages a CircleCI audit log streaming config: where an organization's audit " +
 			"log events are delivered, as JSON objects written to a customer-owned S3 (or S3-compatible) " +
 			"bucket.\n\n" +
-			"~> **CircleCI Cloud only, and only on a Scale plan.** This is a v2 API, but the API " +
-			"gates it on a Cloud billing plan tier that CircleCI Server installations do not have; " +
-			"CircleCI's own docs describe audit log streaming as a Scale-plan feature " +
-			"(https://circleci.com/changelog/audit-log-streaming). The provider could not confirm from " +
-			"CircleCI Server's routes served whether the underlying route even exists there, so this is " +
-			"gated the same way the v3-only resources are, out of caution.\n\n" +
+			"~> **CircleCI Cloud only, and only on a Scale plan.** Audit log streaming is gated on a " +
+			"Cloud billing plan tier that CircleCI Server installations do not have; CircleCI's own " +
+			"docs describe it as a Scale-plan feature " +
+			"(https://circleci.com/changelog/audit-log-streaming). This provider reports that " +
+			"explicitly, rather than letting `terraform apply` fail with a confusing 404 on a Server " +
+			"host.\n\n" +
 			"~> **Creating a config verifies connectivity to the bucket, even when `is_disabled = true`.** " +
 			"CircleCI assumes `arn` via OIDC and writes a probe object; a role that cannot be assumed, or a " +
 			"bucket that cannot be written to, fails the create. Updating an existing config to " +
@@ -375,15 +375,45 @@ func (r *auditLogConfigResource) ImportState(ctx context.Context, req resource.I
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
 }
 
-// ModifyPlan rejects CircleCI Server at plan time rather than at apply time.
-// Destroy is exempt so a resource stranded in state by a deployment change
-// stays removable.
-func (r *auditLogConfigResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+// ModifyPlan rejects CircleCI Server at plan time rather than at apply time, and
+// marks connection_status unknown on every update.
+//
+// Destroy is exempt from the Cloud check so a resource stranded in state by a
+// deployment change stays removable.
+func (r *auditLogConfigResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if r.client == nil || req.Plan.Raw.IsNull() {
 		return
 	}
 
 	requireCloud(r.client, auditLogConfigTypeName, &resp.Diagnostics)
+
+	// connection_status is a live report of recent delivery attempts, not desired
+	// state, and the API re-verifies connectivity during an update whenever
+	// is_disabled is false. Left alone, the plan carries the value from the last
+	// read forward — a plain Computed attribute is proposed as its prior value, not
+	// as unknown, so UseStateForUnknown never even comes into play — and then the
+	// update returns something else. The resource's own headline workflow trips it:
+	// re-enable streaming on a config whose status is DISCONNECTED, the API
+	// re-checks and answers CONNECTED, and apply fails with "Provider produced
+	// inconsistent result after apply".
+	//
+	// Marking it unknown says truthfully that the value cannot be predicted, so any
+	// value the API returns is accepted.
+	//
+	// Both guards below are load-bearing. Skip on create: there is no prior state to
+	// carry forward and the attribute is already unknown. Skip when the plan matches
+	// state exactly: marking a computed attribute unknown is itself a change, so
+	// doing it unconditionally manufactures a diff on a resource nobody touched —
+	// every plan would report an in-place update forever, and no apply would ever
+	// settle. Only when something else is genuinely changing does the update run,
+	// re-verify connectivity, and return a status that may differ.
+	if req.State.Raw.IsNull() || req.Plan.Raw.Equal(req.State.Raw) {
+		return
+	}
+
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(ctx, path.Root("connection_status"), types.StringUnknown())...,
+	)
 }
 
 // auditLogS3ConfigFromModel builds the API's S3 destination shape from the

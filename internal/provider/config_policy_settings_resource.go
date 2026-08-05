@@ -76,13 +76,14 @@ func (r *configPolicySettingsResource) Schema(_ context.Context, _ resource.Sche
 				},
 			},
 			"policy_context": schema.StringAttribute{
-				MarkdownDescription: "Which policy context these settings apply to. Defaults to `" +
-					circleci.PolicyContextConfig + "`. Changing this value forces a new resource to be " +
-					"created.\n\n" +
+				MarkdownDescription: "Which policy context these settings apply to. `" +
+					circleci.PolicyContextConfig + "` is the only accepted value, and the default. " +
+					"Changing this value forces a new resource to be created.\n\n" +
 					"~> A policy context is **not** a CircleCI context: it is a namespace for a bundle of " +
-					"policies, unrelated to `circleci_context`. Its only valid values are `" +
-					circleci.PolicyContextConfig + "`. CircleCI documents a `custom` context, but every " +
-					"the API route rejects it with a 400, so it is not offered here.",
+					"policies, unrelated to `circleci_context`. CircleCI's documentation mentions a `" +
+					circleci.PolicyContextCustom + "` context, but no route accepts it — the settings " +
+					"handlers check this segment against `" + circleci.PolicyContextConfig +
+					"` twice over — so it is not offered here.",
 				Optional: true,
 				Computed: true,
 				Default:  stringdefault.StaticString(circleci.PolicyContextConfig),
@@ -150,8 +151,10 @@ func (r *configPolicySettingsResource) Read(ctx context.Context, req resource.Re
 		return
 	}
 
-	// The API omits enabled rather than reporting false when evaluation has never
-	// been switched on, so an absent field means disabled.
+	// The handler always sends enabled — it marshals a pointer to a concrete bool,
+	// so false is reported as false rather than omitted. The nil check is therefore
+	// defensive rather than load-bearing: it keeps a body that is not this
+	// endpoint's from being read as "enabled".
 	state.Enabled = types.BoolValue(settings.Enabled != nil && *settings.Enabled)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

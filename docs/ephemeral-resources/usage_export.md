@@ -13,9 +13,43 @@ This is an ephemeral resource rather than a managed resource or a data source: c
 
 `Open` creates the job and polls it to completion; there is no `Close`, because there is nothing to clean up — a usage export job cannot be canceled or deleted through the API, and CircleCI retains the exported data on its own schedule regardless of what this ephemeral resource does.
 
-Works against both **CircleCI Cloud and CircleCI Server** — usage export is a v2 API, which both provide.
-
 > **Polling.** `Open` polls the job's status every 10 seconds (CircleCI rate-limits this endpoint to 10 requests per minute) and gives up after `poll_timeout` (10 minutes by default) if the job has not reached `"completed"` or `"failed"` by then, returning a clear error rather than hanging the run indefinitely. Raise `poll_timeout` for an unusually large export.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No. This entry used to say yes, on the grounds that usage export is a v2 API rather than v3 — and the API version was the wrong thing to reason from. CircleCI Server's gateway does route both usage export paths to its public API service, but Server does not deploy the reporting service those routes are proxied to, and its public API service is configured with a placeholder upstream for that one backend. The routes therefore exist on Server and cannot succeed there. Using this with `deployment = "server"` reports an explicit error rather than letting the request fail inside CircleCI. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which services a Server installation deploys and how its public API service is configured. See the CircleCI Server note on the provider index page. |
+| **API** | `POST /api/v2/organizations/{org_id}/usage_export_job` and `GET /api/v2/organizations/{org_id}/usage_export_job/{id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
+
+## Limits
+
+CircleCI validates the export window before queueing anything, and each rule is a
+separate refusal:
+
+| Rule | Checked at plan time |
+| --- | --- |
+| `end` must not be before `start` | Yes |
+| `end` minus `start` must not exceed 31 days | Yes |
+| every `shared_org_ids` entry must be a UUID | Yes |
+| `start` must be within the last 366 days | No — depends on when the apply runs |
+| neither bound may be in the future | No — depends on when the apply runs |
+
+The first three are refused before any request is made, because CircleCI reports
+a bad `shared_org_ids` entry as an unattributed "malformed request body" that
+names neither the field nor the entry. The last two are left to CircleCI: they
+depend on agreeing what "now" is, and a configuration wrongly refused here could
+not be applied at all, where one refused by CircleCI at least says so.
+
+`shared_org_ids` is honoured rather than ignored — it reaches the export query as
+an additional set of organizations to report usage for.
+
+The signed URLs in `download_urls` are minted at the moment the job was observed
+to be complete and are valid for 36 hours from then, so consume them within the
+same run rather than passing them on.
 
 ## Example Usage
 
@@ -64,8 +98,8 @@ check "usage_export_completed" {
 
 ### Required
 
-- `end` (String) End of the export window, as an RFC 3339 timestamp.
-- `start` (String) Start of the export window, as an RFC 3339 timestamp (e.g. `"2024-01-01T00:00:00Z"`).
+- `end` (String) End of the export window, as an RFC 3339 timestamp. CircleCI caps a single export at 744h0m0s and refuses an `end` before `start` or in the future; both of the first two are checked before any request is made. Split a wider range across several exports.
+- `start` (String) Start of the export window, as an RFC 3339 timestamp (e.g. `"2024-01-01T00:00:00Z"`). CircleCI refuses a `start` more than 366 days in the past, or in the future.
 
 ### Optional
 
@@ -76,11 +110,13 @@ This is the same field as the deprecated `organization_id`; set exactly one of t
 
 ~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one.
 - `poll_timeout` (String) How long to wait for the export job to reach a terminal state, as a Go duration string (e.g. `"20m"`). Defaults to `10m0s`. Raise this for an unusually large date range; CircleCI's own rate limit on checking a job's status (10 requests per minute) means this resource polls no more often than every 10s regardless of this value.
-- `shared_org_ids` (List of String) UUIDs of additional organizations that share billing with `org_id`, to include in the export.
+- `shared_org_ids` (List of String) UUIDs of additional organizations that share billing with `org_id`, to include in the export. CircleCI honours this rather than ignoring it, but rejects the whole request if any entry is not a UUID, without saying which — so entries are checked here first.
 
 ### Read-Only
 
 - `download_urls` (List of String, Sensitive) Signed URLs the export's data can be downloaded from. Marked sensitive because each URL itself grants access to the data — anyone holding the URL can download it, with no further authentication. Because this is ephemeral data, these URLs are never written to a state or plan file.
+
+Each URL is minted at the moment the job was observed to be complete and is valid for 36h0m0s from then, so consume them within the same run rather than passing them on.
 - `error_reason` (String) Why the job failed. Empty unless `state` is `"failed"`.
 - `id` (String) The usage export job's id.
 - `state` (String) The job's terminal state: `"completed"` or `"failed"`. `Open` only returns once the job has reached one of these — it never returns `"created"` or `"processing"`.

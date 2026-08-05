@@ -208,8 +208,8 @@ func (d *deployComponentDataSource) Configure(_ context.Context, req datasource.
 // into its Terraform model.
 //
 // PipelineID, WorkflowID and JobID are converted to null rather than the
-// all-zero UUID the API sends for an association that was never
-// recorded; see the comment on circleci.DeployComponentVersion.
+// all-zero UUID the API sends for an association that was never recorded;
+// see the comment on circleci.DeployComponentVersion.
 func deployComponentVersionToModel(version circleci.DeployComponentVersion) deployComponentVersionModel {
 	model := deployComponentVersionModel{
 		Name:           types.StringValue(version.Name),

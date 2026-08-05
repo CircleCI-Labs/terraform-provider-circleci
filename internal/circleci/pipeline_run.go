@@ -17,12 +17,10 @@ import (
 // provider follows that naming for anything new rather than overloading
 // "pipeline" further; see DESIGN.md.
 //
-// These routes are implemented directly in the CircleCI v2 API v2 API
-// (the CircleCI API, the CircleCI API and
-// the CircleCI API) and are served on both CircleCI Cloud and CircleCI Server: the
-// API's web process ("frontend", image the API-api) is what CircleCI
-// Server's gateway catch-all route for /api routes to, so no requireCloud gating
-// is needed here.
+// These routes are implemented directly in the core CircleCI v2 API backend
+// and are served on both CircleCI Cloud and CircleCI Server: CircleCI
+// Server's gateway routes /api generally through to that same backend, so no
+// requireCloud gating is needed here.
 const (
 	pipelineRunRoute       = "/pipeline/%s"
 	pipelineRunConfigRoute = "/pipeline/%s/config"

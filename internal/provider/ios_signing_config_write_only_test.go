@@ -4,14 +4,20 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -528,4 +534,155 @@ func iosSigningConfigResourceSchemaForTest(t *testing.T) rschema.Schema {
 	}
 
 	return resp.Schema
+}
+
+// TestIOSSigningProfileListBoundsMatchTheAPI pins the API's 100-profile cap on
+// both spellings of the list.
+//
+// The cap was documented in the client and enforced nowhere: the create route's
+// request binding carries `max=100`, so a 101st profile was a 400 mid-apply from a
+// binding rather than a handler -- naming the field and nothing else. It is checked
+// on both `provisioning_profiles` and `provisioning_profiles_wo` because which
+// spelling a configuration uses must not change what CircleCI is asked to do.
+//
+// The bounds are exercised through the real validators rather than read off the
+// validator list: a SizeAtMost the framework never runs would look identical from
+// the outside.
+func TestIOSSigningProfileListBoundsMatchTheAPI(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	resp := &fwresource.SchemaResponse{}
+	NewIOSSigningConfigResource().Schema(ctx, fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	for _, name := range []string{"provisioning_profiles", "provisioning_profiles_wo"} {
+		attribute, ok := resp.Schema.Attributes[name].(rschema.ListNestedAttribute)
+		if !ok {
+			t.Fatalf("%s is not a ListNestedAttribute", name)
+		}
+
+		for _, tc := range []struct {
+			size      int
+			wantError bool
+		}{
+			{size: 0, wantError: true},
+			{size: 1, wantError: false},
+			{size: iosSigningConfigMaxProfiles, wantError: false},
+			{size: iosSigningConfigMaxProfiles + 1, wantError: true},
+		} {
+			got := iosSigningProfileListSizeError(ctx, t, attribute, name, tc.size)
+			if got != tc.wantError {
+				t.Errorf("%s with %d profiles: size error = %t, want %t", name, tc.size, got, tc.wantError)
+			}
+		}
+	}
+}
+
+// iosSigningProfileListSizeError reports whether the attribute's validators
+// complain about a list of the given size.
+//
+// Only the size diagnostics count: AlsoRequires needs a whole configuration to
+// evaluate and reports its own unrelated complaints when handed a bare value, so
+// matching on the size validators' wording is what keeps this test about bounds.
+func iosSigningProfileListSizeError(
+	ctx context.Context, t *testing.T, attribute rschema.ListNestedAttribute, name string, size int,
+) bool {
+	t.Helper()
+
+	list := iosSigningProfileListOfSize(t, size)
+
+	// A whole configuration, not a bare value: AlsoRequires resolves paths against
+	// the config and panics on a zero one, so the size validators cannot be run in
+	// isolation without also giving their neighbours something to look at.
+	config := iosSigningConfigWithProfiles(ctx, t, name, list)
+
+	for _, v := range attribute.Validators {
+		validateResp := &validator.ListResponse{}
+		v.ValidateList(ctx, validator.ListRequest{
+			Path:           path.Root(name),
+			PathExpression: path.MatchRoot(name),
+			Config:         config,
+			ConfigValue:    list,
+		}, validateResp)
+
+		for _, d := range validateResp.Diagnostics.Errors() {
+			if strings.Contains(d.Detail(), "at least 1 element") ||
+				strings.Contains(d.Detail(), "at most 100 element") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// iosSigningConfigWithProfiles builds a circleci_ios_signing_config
+// configuration whose only set attribute is the named profile list.
+func iosSigningConfigWithProfiles(
+	ctx context.Context, t *testing.T, name string, list types.List,
+) tfsdk.Config {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	NewIOSSigningConfigResource().Schema(ctx, fwresource.SchemaRequest{}, resp)
+
+	objectType, ok := resp.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatalf("resource schema type is not an object: %T", resp.Schema.Type())
+	}
+
+	listValue, err := list.ToTerraformValue(ctx)
+	if err != nil {
+		t.Fatalf("converting profile list: %v", err)
+	}
+
+	values := make(map[string]tftypes.Value, len(objectType.AttributeTypes))
+	for attribute, attributeType := range objectType.AttributeTypes {
+		if attribute == name {
+			values[attribute] = listValue
+
+			continue
+		}
+
+		values[attribute] = tftypes.NewValue(attributeType, nil)
+	}
+
+	return tfsdk.Config{
+		Schema: resp.Schema,
+		Raw:    tftypes.NewValue(objectType, values),
+	}
+}
+
+// iosSigningProfileListOfSize builds a types.List of provisioning profile objects
+// with the shape both spellings of the attribute declare.
+func iosSigningProfileListOfSize(t *testing.T, size int) types.List {
+	t.Helper()
+
+	objectType := types.ObjectType{AttrTypes: map[string]attr.Type{
+		"file_name": types.StringType,
+		"blob":      types.StringType,
+	}}
+
+	elements := make([]attr.Value, 0, size)
+	for i := range size {
+		object, diags := types.ObjectValue(objectType.AttrTypes, map[string]attr.Value{
+			"file_name": types.StringValue(fmt.Sprintf("profile-%d.mobileprovision", i)),
+			"blob":      types.StringValue("YQ=="),
+		})
+		if diags.HasError() {
+			t.Fatalf("building profile object: %v", diags)
+		}
+		elements = append(elements, object)
+	}
+
+	list, diags := types.ListValue(objectType, elements)
+	if diags.HasError() {
+		t.Fatalf("building profile list: %v", diags)
+	}
+
+	return list
 }

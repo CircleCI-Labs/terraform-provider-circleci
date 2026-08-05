@@ -33,6 +33,7 @@ var (
 	_ resource.ResourceWithConfigure        = &triggerResource{}
 	_ resource.ResourceWithImportState      = &triggerResource{}
 	_ resource.ResourceWithConfigValidators = &triggerResource{}
+	_ resource.ResourceWithValidateConfig   = &triggerResource{}
 	_ resource.ResourceWithModifyPlan       = &triggerResource{}
 )
 
@@ -90,8 +91,19 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				},
 			},
 			"project_id": schema.StringAttribute{
-				MarkdownDescription: "The ID of the project this trigger belongs to.",
-				Required:            true,
+				MarkdownDescription: "The ID of the project this trigger belongs to. Changing this " +
+					"value forces a new resource to be created.",
+				Required: true,
+				PlanModifiers: []planmodifier.String{
+					// A trigger does not exist outside the project it was created under —
+					// both UpdateTrigger and DeleteTrigger address it as
+					// /projects/{project_id}/triggers/{trigger_id} — so an in-place "update"
+					// of project_id would send its PATCH to the new project carrying the old
+					// (and, there, nonexistent) trigger id. Same defect and same fix as
+					// circleci_pipeline's project_id; see that schema's comment and
+					// DESIGN.md's characterization test notes.
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			// See pipeline_definition_id_deprecation.go: this pair takes a pipeline
 			// *definition* id under two names while `pipeline_id` is retired.
@@ -113,16 +125,41 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional:            true,
 			},
 			"event_source_provider": schema.StringAttribute{
-				MarkdownDescription: "The event source provider: `github_app`, `github_server`, `github_oauth`, `webhook` or `schedule`.\n\n" +
+				MarkdownDescription: "The event source provider: " +
+					markdownValueList(circleci.TriggerEventSourceProviders()) + ".\n\n" +
 					"~> The required attributes differ per provider, because this one endpoint covers " +
 					"several contracts. `event_name` is required for `webhook` and `schedule` only. " +
-					"`checkout_ref` and `config_ref` are required for `webhook` and `schedule`. " +
+					"`checkout_ref` and `config_ref` are required for `webhook` and `schedule`, because " +
+					"neither carries an event ref to fall back to. " +
+					"`event_source_repo_external_id` is required for `github_app`, `github_server` and " +
+					"`github_oauth`, and must be the repository's numeric ID. " +
 					"`event_preset` is required for `github_oauth` and accepts only `all-pushes` or " +
 					"`only-build-prs` there, is optional for `github_app` and `github_server`, and must " +
 					"be omitted for `webhook` and `schedule`. `disabled` is unsupported for " +
-					"`github_oauth`, and `parameters` is supported only for `schedule`.\n\n" +
-					"GitLab and Bitbucket Cloud pipelines cannot be given triggers through this API.",
+					"`github_oauth`, and `parameters` is supported only for `schedule`. Every one of " +
+					"these is checked at plan time, so a wrong combination fails before anything is " +
+					"created.\n\n" +
+					"For `github_app` and `github_server` there is one rule this provider cannot check " +
+					"before applying: `checkout_ref` and `config_ref` are required when the event source " +
+					"repository differs from the pipeline definition's corresponding repository, and " +
+					"**rejected** when it is the same one. Deciding that needs the definition's own " +
+					"repositories, so it surfaces as an API error rather than a plan-time diagnostic.\n\n" +
+					"GitLab pipelines cannot be given triggers through this API. Bitbucket Data Center " +
+					"triggers can be read but not created here: `bitbucket_dc` is absent from the " +
+					"documented set of accepted values on create.\n\n" +
+					"Changing this value forces a new resource to be created: " +
+					"UpdateTriggerEventSourceInput (see internal/circleci/trigger.go) carries no repo " +
+					"field at all, matching the update API's own request shape exactly, so a " +
+					"trigger's provider — and the repository-vs-webhook-vs-schedule shape that " +
+					"comes with it — is immutable after creation, the same way " +
+					"circleci_pipeline_definition's config_source_provider is.",
 				Required: true,
+				Validators: []validator.String{
+					stringvalidator.OneOf(circleci.TriggerEventSourceProviders()...),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"event_source_repo_full_name": schema.StringAttribute{
 				MarkdownDescription: "The full name of the event source repository.",
@@ -132,14 +169,31 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				},
 			},
 			"event_source_repo_external_id": schema.StringAttribute{
-				MarkdownDescription: "The external ID of the event source repository. Required when `event_source_provider` is `github_app` or `github_server`. This is the GitHub repository numeric ID.",
-				Optional:            true,
+				MarkdownDescription: "The external ID of the event source repository. Required when " +
+					"`event_source_provider` is `github_app` or `github_server`. This is the GitHub " +
+					"repository numeric ID. Changing this value forces a new resource to be created: " +
+					"UpdateTriggerEventSourceInput has no repo field, so a trigger's event source " +
+					"repository is immutable after creation (see event_source_provider above).",
+				Optional: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"event_source_web_hook_url": schema.StringAttribute{
-				MarkdownDescription: "The webhook URL for webhook-based triggers.",
-				Computed:            true,
-				Sensitive:           true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				MarkdownDescription: "The webhook URL for webhook-based triggers, including the secret that " +
+					"authenticates an inbound POST as a query parameter.\n\n" +
+					"~> **The API can redact this on read, not only on create.** `GET " +
+					"/projects/{project_id}/triggers/{trigger_id}` — the same route this resource's Read " +
+					"uses on every refresh and on import — answers with the literal string `**REDACTED**` in " +
+					"place of the secret when the calling token is not allowed to see it. Read stores " +
+					"whatever it gets with no check, so a token downgrade (or importing with a lower-privileged " +
+					"token than the one that created the trigger) silently replaces a working URL with an " +
+					"unusable one in state. There is no write-only counterpart to recover from this: unlike " +
+					"a practitioner-supplied secret, this URL is minted by CircleCI, not configured, so there " +
+					"is nothing to re-supply — the only fix is to replace the trigger, which mints a new one.",
+				Computed:      true,
+				Sensitive:     true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"event_source_web_hook_sender": schema.StringAttribute{
 				MarkdownDescription: "The webhook sender identifier. Required when `event_source_provider` is `webhook`.",
@@ -151,14 +205,31 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Validators:          []validator.String{CronExpressionValidator()},
 			},
 			"event_source_schedule_attribution_actor": schema.StringAttribute{
-				MarkdownDescription: "Attribution actor for the schedule event source. Required when event_source_provider is schedule. Must be \"system\" or \"current\".",
-				Optional:            true,
-				Computed:            true,
-				Validators:          []validator.String{stringvalidator.OneOf("system", "current")},
+				MarkdownDescription: "Attribution actor for the schedule event source. Required when event_source_provider is schedule. Must be \"system\" or \"current\".\n\n" +
+					"~> **Does not round-trip through import.** A create or update sends the bare alias " +
+					"(`system` or `current`); a read reports the actor as an object carrying its resolved " +
+					"id instead, with no alias anywhere in the response. Import therefore populates this " +
+					"attribute with a literal actor id, not an alias — and `terraform plan " +
+					"-generate-config-out` writes that literal id into the generated configuration. This " +
+					"provider only accepts `system` or `current` here (matching what the API accepts on " +
+					"write), so applying generated config verbatim fails plan-time validation with a clear " +
+					"error rather than a confusing API rejection; replace the generated id with `system` or " +
+					"`current` by hand. The first apply after that correction is a same-value PATCH — the " +
+					"alias re-resolves to the same actor — after which the plan is clean.",
+				Optional:   true,
+				Computed:   true,
+				Validators: []validator.String{stringvalidator.OneOf("system", "current")},
 			},
 			"event_preset": schema.StringAttribute{
-				MarkdownDescription: "The event preset for GitHub triggers. Required when `event_source_provider` is `github_app` or `github_server`. Valid values: `all-pushes`, `only-tags`, `default-branch-pushes`, `only-build-prs`, `only-open-prs`, `only-labeled-prs`, `only-merged-prs`, `only-ready-for-review-prs`, `only-branch-delete`, `only-build-pushes-to-non-draft-prs`, `only-merged-or-closed-prs`, `pr-comment-equals-run-ci`, `non-draft-pr-opened`, `pushes-to-merge-queues`.",
-				Optional:            true,
+				MarkdownDescription: "The event preset: which GitHub events fire the trigger.\n\n" +
+					"Optional for `github_app` and `github_server`, **required** for `github_oauth` — " +
+					"where only `all-pushes` and `only-build-prs` are accepted — and must be omitted " +
+					"for `webhook` and `schedule`.\n\nValid values: " +
+					markdownValueList(circleci.TriggerEventPresets()) + ".",
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.OneOf(circleci.TriggerEventPresets()...),
+				},
 			},
 			"event_name": schema.StringAttribute{
 				MarkdownDescription: "The event name. Required when `event_source_provider` is `webhook` or `schedule`.",
@@ -235,121 +306,29 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// There is no validation here. Every rule about which attributes a given
+	// event_source_provider requires or forbids is knowable from the configuration
+	// alone, so all of it runs at plan time in ValidateConfig — see
+	// trigger_validation.go for why apply-time was the wrong place.
 	provider := circleCiTerrformTriggerResource.EventSourceProvider.ValueString()
-	if provider != "schedule" && !circleCiTerrformTriggerResource.Parameters.IsNull() && !circleCiTerrformTriggerResource.Parameters.IsUnknown() {
-		resp.Diagnostics.AddError(
-			"Error creating CircleCI trigger",
-			"CircleCI trigger with "+provider+" provider does not support parameters; parameters is only valid for schedule triggers",
-		)
-		return
-	}
-
-	switch provider {
-	case "github_app", "github_server":
-		if !isValidEventPreset(circleCiTerrformTriggerResource.EventPreset.ValueString()) {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with "+provider+" provider has an unexpected event_preset",
-			)
-			return
-		}
-		if !circleCiTerrformTriggerResource.EventName.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with "+provider+" provider does not support event_name",
-			)
-			return
-		}
-		if circleCiTerrformTriggerResource.EventSourceRepoExternalId.IsNull() || circleCiTerrformTriggerResource.EventSourceRepoExternalId.ValueString() == "" {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with "+circleCiTerrformTriggerResource.EventSourceProvider.ValueString()+" provider requires event_source_repo_external_id (the GitHub repository ID)",
-			)
-			return
-		}
-	case "webhook":
-		if circleCiTerrformTriggerResource.EventSourceWebHookUrl.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with webhook provider has an unexpected event source web hook url",
-			)
-			return
-		}
-		if circleCiTerrformTriggerResource.EventName.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with webhook provider requires an event_name",
-			)
-			return
-		}
-		if circleCiTerrformTriggerResource.EventSourceWebHookSender.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with webhook provider requires a Webhook Sender",
-			)
-			return
-		}
-	case "schedule":
-		if circleCiTerrformTriggerResource.EventName.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with schedule provider requires an event_name",
-			)
-			return
-		}
-		if circleCiTerrformTriggerResource.CheckoutRef.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with schedule provider requires checkout_ref",
-			)
-			return
-		}
-		if circleCiTerrformTriggerResource.ConfigRef.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with schedule provider requires config_ref",
-			)
-			return
-		}
-		if circleCiTerrformTriggerResource.EventSourceScheduleCronExpression.IsNull() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with schedule provider requires event_source_schedule_cron_expression",
-			)
-			return
-		}
-		// This attribute is Optional+Computed (Computed lets Read preserve the
-		// configured alias instead of the API-resolved UUID), so leaving it
-		// out of config makes it Unknown here, not Null. IsNull() alone missed
-		// that and let a schedule trigger with no attribution actor reach the
-		// API instead of failing with this diagnostic.
-		if circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.IsNull() ||
-			circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.IsUnknown() {
-			resp.Diagnostics.AddError(
-				"Error creating CircleCI trigger",
-				"CircleCI trigger with schedule provider requires event_source_schedule_attribution_actor",
-			)
-			return
-		}
-	default:
-		resp.Diagnostics.AddError(
-			"Error creating CircleCI trigger",
-			"CircleCI trigger has an unexpected event source provider: should be either github_app, github_server, webhook, or schedule",
-		)
-		return
-	}
 
 	newEventSource := circleci.TriggerEventSourceInput{Provider: provider}
-	switch provider {
-	case "github_app", "github_server":
+	// github_oauth needs a repo as much as github_app and github_server do — the
+	// API resolves all three through the same arm of the same switch, and rejects a
+	// create with no event_source.repo. This used to name only the two GitHub App
+	// providers, so every github_oauth trigger failed with an opaque HTTP 400 "bad
+	// request". The set lives in the client so the create body and the plan-time
+	// requirement in trigger_validation.go cannot disagree about it.
+	switch {
+	case circleci.TriggerProviderNeedsRepo(provider):
 		newEventSource.Repo = &circleci.RepoInput{
 			ExternalID: circleCiTerrformTriggerResource.EventSourceRepoExternalId.ValueString(),
 		}
-	case "webhook":
+	case provider == circleci.TriggerProviderWebhook:
 		newEventSource.Webhook = &circleci.TriggerWebhookInput{
 			Sender: circleCiTerrformTriggerResource.EventSourceWebHookSender.ValueString(),
 		}
-	case "schedule":
+	case provider == circleci.TriggerProviderSchedule:
 		newEventSource.Schedule = &circleci.TriggerScheduleInput{
 			CronExpression:   circleCiTerrformTriggerResource.EventSourceScheduleCronExpression.ValueString(),
 			AttributionActor: circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor.ValueString(),
@@ -363,14 +342,13 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	// New Trigger
-	disabled := circleCiTerrformTriggerResource.Disabled.ValueBool()
 	newTrigger := circleci.CreateTriggerInput{
 		EventName:   circleCiTerrformTriggerResource.EventName.ValueString(),
 		CheckoutRef: circleCiTerrformTriggerResource.CheckoutRef.ValueString(),
 		ConfigRef:   circleCiTerrformTriggerResource.ConfigRef.ValueString(),
 		EventSource: newEventSource,
 		EventPreset: circleCiTerrformTriggerResource.EventPreset.ValueString(),
-		Disabled:    &disabled,
+		Disabled:    triggerDisabledInput(provider, circleCiTerrformTriggerResource.Disabled),
 		Parameters:  parameters,
 	}
 
@@ -426,7 +404,7 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 	if newReturnedTrigger.EventPreset != "" {
 		circleCiTerrformTriggerResource.EventPreset = types.StringValue(newReturnedTrigger.EventPreset)
 	}
-	if circleCiTerrformTriggerResource.EventSourceProvider.ValueString() == "webhook" && circleCiTerrformTriggerResource.EventName.ValueString() != "" {
+	if circleCiTerrformTriggerResource.EventSourceProvider.ValueString() == circleci.TriggerProviderWebhook && circleCiTerrformTriggerResource.EventName.ValueString() != "" {
 		circleCiTerrformTriggerResource.EventName = types.StringValue(newReturnedTrigger.EventName)
 	}
 	if newReturnedTrigger.EventSource.Schedule.CronExpression != "" {
@@ -436,7 +414,7 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	// For schedule triggers, preserve the user's input value. The API may transform aliases
 	// like "system" to a UUID, which would cause perpetual drift if stored in state.
-	if circleCiTerrformTriggerResource.EventSourceProvider.ValueString() != "schedule" {
+	if circleCiTerrformTriggerResource.EventSourceProvider.ValueString() != circleci.TriggerProviderSchedule {
 		circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor = types.StringNull()
 	}
 
@@ -540,9 +518,9 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 	}
 	triggerState.EventSourceWebHookUrl = types.StringValue(readTrigger.EventSource.Webhook.URL)
 	switch triggerState.EventSourceProvider.ValueString() {
-	case "webhook":
+	case circleci.TriggerProviderWebhook:
 		triggerState.EventSourceWebHookSender = types.StringValue(readTrigger.EventSource.Webhook.Sender)
-	case "github_app", "github_server", "schedule":
+	case circleci.TriggerProviderGitHubApp, circleci.TriggerProviderGitHubServer, circleci.TriggerProviderSchedule:
 	}
 
 	if readTrigger.EventName == "" {
@@ -611,24 +589,10 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	if state.EventSourceProvider.ValueString() != "schedule" && !state.Parameters.IsNull() && !state.Parameters.IsUnknown() {
-		resp.Diagnostics.AddError(
-			"Error updating CircleCI trigger",
-			"CircleCI trigger with "+state.EventSourceProvider.ValueString()+" provider does not support parameters; parameters is only valid for schedule triggers",
-		)
-		return
-	}
-
+	// As in Create, there is no validation here: ValidateConfig runs on the
+	// configuration of an update as well as a create, so an invalid change is
+	// rejected at plan time. See trigger_validation.go.
 	provider := state.EventSourceProvider.ValueString()
-	if provider == "github_app" || provider == "github_server" {
-		if state.EventSourceRepoExternalId.IsNull() || state.EventSourceRepoExternalId.ValueString() == "" {
-			resp.Diagnostics.AddError(
-				"Error updating CircleCI trigger",
-				"CircleCI trigger with "+provider+" provider requires event_source_repo_external_id (the GitHub repository ID)",
-			)
-			return
-		}
-	}
 
 	parameters, diags := triggerParametersToMap(ctx, state.Parameters)
 	resp.Diagnostics.Append(diags...)
@@ -637,16 +601,16 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	// Prepare the new event source. Unlike create, there is no repo field at
-	// all here: the API's handler_update.go's
-	// updateRequestEventSource has none, so a trigger's event source
-	// repository is immutable after creation regardless of provider.
+	// all here: the update API's own request shape has none, so a trigger's
+	// event source repository is immutable after creation regardless of
+	// provider.
 	newEventSource := circleci.UpdateTriggerEventSourceInput{Provider: provider}
 	switch provider {
-	case "webhook":
+	case circleci.TriggerProviderWebhook:
 		newEventSource.Webhook = &circleci.TriggerWebhookInput{
 			Sender: state.EventSourceWebHookSender.ValueString(),
 		}
-	case "schedule":
+	case circleci.TriggerProviderSchedule:
 		newEventSource.Schedule = &circleci.TriggerScheduleInput{
 			CronExpression:   state.EventSourceScheduleCronExpression.ValueString(),
 			AttributionActor: state.EventSourceScheduleAttributionActor.ValueString(),
@@ -654,14 +618,13 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 
 	// New Trigger
-	disabled := state.Disabled.ValueBool()
 	updates := circleci.UpdateTriggerInput{
 		EventName:   state.EventName.ValueString(),
 		CheckoutRef: state.CheckoutRef.ValueString(),
 		ConfigRef:   state.ConfigRef.ValueString(),
 		EventSource: &newEventSource,
 		EventPreset: state.EventPreset.ValueString(),
-		Disabled:    &disabled,
+		Disabled:    triggerDisabledInput(provider, state.Disabled),
 		Parameters:  parameters,
 	}
 
@@ -677,8 +640,23 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	// update state
 	state.Id = types.StringValue(updatedTrigger.ID)
-	state.CheckoutRef = types.StringValue(updatedTrigger.CheckoutRef)
-	state.ConfigRef = types.StringValue(updatedTrigger.ConfigRef)
+
+	// Empty maps to null, the same way every other optional string in this function
+	// is handled two blocks below. Without this, a trigger created without
+	// checkout_ref/config_ref — the normal case for github_app and github_server,
+	// where both are inherited — fails its next update with "Provider produced
+	// inconsistent result after apply": the API answers "" and the plan expects null.
+	if updatedTrigger.CheckoutRef == "" {
+		state.CheckoutRef = types.StringNull()
+	} else {
+		state.CheckoutRef = types.StringValue(updatedTrigger.CheckoutRef)
+	}
+
+	if updatedTrigger.ConfigRef == "" {
+		state.ConfigRef = types.StringNull()
+	} else {
+		state.ConfigRef = types.StringValue(updatedTrigger.ConfigRef)
+	}
 	state.EventSourceProvider = types.StringValue(updatedTrigger.EventSource.Provider)
 	if updatedTrigger.EventSource.Repo.FullName == "" {
 		state.EventSourceRepoFullName = types.StringNull()
@@ -697,7 +675,7 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 		state.EventSourceScheduleCronExpression = types.StringNull()
 	}
 	// Preserve plan value for schedule triggers; API may transform aliases like "system" → UUID.
-	if state.EventSourceProvider.ValueString() != "schedule" {
+	if state.EventSourceProvider.ValueString() != circleci.TriggerProviderSchedule {
 		if updatedTrigger.EventSource.Schedule.AttributionActor.ID != "" {
 			state.EventSourceScheduleAttributionActor = types.StringValue(updatedTrigger.EventSource.Schedule.AttributionActor.ID)
 		} else {
@@ -810,12 +788,50 @@ func (r *triggerResource) ImportState(ctx context.Context, req resource.ImportSt
 	)
 }
 
-func isValidEventPreset(eventPreset string) bool {
-	switch eventPreset {
-	case "all-pushes", "only-tags", "default-branch-pushes", "only-build-prs", "only-open-prs", "only-labeled-prs", "only-merged-prs", "only-ready-for-review-prs", "only-branch-delete", "only-build-pushes-to-non-draft-prs", "only-merged-or-closed-prs", "pr-comment-equals-run-ci", "non-draft-pr-opened", "pushes-to-merge-queues":
-		return true
+// triggerDisabledInput renders the `disabled` field of a create or update body.
+//
+// nil for github_oauth, which does not support the field at all — the attribute has
+// a default, so the plan always carries a value for it whether or not the
+// practitioner asked for one, and sending `"disabled": false` to an endpoint that
+// rejects the key would make a github_oauth trigger impossible to create. Configuring
+// it is refused at plan time (see trigger_validation.go); this is the other half of
+// that, for the value the schema supplies by itself.
+func triggerDisabledInput(provider string, disabled types.Bool) *bool {
+	if provider == circleci.TriggerProviderGitHubOAuth {
+		return nil
+	}
+
+	value := disabled.ValueBool()
+
+	return &value
+}
+
+// markdownValueList renders values as a prose list of code spans: "`a`, `b` or
+// `c`".
+//
+// It exists so that an attribute description and the validator beside it can be
+// built from the same slice. A description that lists valid values by hand goes
+// stale the first time the set changes, and the stale half is the one
+// practitioners read.
+func markdownValueList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = "`" + value + "`"
+	}
+
+	return joinWithOr(quoted)
+}
+
+// joinWithOr renders values as "a", "a or b", or "a, b or c". Diagnostics use it
+// unquoted; markdownValueList quotes first.
+func joinWithOr(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
 	default:
-		return false
+		return strings.Join(values[:len(values)-1], ", ") + " or " + values[len(values)-1]
 	}
 }
 

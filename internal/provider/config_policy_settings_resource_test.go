@@ -12,6 +12,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
@@ -180,9 +181,20 @@ func TestAccConfigPolicySettingsDriftDetected(t *testing.T) {
 		Steps: []resource.TestStep{
 			{Config: configPolicySettingsConfig(srv.URL, true)},
 			{
-				PreConfig:          func() { api.setEnabled("config", false) },
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				// Read finds enforcement off and writes that straight into state (see
+				// configPolicySettingsResource.Read — a valid context always answers
+				// 200, so there is no "gone" signal here), so the plan that follows
+				// updates enabled back to true rather than reporting no changes.
+				PreConfig: func() { api.setEnabled("config", false) },
+				Config:    configPolicySettingsConfig(srv.URL, true),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_config_policy_settings.test",
+							plancheck.ResourceActionUpdate,
+						),
+					},
+				},
 			},
 			// And the next apply puts it back.
 			{

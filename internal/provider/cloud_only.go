@@ -68,13 +68,13 @@ func (r *organizationSettingsResource) ModifyPlan(_ context.Context, req resourc
 }
 
 // circleci_pipeline and circleci_trigger are not v3, but pipeline definitions
-// and triggers are served by the public API service under /api/v2 rather than
-// the v2 API, and CircleCI Server does not route them there either — see
+// and triggers are served under /api/v2 by a different backend than most of
+// v2, and CircleCI Server does not route them there either — see
 // pipelineDefinitionsRoute and triggersRoute in internal/circleci. Before this
 // migration Configure only received *pipeline.PipelineService /
 // *trigger.TriggerService, neither of which carries any deployment
 // information, so no gate was possible at all; see DESIGN.md's
-// characterization test notes for issue #26.
+// characterization test notes.
 
 func (r *pipelineResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if r.client == nil || req.Plan.Raw.IsNull() {

@@ -5,10 +5,8 @@ package provider
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -16,21 +14,28 @@ import (
 
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
-	"github.com/hashicorp/terraform-plugin-testing/statecheck"
-	"github.com/hashicorp/terraform-plugin-testing/terraform"
-	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
-// The membership routes hang off the group routes, which CircleCI Server exposes
-// to the public API service, so these tests run against an in-process stand-in
-// rather than a real installation.
+// circleci_group_membership is served entirely on Client.PrivateHost(), which
+// (deliberately — see internal/circleci/private.go) has no provider-schema
+// attribute to redirect at a local fake, unlike Client.Host() or RunnerHost().
+// So unlike this package's other fake-backed tests, these cannot drive the
+// resource through resource.UnitTest and an HCL "provider" block: there would
+// be no way to stop the request leaving for https://app.circleci.com for real.
+//
+// Instead these call Create/Read/Update/Delete/ImportState directly against a
+// resource built with circleci.New(circleci.Config{PrivateHost: fake.URL}) —
+// the same technique TestIOSSigningWriteOnly_GuardsAgainstMissingCredentials
+// and TestCloudOnlyModifyPlanAllowsDestroy use to reach a path a full
+// Terraform run cannot. Schema-level behaviour (plan modifiers, requiredness)
+// is still asserted directly against the schema, same as before.
 
 const (
-	// testMembershipOrgID is the organization the mock API serves groups for.
-	testMembershipOrgID = "00000000-1111-2222-3333-444444444444"
-	// testMembershipGroupID is the group whose membership is managed.
+	testMembershipOrgID   = "00000000-1111-2222-3333-444444444444"
 	testMembershipGroupID = "55555555-6666-7777-8888-999999999999"
 
 	testUserA = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -46,7 +51,8 @@ type membershipCall struct {
 	userIDs []string
 }
 
-// mockMembershipAPI is an in-memory stand-in for the group membership routes.
+// mockMembershipAPI is an in-memory stand-in for the private group membership
+// routes (internal/circleci/group_membership.go).
 type mockMembershipAPI struct {
 	t *testing.T
 
@@ -73,6 +79,18 @@ func newMockMembershipAPI(t *testing.T) (*mockMembershipAPI, string) {
 	t.Cleanup(srv.Close)
 
 	return api, srv.URL
+}
+
+// client returns a *circleci.Client whose private origin is this fake, and
+// whose main host is deliberately unroutable — every group-membership call
+// must go to PrivateHost, never Host.
+func (m *mockMembershipAPI) client(host string) *circleci.Client {
+	return circleci.New(circleci.Config{
+		Host:        "http://127.0.0.1:1",
+		PrivateHost: host,
+		Token:       "fake",
+		Deployment:  circleci.DeploymentCloud,
+	})
 }
 
 // seedMembers puts users into the managed group behind Terraform's back.
@@ -111,23 +129,14 @@ func (m *mockMembershipAPI) calls() []membershipCall {
 	return slices.Clone(m.recorded)
 }
 
-// resetCalls clears the recorded calls, so a later step can assert on only the
-// calls that step made.
-func (m *mockMembershipAPI) resetCalls() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.recorded = nil
-}
-
 func (m *mockMembershipAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// /api/v2/organizations/{org_id}/groups/{group_id}/{users|remove_users}
+	// /private/ciam/orgs/{org_id}/groups/{group_id}/{users|add-users|delete-users}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 7 || parts[0] != "api" || parts[1] != "v2" ||
-		parts[2] != "organizations" || parts[4] != "groups" {
+	if len(parts) != 7 || parts[0] != "private" || parts[1] != "ciam" ||
+		parts[2] != "orgs" || parts[4] != "groups" {
 		m.write(w, http.StatusNotFound, map[string]string{"message": "Not Found: " + r.URL.Path})
 
 		return
@@ -144,9 +153,9 @@ func (m *mockMembershipAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case action == "users" && r.Method == http.MethodGet:
 		m.list(w, groupID)
-	case action == "users" && r.Method == http.MethodPost:
+	case action == "add-users" && r.Method == http.MethodPost:
 		m.mutate(w, r, groupID, "add")
-	case action == "remove_users" && r.Method == http.MethodPost:
+	case action == "delete-users" && r.Method == http.MethodPost:
 		m.mutate(w, r, groupID, "remove")
 	default:
 		m.write(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method Not Allowed"})
@@ -160,6 +169,7 @@ func (m *mockMembershipAPI) list(w http.ResponseWriter, groupID string) {
 		AvatarURL string `json:"avatar_url"`
 		Email     string `json:"email"`
 		GroupID   string `json:"group_id"`
+		CreatedAt string `json:"created_at"`
 	}
 
 	items := make([]member, 0, len(m.members[groupID]))
@@ -170,13 +180,14 @@ func (m *mockMembershipAPI) list(w http.ResponseWriter, groupID string) {
 			AvatarURL: "https://avatars.example/" + id[:4] + ".png",
 			Email:     id[:4] + "@example.com",
 			GroupID:   groupID,
+			CreatedAt: "2024-01-02T03:04:05.000000Z",
 		})
 	}
 
 	m.write(w, http.StatusOK, struct {
-		Items         []member `json:"items"`
-		NextPageToken *string  `json:"next_page_token"`
-	}{Items: items})
+		Items []member `json:"items"`
+		Count int      `json:"count"`
+	}{Items: items, Count: len(items)})
 }
 
 func (m *mockMembershipAPI) mutate(w http.ResponseWriter, r *http.Request, groupID, action string) {
@@ -256,30 +267,55 @@ func assertCall(t *testing.T, calls []membershipCall, action string, want []stri
 	}
 }
 
-func testAccMembershipProviderConfig(host, deployment string) string {
-	return fmt.Sprintf(`
-provider "circleci" {
-  host       = %[1]q
-  key        = "fake-token"
-  deployment = %[2]q
-}
-`, host, deployment)
-}
+// --- direct-invocation helpers ------------------------------------------------
 
-// testAccGroupMembershipConfig renders the resource with the given member ids.
-func testAccGroupMembershipConfig(host, deployment string, userIDs ...string) string {
-	quoted := make([]string, 0, len(userIDs))
-	for _, id := range userIDs {
-		quoted = append(quoted, fmt.Sprintf("%q", id))
+// groupMembershipResourceSchemaForTest returns the resource's schema, the same
+// way ios_signing_write_only_test.go's helper of the same shape does.
+func groupMembershipResourceSchemaForTest(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	(&groupMembershipResource{}).Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
 	}
 
-	return testAccMembershipProviderConfig(host, deployment) + fmt.Sprintf(`
-resource "circleci_group_membership" "test" {
-  organization_id = %[1]q
-  group_id        = %[2]q
-  user_ids        = [%[3]s]
+	return resp.Schema
 }
-`, testMembershipOrgID, testMembershipGroupID, strings.Join(quoted, ", "))
+
+// membershipStateForTest builds a tfsdk.State (or, read as a Plan/Config, the
+// identical raw value) from a fully-populated model — see configForTest in
+// environment_variable_write_only_test.go for the same technique applied to a
+// Config specifically.
+func membershipStateForTest(t *testing.T, schema rschema.Schema, model groupMembershipResourceModel) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// membershipModel builds a model for testMembershipOrgID/testMembershipGroupID
+// and the given userIDs, leaving computed attributes null — the shape a
+// practitioner's configuration takes.
+func membershipModel(t *testing.T, userIDs ...string) groupMembershipResourceModel {
+	t.Helper()
+
+	ids, diags := types.SetValueFrom(t.Context(), types.StringType, userIDs)
+	if diags.HasError() {
+		t.Fatalf("could not build user_ids: %+v", diags)
+	}
+
+	return groupMembershipResourceModel{
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringNull(),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        ids,
+	}
 }
 
 func TestGroupMembershipResourceSchema(t *testing.T) {
@@ -360,233 +396,432 @@ func TestGroupMembershipResourceImportStateRejectsMalformedID(t *testing.T) {
 	}
 }
 
-func TestAccGroupMembershipResource(t *testing.T) {
+// TestGroupMembershipResourceImportState_RoundTripsWithRead proves the round
+// trip `terraform import` actually drives for this resource: ImportState sets
+// only organization_id/org_id/group_id/id (see groupMembershipResource.
+// ImportState), and the framework's own post-import refresh then calls Read
+// against that state. This asserts the combination reproduces exactly the
+// state Create left behind, including user_ids — the condition that makes
+// the plan following an import empty. There is no secret attribute here to
+// complicate that: user_ids is a set of UUIDs, and Read always reports the
+// group's live membership in full.
+func TestGroupMembershipResourceImportState_RoundTripsWithRead(t *testing.T) {
+	t.Parallel()
+
 	api, host := newMockMembershipAPI(t)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
 
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			// Create: an empty group gets exactly one add call.
-			{
-				Config: testAccGroupMembershipConfig(host, "cloud", testUserA, testUserB),
-				Check: func(*terraform.State) error {
-					assertCall(t, api.calls(), "add", []string{testUserA, testUserB})
-					assertCall(t, api.calls(), "remove", nil)
+	createPlan := membershipStateForTest(t, schema, membershipModel(t, testUserA, testUserB))
+	createResp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: createPlan.Raw}}, createResp)
+	if createResp.Diagnostics.HasError() {
+		t.Fatalf("Create returned diagnostics: %v", createResp.Diagnostics)
+	}
 
-					if got := api.currentMembers(); !slices.Equal(got, []string{testUserA, testUserB}) {
-						t.Errorf("members = %v, want [%s %s]", got, testUserA, testUserB)
-					}
+	var created groupMembershipResourceModel
+	if diags := createResp.State.Get(t.Context(), &created); diags.HasError() {
+		t.Fatalf("reading back created state: %v", diags)
+	}
 
-					return nil
-				},
-				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue(
-						"circleci_group_membership.test",
-						tfjsonpath.New("id"),
-						knownvalue.StringExact(testMembershipOrgID+"/"+testMembershipGroupID),
-					),
-					statecheck.ExpectKnownValue(
-						"circleci_group_membership.test",
-						tfjsonpath.New("user_ids"),
-						knownvalue.SetExact([]knownvalue.Check{
-							knownvalue.StringExact(testUserA),
-							knownvalue.StringExact(testUserB),
-						}),
-					),
-				},
-			},
-			// Import, using the "organization_id/group_id" form.
-			{
-				ResourceName:      "circleci_group_membership.test",
-				ImportState:       true,
-				ImportStateVerify: true,
-				ImportStateIdFunc: func(state *terraform.State) (string, error) {
-					rs, ok := state.RootModule().Resources["circleci_group_membership.test"]
-					if !ok {
-						return "", fmt.Errorf("circleci_group_membership.test not found in state")
-					}
+	// ImportState only ever receives a bare "organization_id/group_id" id and an
+	// empty (all-null-but-typed) state to write into, the same as a real
+	// `terraform import` call.
+	importResp := &fwresource.ImportStateResponse{
+		State: membershipStateForTest(t, schema, groupMembershipResourceModel{
+			Id:             types.StringNull(),
+			OrganizationId: types.StringNull(),
+			OrgId:          types.StringNull(),
+			GroupId:        types.StringNull(),
+			UserIds:        types.SetNull(types.StringType),
+		}),
+	}
+	r.ImportState(t.Context(), fwresource.ImportStateRequest{
+		ID: testMembershipOrgID + "/" + testMembershipGroupID,
+	}, importResp)
+	if importResp.Diagnostics.HasError() {
+		t.Fatalf("ImportState returned diagnostics: %v", importResp.Diagnostics)
+	}
 
-					return rs.Primary.Attributes["organization_id"] + "/" + rs.Primary.Attributes["group_id"], nil
-				},
-			},
-			// The delta: {a,b} -> {a,c,d} must remove only b and add only c and d.
-			// Re-adding a, or removing and re-adding it, would be wrong.
-			{
-				PreConfig: api.resetCalls,
-				Config:    testAccGroupMembershipConfig(host, "cloud", testUserA, testUserC, testUserD),
-				Check: func(*terraform.State) error {
-					calls := api.calls()
-					assertCall(t, calls, "remove", []string{testUserB})
-					assertCall(t, calls, "add", []string{testUserC, testUserD})
+	readResp := &fwresource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	r.Read(t.Context(), fwresource.ReadRequest{State: importResp.State}, readResp)
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", readResp.Diagnostics)
+	}
 
-					want := []string{testUserA, testUserC, testUserD}
-					slices.Sort(want)
-					if got := api.currentMembers(); !slices.Equal(got, want) {
-						t.Errorf("members = %v, want %v", got, want)
-					}
+	var imported groupMembershipResourceModel
+	if diags := readResp.State.Get(t.Context(), &imported); diags.HasError() {
+		t.Fatalf("reading back imported state: %v", diags)
+	}
 
-					return nil
-				},
-			},
-			// A no-op change must make no calls at all.
-			{
-				PreConfig: api.resetCalls,
-				Config:    testAccGroupMembershipConfig(host, "cloud", testUserD, testUserA, testUserC),
-				Check: func(*testing.T) func(*terraform.State) error {
-					return func(*terraform.State) error {
-						if calls := api.calls(); len(calls) != 0 {
-							t.Errorf("reordering the same members made %d calls (%v), want none", len(calls), calls)
-						}
+	if imported.Id.ValueString() != created.Id.ValueString() {
+		t.Errorf("imported id = %q, want %q (the value Create produced)", imported.Id.ValueString(), created.Id.ValueString())
+	}
+	if imported.OrganizationId.ValueString() != created.OrganizationId.ValueString() {
+		t.Errorf("imported organization_id = %q, want %q", imported.OrganizationId.ValueString(), created.OrganizationId.ValueString())
+	}
+	if imported.OrgId.ValueString() != created.OrgId.ValueString() {
+		t.Errorf("imported org_id = %q, want %q", imported.OrgId.ValueString(), created.OrgId.ValueString())
+	}
+	if imported.GroupId.ValueString() != created.GroupId.ValueString() {
+		t.Errorf("imported group_id = %q, want %q", imported.GroupId.ValueString(), created.GroupId.ValueString())
+	}
 
-						return nil
-					}
-				}(t),
-			},
-		},
-	})
+	var gotIDs, wantIDs []string
+	if diags := imported.UserIds.ElementsAs(t.Context(), &gotIDs, false); diags.HasError() {
+		t.Fatalf("reading back imported user_ids: %v", diags)
+	}
+	if diags := created.UserIds.ElementsAs(t.Context(), &wantIDs, false); diags.HasError() {
+		t.Fatalf("reading back created user_ids: %v", diags)
+	}
+	slices.Sort(gotIDs)
+	slices.Sort(wantIDs)
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Errorf("imported user_ids = %v, want %v (the value Create produced)", gotIDs, wantIDs)
+	}
 }
 
-func TestAccGroupMembershipResource_emptySetEmptiesTheGroup(t *testing.T) {
+// TestGroupMembershipResourceCreate covers: an empty group gets exactly one add
+// call and no remove call, and the resulting state carries the right id and
+// user_ids.
+func TestGroupMembershipResourceCreate(t *testing.T) {
+	t.Parallel()
+
+	api, host := newMockMembershipAPI(t)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
+
+	plan := membershipStateForTest(t, schema, membershipModel(t, testUserA, testUserB))
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	assertCall(t, api.calls(), "add", []string{testUserA, testUserB})
+	assertCall(t, api.calls(), "remove", nil)
+
+	if got := api.currentMembers(); !slices.Equal(got, []string{testUserA, testUserB}) {
+		t.Errorf("members = %v, want [%s %s]", got, testUserA, testUserB)
+	}
+
+	var out groupMembershipResourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if want := testMembershipOrgID + "/" + testMembershipGroupID; out.Id.ValueString() != want {
+		t.Errorf("id = %q, want %q", out.Id.ValueString(), want)
+	}
+}
+
+// TestGroupMembershipResourceCreate_takesOverExistingMembers covers exclusive
+// ownership on create: a group that already has members not listed in the
+// configuration has them removed rather than merged with.
+func TestGroupMembershipResourceCreate_takesOverExistingMembers(t *testing.T) {
+	t.Parallel()
+
 	api, host := newMockMembershipAPI(t)
 	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
 
-	// An empty set is a valid desired state: it means "this group has no members".
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipConfig(host, "cloud"),
-				Check: func(*terraform.State) error {
-					assertCall(t, api.calls(), "remove", []string{testUserA, testUserB})
-					// Nothing to add, so no add call may be made: the real API
-					// rejects an empty user_ids array.
-					assertCall(t, api.calls(), "add", nil)
+	plan := membershipStateForTest(t, schema, membershipModel(t, testUserA, testUserC))
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
 
-					if got := api.currentMembers(); len(got) != 0 {
-						t.Errorf("members = %v, want none", got)
-					}
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned diagnostics: %v", resp.Diagnostics)
+	}
 
-					return nil
-				},
-			},
-		},
-	})
+	assertCall(t, api.calls(), "remove", []string{testUserB})
+	assertCall(t, api.calls(), "add", []string{testUserC})
+
+	want := []string{testUserA, testUserC}
+	slices.Sort(want)
+	if got := api.currentMembers(); !slices.Equal(got, want) {
+		t.Errorf("members = %v, want %v", got, want)
+	}
 }
 
-func TestAccGroupMembershipResource_takesOverExistingMembers(t *testing.T) {
+// TestGroupMembershipResourceCreate_emptySetEmptiesTheGroup covers that an empty
+// user_ids is a valid desired state ("no members") rather than "unmanaged", and
+// that emptying a group issues only a remove call — the real API rejects an
+// empty user_ids array on add-users, so an unconditional add call here would
+// break every empty-group apply.
+func TestGroupMembershipResourceCreate_emptySetEmptiesTheGroup(t *testing.T) {
+	t.Parallel()
+
 	api, host := newMockMembershipAPI(t)
-	// The group already has members that the configuration does not list. The
-	// resource claims exclusive ownership, so they must be removed on create
-	// rather than merged with.
 	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
 
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipConfig(host, "cloud", testUserA, testUserC),
-				Check: func(*terraform.State) error {
-					assertCall(t, api.calls(), "remove", []string{testUserB})
-					assertCall(t, api.calls(), "add", []string{testUserC})
+	plan := membershipStateForTest(t, schema, membershipModel(t))
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
 
-					want := []string{testUserA, testUserC}
-					slices.Sort(want)
-					if got := api.currentMembers(); !slices.Equal(got, want) {
-						t.Errorf("members = %v, want %v", got, want)
-					}
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned diagnostics: %v", resp.Diagnostics)
+	}
 
-					return nil
-				},
-			},
-		},
-	})
+	assertCall(t, api.calls(), "remove", []string{testUserA, testUserB})
+	assertCall(t, api.calls(), "add", nil)
+
+	if got := api.currentMembers(); len(got) != 0 {
+		t.Errorf("members = %v, want none", got)
+	}
 }
 
-func TestAccGroupMembershipResource_correctsDrift(t *testing.T) {
+// TestGroupMembershipResourceUpdate covers the delta: {a,b} -> {a,c,d} must
+// remove only b and add only c and d. Re-adding a, or removing and re-adding
+// it, would be wrong — and would also fail against the real API's rejection of
+// a no-op-sized request only by accident, not by design, so this is asserted
+// directly on the calls made.
+func TestGroupMembershipResourceUpdate(t *testing.T) {
+	t.Parallel()
+
 	api, host := newMockMembershipAPI(t)
+	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
 
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipConfig(host, "cloud", testUserA),
-			},
-			// A member added in the web UI shows up as drift, because this
-			// resource owns the whole list.
-			{
-				PreConfig:          func() { api.seedMembers(testUserB) },
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
-			},
-			// The next apply removes it again.
-			{
-				PreConfig: api.resetCalls,
-				Config:    testAccGroupMembershipConfig(host, "cloud", testUserA),
-				Check: func(*terraform.State) error {
-					assertCall(t, api.calls(), "remove", []string{testUserB})
+	plan := membershipStateForTest(t, schema, membershipModel(t, testUserA, testUserC, testUserD))
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+	r.Update(t.Context(), fwresource.UpdateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
 
-					if got := api.currentMembers(); !slices.Equal(got, []string{testUserA}) {
-						t.Errorf("members = %v, want [%s]", got, testUserA)
-					}
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
 
-					return nil
-				},
-			},
-		},
-	})
+	assertCall(t, api.calls(), "remove", []string{testUserB})
+	assertCall(t, api.calls(), "add", []string{testUserC, testUserD})
+
+	want := []string{testUserA, testUserC, testUserD}
+	slices.Sort(want)
+	if got := api.currentMembers(); !slices.Equal(got, want) {
+		t.Errorf("members = %v, want %v", got, want)
+	}
 }
 
-func TestAccGroupMembershipResource_deletedGroupLeavesState(t *testing.T) {
+// TestGroupMembershipResourceUpdate_correctsDriftAgainstLiveMembership proves
+// the delta in Update is computed against what the API reports right now, not
+// against prior Terraform state: a member added outside Terraform since the
+// last apply is corrected in this same call rather than surviving because state
+// did not know about it.
+func TestGroupMembershipResourceUpdate_correctsDriftAgainstLiveMembership(t *testing.T) {
+	t.Parallel()
+
 	api, host := newMockMembershipAPI(t)
+	// The live group has A (from a prior apply) and B (added outside Terraform).
+	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
 
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipConfig(host, "cloud", testUserA),
-			},
-			// A group deleted outside Terraform takes its membership with it, so
-			// the refresh must drop the resource rather than fail.
-			{
-				PreConfig:          api.removeGroup,
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
-			},
-		},
-	})
+	// The configuration still only wants A: B must be removed even though the
+	// prior state (not consulted here) never recorded it.
+	plan := membershipStateForTest(t, schema, membershipModel(t, testUserA))
+	resp := &fwresource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+	r.Update(t.Context(), fwresource.UpdateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	assertCall(t, api.calls(), "remove", []string{testUserB})
+	assertCall(t, api.calls(), "add", nil)
+
+	if got := api.currentMembers(); !slices.Equal(got, []string{testUserA}) {
+		t.Errorf("members = %v, want [%s]", got, testUserA)
+	}
 }
 
-func TestAccGroupMembershipResource_serverDeployment(t *testing.T) {
-	_, host := newMockMembershipAPI(t)
+// TestGroupMembershipResourceRead covers the normal path: Read reports the
+// group's current membership and re-derives id and the org attribute pair.
+func TestGroupMembershipResourceRead(t *testing.T) {
+	t.Parallel()
 
-	// Groups need a `circleci` type (standalone) organization. A CircleCI Server
-	// installation is always a `github` type organization, so deployment =
-	// "server" must be rejected with an explanatory error rather than attempting
-	// a request the API would refuse.
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{{
-			Config:      testAccGroupMembershipConfig(host, "server", testUserA),
-			ExpectError: regexp.MustCompile(`circleci_group_membership requires a standalone CircleCI organization`),
-		}},
+	api, host := newMockMembershipAPI(t)
+	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
+
+	prior := membershipStateForTest(t, schema, groupMembershipResourceModel{
+		Id:             types.StringValue(testMembershipOrgID + "/" + testMembershipGroupID),
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringValue(testMembershipOrgID),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        mustSetValue(t, testUserA),
 	})
+
+	resp := &fwresource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	r.Read(t.Context(), fwresource.ReadRequest{State: prior}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var out groupMembershipResourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+
+	var gotIDs []string
+	if diags := out.UserIds.ElementsAs(t.Context(), &gotIDs, false); diags.HasError() {
+		t.Fatalf("reading back user_ids: %v", diags)
+	}
+	slices.Sort(gotIDs)
+
+	// Read must report the live membership (A and B), not the state it was
+	// handed (which only knew about A) — this is the mechanism that lets
+	// Terraform surface a member added outside Terraform as drift.
+	want := []string{testUserA, testUserB}
+	if !slices.Equal(gotIDs, want) {
+		t.Errorf("user_ids = %v, want %v (Read must reflect live membership, not prior state)", gotIDs, want)
+	}
 }
 
-func TestAccGroupMembershipResource_importRejectsMalformedID(t *testing.T) {
-	_, host := newMockMembershipAPI(t)
+// TestGroupMembershipResourceRead_deletedGroupRemovesFromState covers a group
+// deleted outside Terraform: Read must drop the resource from state (by
+// leaving resp.State empty) rather than erroring, so the next plan recreates
+// it instead of jamming on a permanent error.
+func TestGroupMembershipResourceRead_deletedGroupRemovesFromState(t *testing.T) {
+	t.Parallel()
 
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipConfig(host, "cloud", testUserA),
-			},
-			{
-				ResourceName:  "circleci_group_membership.test",
-				ImportState:   true,
-				ImportStateId: "missing-the-organization",
-				ExpectError:   regexp.MustCompile(`Invalid import ID for circleci_group_membership`),
-			},
-		},
+	api, host := newMockMembershipAPI(t)
+	api.removeGroup()
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
+
+	prior := membershipStateForTest(t, schema, groupMembershipResourceModel{
+		Id:             types.StringValue(testMembershipOrgID + "/" + testMembershipGroupID),
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringValue(testMembershipOrgID),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        mustSetValue(t, testUserA),
 	})
+
+	resp := &fwresource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	r.Read(t.Context(), fwresource.ReadRequest{State: prior}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics for a deleted group, want a clean drop from state: %v", resp.Diagnostics)
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("Read left state populated for a deleted group, want it removed")
+	}
+}
+
+// TestGroupMembershipResourceDelete covers that Delete removes only the users
+// recorded in state, tolerating a group that is already gone.
+func TestGroupMembershipResourceDelete(t *testing.T) {
+	t.Parallel()
+
+	api, host := newMockMembershipAPI(t)
+	// B was added outside Terraform after the last apply; state only knows A.
+	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
+
+	state := membershipStateForTest(t, schema, groupMembershipResourceModel{
+		Id:             types.StringValue(testMembershipOrgID + "/" + testMembershipGroupID),
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringValue(testMembershipOrgID),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        mustSetValue(t, testUserA),
+	})
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Delete returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	assertCall(t, api.calls(), "remove", []string{testUserA})
+	assertCall(t, api.calls(), "add", nil)
+
+	// B survives: Delete only clears what this resource put there.
+	if got := api.currentMembers(); !slices.Equal(got, []string{testUserB}) {
+		t.Errorf("members = %v, want [%s] (only A, from state, should have been removed)", got, testUserB)
+	}
+}
+
+func TestGroupMembershipResourceDelete_toleratesAlreadyDeletedGroup(t *testing.T) {
+	t.Parallel()
+
+	api, host := newMockMembershipAPI(t)
+	api.removeGroup()
+	schema := groupMembershipResourceSchemaForTest(t)
+	r := &groupMembershipResource{client: api.client(host)}
+
+	state := membershipStateForTest(t, schema, groupMembershipResourceModel{
+		Id:             types.StringValue(testMembershipOrgID + "/" + testMembershipGroupID),
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringValue(testMembershipOrgID),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        mustSetValue(t, testUserA),
+	})
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Errorf("Delete of an already-deleted group returned diagnostics, want none: %v", resp.Diagnostics)
+	}
+}
+
+// --- the gate ------------------------------------------------------------------
+
+// TestGroupMembershipResourceRequiresStandaloneOrganization is the guard test:
+// deployment = "server" must be rejected before any request reaches the API,
+// with the same message circleci_group and circleci_project_group use.
+func TestGroupMembershipResourceRequiresStandaloneOrganization(t *testing.T) {
+	t.Parallel()
+
+	api, host := newMockMembershipAPI(t)
+	schema := groupMembershipResourceSchemaForTest(t)
+
+	serverClient := circleci.New(circleci.Config{
+		Host:        "http://127.0.0.1:1",
+		PrivateHost: host,
+		Token:       "fake",
+		Deployment:  circleci.DeploymentServer,
+	})
+	r := &groupMembershipResource{client: serverClient}
+
+	plan := membershipStateForTest(t, schema, membershipModel(t, testUserA))
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create on a server deployment produced no diagnostics, want one")
+	}
+	found := false
+	for _, d := range resp.Diagnostics {
+		if d.Summary() == "circleci_group_membership requires a standalone CircleCI organization" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("diagnostics = %v, want a %q summary", resp.Diagnostics, "circleci_group_membership requires a standalone CircleCI organization")
+	}
+
+	if len(api.calls()) != 0 {
+		t.Errorf("server deployment reached the fake API: %v, want no requests at all", api.calls())
+	}
+}
+
+// mustSetValue is a small helper for building a types.Set literal in a state
+// fixture, panicking (via t.Fatal) rather than returning an error a caller
+// might ignore.
+func mustSetValue(t *testing.T, values ...string) types.Set {
+	t.Helper()
+
+	set, diags := types.SetValueFrom(t.Context(), types.StringType, values)
+	if diags.HasError() {
+		t.Fatalf("building set value: %v", diags)
+	}
+
+	return set
 }

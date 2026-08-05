@@ -154,7 +154,14 @@ func (r *iosSigningCertificateResource) Schema(_ context.Context, _ resource.Sch
 				MarkdownDescription: "A display name for the certificate, for example " +
 					"`distribution.p12`. This is a label only; it does not have to match the " +
 					"file the `certificate_blob` bytes came from. Limited to 40 characters by " +
-					"the API. Changing this value forces a new resource to be created.",
+					"the API. Changing this value forces a new resource to be created.\n\n" +
+					"~> **It is not part of the certificate's identity.** CircleCI keys a stored " +
+					"certificate on the organization and the certificate's own fingerprint, so " +
+					"uploading the same `.p12` twice returns the first upload's id and leaves its " +
+					"`file_name` alone. Two of these resources holding the same certificate under " +
+					"different names therefore collide onto one id, and the second apply fails with " +
+					"Terraform reporting an inconsistent result. Use one resource per distinct " +
+					"certificate.",
 				Required: true,
 				Validators: []validator.String{
 					stringvalidator.LengthBetween(1, 40),
@@ -211,10 +218,22 @@ func (r *iosSigningCertificateResource) Schema(_ context.Context, _ resource.Sch
 			"certificate_password_wo": iosSigningCertificatePasswordWriteOnlyAttribute(),
 			"certificate_wo_version":  iosSigningCertificateWriteOnlyVersionAttribute(),
 			"cert_type": schema.StringAttribute{
-				MarkdownDescription: "The certificate's type, `distribution` or `development`. " +
-					"CircleCI derives this from the certificate itself (its X.509 Subject Common " +
-					"Name) rather than accepting it as input, so it cannot be set and is always " +
-					"Computed.",
+				MarkdownDescription: "The certificate's type. CircleCI derives this from the " +
+					"certificate itself — it matches the X.509 Subject Common Name against a fixed " +
+					"set of Apple prefixes — rather than accepting it as input, so it cannot be set " +
+					"and is always Computed. A certificate whose common name matches none of them is " +
+					"rejected on upload rather than stored with a fallback type.\n\n" +
+					"One of `distribution` (`iPhone Distribution:` / `Apple Distribution:`), " +
+					"`development` (`iPhone Developer:` / `Apple Development:`), " +
+					"`developer-id-application`, `developer-id-installer`, `mac-development`, " +
+					"`mac-app-distribution` or `mac-installer-distribution`.\n\n" +
+					"~> The last of those matters for what you can build on top. " +
+					"`circleci_ios_signing_config` requires at least one provisioning profile, and " +
+					"CircleCI **refuses** provisioning profiles for a `developer-id-application`, " +
+					"`developer-id-installer` or `mac-installer-distribution` certificate — Apple's " +
+					"workflow has no profile for those. A certificate of one of those three types can " +
+					"be uploaded with this resource, but no `circleci_ios_signing_config` can be " +
+					"created against it.",
 				Computed: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
@@ -389,15 +408,26 @@ func (r *iosSigningCertificateResource) Delete(ctx context.Context, req resource
 // ImportState imports an existing certificate by id.
 //
 // certificate_blob and certificate_password cannot be recovered on import --
-// the API never returns them -- so they are left null. A subsequent plan will
-// show them changing from null to the configured value the first time this
-// resource appears in a configuration; that one-time diff is expected and
-// does not by itself force a replacement, since Create is never called for an
-// import.
+// the API never returns them -- so they are left null. Both spellings of the
+// credential (certificate_blob/certificate_password, or
+// certificate_blob_wo/certificate_password_wo plus certificate_wo_version) are
+// RequiresReplace, and RequiresReplace fires on a null-to-known transition the
+// same as on any other change -- there is no "this is just import filling in
+// a gap" exception in the framework's modifier, and this resource adds none of
+// its own. So, contrary to what an earlier version of this comment claimed,
+// the first plan against an imported certificate whose configuration supplies
+// a credential (by either spelling) plans a **replacement**: it destroys the
+// imported certificate and uploads a new one, on the very first apply after
+// import. This was verified against a real plan, not asserted from reading the
+// modifier's source -- see TestAccIOSSigningCertificateResource_ImportForcesReplacement.
 //
-// An import into a configuration using the write-only pair behaves better, not
-// worse: `certificate_blob_wo` is null in state whether imported or created, so
-// only `certificate_wo_version` shows the one-time diff.
+// That makes import here useful for one thing only: carrying organization_id,
+// file_name, cert_type, fingerprint, created_at and expires_at into Terraform
+// state without a create call. It does not let a practitioner adopt the
+// specific certificate object CircleCI already has -- there is no way to do
+// that without the API disclosing the private key material, which it
+// deliberately never does. See the resource's "Security" section and its
+// Import section on the documentation site.
 func (r *iosSigningCertificateResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }

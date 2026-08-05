@@ -12,8 +12,8 @@ import "context"
 // workflow's jobs, but nothing got from a pipeline to its workflows, so the only
 // way in was to already know a workflow id.
 //
-// Served by the v2 API on both Cloud and Server, like the other workflow
-// routes — see the comment on workflowRoute in workflow.go.
+// Served by the v2 API on both CircleCI Cloud and CircleCI Server, like the
+// other workflow routes — see the comment on workflowRoute in workflow.go.
 //
 // The same caveat applies as to the rest of the workflow surface: this is mutable
 // runtime state. Status changes as the pipeline runs, so it is for inspection and

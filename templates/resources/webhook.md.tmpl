@@ -72,4 +72,4 @@ Import is supported using `scope_id/webhook_id`:
 terraform import circleci_webhook.example "<scope_id>/<webhook_id>"
 ```
 
-After import, `scope_type` is automatically set to `"project"` (the only currently supported value).
+After import, `scope_type` is automatically set to `"project"` (the only currently supported value), and every other attribute is filled in from a read — except the signing secret. CircleCI never returns it, on any route, so neither `signing_secret` nor `signing_secret_wo` is populated; set one of them in your configuration before running `terraform plan`, or the resource's own validation (exactly one of the two) fails. Because `UpdateWebhook` is a full-replace `PUT` that always sends whatever the configuration currently says, the first apply after import writes that value back over whatever secret is actually configured on CircleCI — there is no read to catch a mismatch first, so prefer sourcing the value from wherever it already lives (a secret manager, through `signing_secret_wo`) over retyping it by hand.

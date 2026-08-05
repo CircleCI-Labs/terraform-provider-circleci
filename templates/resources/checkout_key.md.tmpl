@@ -9,11 +9,17 @@ description: |-
 
 Manages a CircleCI project checkout key: the SSH key CircleCI uses to check out your project's source.
 
-Works against both **CircleCI Cloud and CircleCI Server** — checkout keys are served by the v2 API, which both provide.
-
-> **Not available for GitLab or GitHub App projects.** The CircleCI API only manages checkout keys for projects integrated through GitHub OAuth or Bitbucket. A project whose slug starts with `circleci/` (that is, one identified by organization and project ID rather than by repository name) is a GitLab or GitHub App project, and requests for its checkout keys are rejected.
-
 > **Creating a `user-key` requires a user API token**, not a project token. The user must also have authorized their VCS account with CircleCI first, which gives CircleCI permission to create a user key on their behalf — visit Project Settings > SSH Keys in the CircleCI web app once before applying.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Checkout keys are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `POST /api/v2/project/{project-slug}/checkout-key`, `GET` and `DELETE .../checkout-key/{fingerprint}` |
+| **Organization type** | **GitHub OAuth (`gh/<org>`) and Bitbucket Cloud (`bb/<org>`) projects only.** Not available to GitHub App, GitHub Enterprise Server, GitLab.com or GitLab self-managed projects: those check out over HTTPS and need no key, their slugs take the `circleci/<org-id>/<project-id>` form, and CircleCI rejects the request. Note a read/write asymmetry — only `POST` carries the restriction, so a `GET` on a GitLab project succeeds and returns the auto-provisioned key, which means a resource reads fine and fails only on create. |
+| **Token** | A personal API token. `type = "user-key"` additionally requires a **user** token rather than a project token — see the note above. |
 
 ## Example Usage
 

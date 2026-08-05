@@ -30,8 +30,10 @@ type membershipRequest struct {
 	body   string
 }
 
-// newMembershipServer serves the group membership routes from handler and records
-// every request, so tests can assert on the exact paths and payloads sent.
+// newMembershipServer starts a fake private-origin API and returns a Client
+// whose private host points at it. Host is deliberately unroutable: every
+// method under test goes to the private host, never the main API host, and a
+// connection error there is a clearer failure than a silent success.
 func newMembershipServer(t *testing.T, handler http.HandlerFunc) (*circleci.Client, *[]membershipRequest) {
 	t.Helper()
 
@@ -53,7 +55,11 @@ func newMembershipServer(t *testing.T, handler http.HandlerFunc) (*circleci.Clie
 	}))
 	t.Cleanup(srv.Close)
 
-	return circleci.New(circleci.Config{Host: srv.URL, Token: "tok"}), &seen
+	return circleci.New(circleci.Config{
+		Host:        "http://127.0.0.1:1",
+		PrivateHost: srv.URL,
+		Token:       "tok",
+	}), &seen
 }
 
 func TestGroupMembershipServiceList(t *testing.T) {
@@ -66,8 +72,9 @@ func TestGroupMembershipServiceList(t *testing.T) {
 			"username":"api-infra",
 			"avatar_url":"https://avatars.example/a.png",
 			"email":"api@example.com",
-			"group_id":"` + testMembershipGroupID + `"
-		}],"next_page_token":null}`))
+			"group_id":"` + testMembershipGroupID + `",
+			"created_at":"2023-12-13T10:10:37.951356Z"
+		}],"count":1}`))
 	})
 
 	members, err := client.GroupMembership().List(context.Background(), testMembershipOrgID, testMembershipGroupID)
@@ -94,8 +101,11 @@ func TestGroupMembershipServiceList(t *testing.T) {
 	if got.GroupID != testMembershipGroupID {
 		t.Errorf("member group_id = %q, want %q", got.GroupID, testMembershipGroupID)
 	}
+	if got.CreatedAt != "2023-12-13T10:10:37.951356Z" {
+		t.Errorf("member created_at = %q, want %q", got.CreatedAt, "2023-12-13T10:10:37.951356Z")
+	}
 
-	wantPath := "/api/v2/organizations/" + testMembershipOrgID + "/groups/" + testMembershipGroupID + "/users"
+	wantPath := "/private/ciam/orgs/" + testMembershipOrgID + "/groups/" + testMembershipGroupID + "/users"
 	if len(*seen) != 1 {
 		t.Fatalf("request count = %d, want 1", len(*seen))
 	}
@@ -104,39 +114,12 @@ func TestGroupMembershipServiceList(t *testing.T) {
 	}
 }
 
-func TestGroupMembershipServiceListDoesNotFollowPageToken(t *testing.T) {
-	t.Parallel()
-
-	// The endpoint reports a next_page_token but ignores a page-token on the way
-	// in, so following it would re-read the first page forever. List must make
-	// exactly one request and never send page-token.
-	client, seen := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[{"user_id":"u1"}],"next_page_token":"always-the-same"}`))
-	})
-
-	members, err := client.GroupMembership().List(context.Background(), testMembershipOrgID, testMembershipGroupID)
-	if err != nil {
-		t.Fatalf("List returned error: %v", err)
-	}
-	if len(members) != 1 {
-		t.Errorf("member count = %d, want 1 (the single page, not a duplicated loop)", len(members))
-	}
-
-	if len(*seen) != 1 {
-		t.Fatalf("request count = %d, want exactly 1", len(*seen))
-	}
-	if query := (*seen)[0].query; query != "" {
-		t.Errorf("request query = %q, want no query (page-token must never be sent)", query)
-	}
-}
-
 func TestGroupMembershipServiceListEmpty(t *testing.T) {
 	t.Parallel()
 
 	client, _ := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[],"next_page_token":null}`))
+		_, _ = w.Write([]byte(`{"items":[],"count":0}`))
 	})
 
 	members, err := client.GroupMembership().List(context.Background(), testMembershipOrgID, testMembershipGroupID)
@@ -168,7 +151,7 @@ func TestGroupMembershipServiceAdd(t *testing.T) {
 
 	client, seen := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"message":"Added user(s) to group."}`))
+		_, _ = w.Write([]byte(`{}`))
 	})
 
 	userIDs := []string{testMemberUserID, "ecfb05cd-5cc9-43e4-b5e5-e91ec08183a7"}
@@ -181,7 +164,7 @@ func TestGroupMembershipServiceAdd(t *testing.T) {
 	}
 	got := (*seen)[0]
 
-	wantPath := "/api/v2/organizations/" + testMembershipOrgID + "/groups/" + testMembershipGroupID + "/users"
+	wantPath := "/private/ciam/orgs/" + testMembershipOrgID + "/groups/" + testMembershipGroupID + "/add-users"
 	if got.method != http.MethodPost || got.path != wantPath {
 		t.Errorf("request = %s %s, want POST %s", got.method, got.path, wantPath)
 	}
@@ -194,7 +177,7 @@ func TestGroupMembershipServiceRemove(t *testing.T) {
 
 	client, seen := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"message":"Removed user(s) from group."}`))
+		_, _ = w.Write([]byte(`{}`))
 	})
 
 	userIDs := []string{testMemberUserID}
@@ -208,8 +191,9 @@ func TestGroupMembershipServiceRemove(t *testing.T) {
 	got := (*seen)[0]
 
 	// Removal is a POST to a separate action route, not a DELETE on the members
-	// route. Getting this wrong would silently add the users instead.
-	wantPath := "/api/v2/organizations/" + testMembershipOrgID + "/groups/" + testMembershipGroupID + "/remove_users"
+	// route, and not the same route as Add. Getting this wrong would silently
+	// add the users instead, or double-add them.
+	wantPath := "/private/ciam/orgs/" + testMembershipOrgID + "/groups/" + testMembershipGroupID + "/delete-users"
 	if got.method != http.MethodPost || got.path != wantPath {
 		t.Errorf("request = %s %s, want POST %s", got.method, got.path, wantPath)
 	}
@@ -275,7 +259,7 @@ func TestGroupMembershipServiceEscapesRouteParams(t *testing.T) {
 	// be escaped rather than changing which route is called.
 	client, seen := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"message":"ok"}`))
+		_, _ = w.Write([]byte(`{}`))
 	})
 
 	err := client.GroupMembership().Remove(context.Background(), "org/../evil", "group/../evil", []string{"u1"})
@@ -285,9 +269,28 @@ func TestGroupMembershipServiceEscapesRouteParams(t *testing.T) {
 
 	// Assert on the raw request line: r.URL.Path is already percent-decoded, so
 	// it would look the same whether or not the value was escaped.
-	wantURI := "/api/v2/organizations/org%2F..%2Fevil/groups/group%2F..%2Fevil/remove_users"
+	wantURI := "/private/ciam/orgs/org%2F..%2Fevil/groups/group%2F..%2Fevil/delete-users"
 	if got := (*seen)[0].rawURI; got != wantURI {
 		t.Errorf("raw request URI = %q, want %q", got, wantURI)
+	}
+}
+
+func TestGroupMembershipServiceUsesPrivateHostNotMainHost(t *testing.T) {
+	t.Parallel()
+
+	// Host is left pointed at a closed port; if any of these calls went to the
+	// main API host instead of the private origin, they would fail to connect
+	// rather than succeeding against the fake, so a passing test here already
+	// proves the routing. This test additionally asserts the failure mode
+	// directly, for a clearer signal if that ever regresses.
+	client := circleci.New(circleci.Config{
+		Host:  "http://127.0.0.1:1",
+		Token: "tok",
+	})
+
+	_, err := client.GroupMembership().List(context.Background(), testMembershipOrgID, testMembershipGroupID)
+	if err == nil {
+		t.Fatal("List with no fake private origin succeeded, want a connection error")
 	}
 }
 

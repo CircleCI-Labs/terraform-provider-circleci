@@ -29,11 +29,24 @@ const (
 	OIDCClaimTTL = "ttl"
 )
 
-// OIDCTTLPattern is the API's own pattern for a JSONDuration: one to seven
-// unit-suffixed integers with no separator, for example "1h", "90m" or "1h30m".
-// Only ms, s, m, h, d and w are accepted, so Go's own "1us" or "1.5h" are not
-// valid here even though time.ParseDuration would take them.
-var OIDCTTLPattern = regexp.MustCompile(`^([0-9]+(ms|s|m|h|d|w)){1,7}$`)
+// OIDCTTLPattern matches the ttl values the OIDC claims API actually accepts:
+// one or more unit-suffixed numbers with no separator, for example "1h", "90m"
+// or "1h30m".
+//
+// This is deliberately *not* the pattern the published OpenAPI document
+// advertises for its JSONDuration schema, which is
+// `^([0-9]+(ms|s|m|h|d|w)){1,7}$`. That pattern is not enforced anywhere and
+// does not describe what the API actually accepts: it takes exactly the
+// durations Go's time.ParseDuration takes, which has no "d" or "w" unit at all. So a documented-looking "7d" or "1w" is accepted by the schema,
+// accepted by a validator derived from the schema, and then rejected by the API
+// with 400 at apply time — the plan passes and the apply fails, which is the
+// wrong end of the pipeline for infrastructure as code.
+//
+// The units are therefore ParseDuration's: ns, us (or µs/μs), ms, s, m and h. A
+// fractional value such as "1.5h" is accepted for the same reason. Values Go
+// permits but that make no sense for a token lifetime are still excluded here —
+// a negative or unsigned-plus duration, and the digitless forms ".5h" and "1.h".
+var OIDCTTLPattern = regexp.MustCompile(`^([0-9]+(\.[0-9]+)?(ns|us|µs|μs|ms|s|m|h))+$`)
 
 // OIDCCustomClaims is the claim customization served by
 // GET /api/v2/org/{orgID}[/project/{projectID}]/oidc-custom-claims.

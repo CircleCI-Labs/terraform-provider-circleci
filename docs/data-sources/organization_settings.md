@@ -11,7 +11,13 @@ Fetches the organization-wide settings for a CircleCI organization.
 
 ## Availability
 
-**CircleCI Cloud only.** These settings are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Configuring the provider with `deployment = "server"` and using this data source reports an explicit error rather than a confusing HTTP 404.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/orgs/{org_id}/settings` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 Unlike the `circleci_organization_settings` resource, every attribute here reports the value CircleCI currently holds. A read-only view has no notion of an unmanaged toggle, so all of them are populated.
 

@@ -149,8 +149,8 @@ type InsightsWorkflowMetrics struct {
 
 // InsightsWorkflow is one workflow's summary over the reporting window.
 //
-// Name is sent as name rather than workflow_name: the v2 API renames the
-// internal config-name key to name when it converts the gRPC response to REST.
+// Name is sent as name rather than workflow_name: the API renames its internal
+// config-name key to name before responding.
 //
 // WindowStart and WindowEnd are kept as the strings the API sent (RFC 3339
 // timestamps) so they round-trip into Terraform state exactly as received.
@@ -256,7 +256,7 @@ type InsightsOrganizationData struct {
 }
 
 // InsightsProjectSummary is one project's half of the summary. The project is
-// identified by name only: the v2 API replaces the project id with its name
+// identified by name only: the API replaces the project id with its name
 // before responding.
 type InsightsProjectSummary struct {
 	ProjectName string                 `json:"project_name"`
@@ -309,8 +309,8 @@ func (s *InsightsService) ListWorkflows(
 		return nil, err
 	}
 
-	// The branch filters are kebab-case query parameters, matching the API's
-	// own parameter names rather than the snake_case of its response bodies.
+	// The branch filters are kebab-case query parameters, matching the API's own
+	// parameter names rather than the snake_case of its response bodies.
 	branchOpts := []RequestOption{OptionalQuery("branch", opts.Branch)}
 	if opts.AllBranches {
 		branchOpts = []RequestOption{Query("all-branches", "true")}
