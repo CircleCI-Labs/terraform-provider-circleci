@@ -1,5 +1,53 @@
 # CircleCI Terraform Provider
+
+> This repository is part of CircleCI Labs — solutions developed by CircleCI's field
+> engineering team based on real customer needs.
+>
+> ✅ **Created by Field Engineers @ CircleCI**
+> ✅ **Used by real CircleCI customers**
+> ❌ **NOT officially supported by CircleCI support**
+
+> [!IMPORTANT]
+> Read that third line before adopting this in production. A Terraform provider is not a
+> script you run once — it takes ownership of live CircleCI objects and records them in
+> your state file. Issues and pull requests here are handled on a best-effort basis by
+> field engineering, not by CircleCI support.
+>
+> The work here is intended for upstream contribution to
+> [`CircleCI-Public/terraform-provider-circleci`](https://github.com/CircleCI-Public/terraform-provider-circleci).
+> This notice applies to the Labs fork and should be removed if these changes land there.
+
 The CircleCI Terraform Provider enable customers to manage CircleCI projects with IaC patterns, matching the same patterns used to manage GitHub repos. For large-scale organizations, this enables automated project creation for new teams or projects.
+
+## Installing this fork
+
+> [!WARNING]
+> **The `source` address below resolves to the officially published provider, which does
+> not include the resources added here.** This fork is not published to the Terraform
+> Registry. Writing `source = "CircleCI-Public/circleci"` and running `terraform init`
+> gets you the official provider, and every resource documented here that it does not
+> implement fails with "Invalid resource type" — which reads like a typo rather than the
+> wrong provider.
+
+To use this fork, build it and point Terraform at the binary with a development override,
+in `~/.terraformrc` (or `%APPDATA%\terraform.rc` on Windows):
+
+```hcl
+provider_installation {
+  dev_overrides {
+    "CircleCI-Public/circleci" = "/Users/you/go/bin"
+  }
+  direct {}
+}
+```
+
+```sh
+go build -o "$(go env GOPATH)/bin/terraform-provider-circleci" .
+```
+
+With an override active, **do not run `terraform init`** — Terraform uses the local binary
+directly and warns on every command that the override is in effect. Dependency lock files
+are bypassed, which is why this is a development mechanism and not a distribution one.
 
 ## Usage
 The current documentation is found [here](https://registry.terraform.io/providers/CircleCI-Public/circleci/latest/docs).
