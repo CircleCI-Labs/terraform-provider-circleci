@@ -11,11 +11,13 @@ Manages a sparse set of CircleCI notification preference toggles, for the callin
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Preferences are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET` and `POST /api/v3/notification/preferences` |
+| **Organization type** | Any. |
+| **Token** | A **personal** API token. Preferences belong to the token's owner. |
 
 ## A settings resource, not a thing that gets created
 
@@ -97,3 +99,22 @@ Read-Only:
 - `section_id` (String) Unique identifier (UUID) of the preference's section, when it belongs to one; null otherwise.
 - `section_name` (String) Display name of the preference's section, when it belongs to one; null otherwise.
 - `user_configurable` (Boolean) Whether this row's `is_enabled` may be changed at all; some rows are informational only and reject a write from `updates`.
+
+
+## Import
+
+Import is supported using `user` for the calling user's own preferences:
+
+```shell
+terraform import circleci_notification_preferences.mine "user"
+```
+
+or `<org_id>/<project_id>` for a project's:
+
+```shell
+terraform import circleci_notification_preferences.example "00000000-0000-0000-0000-000000000000/11111111-1111-1111-1111-111111111111"
+```
+
+There is no single id for this resource — unlike `circleci_organization_settings`, which is keyed on one organization — because reading the matrix for the project scope needs both the organization and the project.
+
+Import sets only `scope` (and `org_id`/`project_id` for the project scope); `updates` is left unset on purpose, exactly as every toggle is on `circleci_organization_settings`. The first plan after an import therefore shows only the preference ids your configuration actually names, as an update to `updates` rather than as a diff on every row CircleCI happens to report — `preferences` needs no such allowance, since it is `Computed` and the read that follows import populates it from the API like any other attribute.

@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
@@ -17,8 +18,9 @@ import (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ datasource.DataSource              = &notificationChannelConfigsDataSource{}
-	_ datasource.DataSourceWithConfigure = &notificationChannelConfigsDataSource{}
+	_ datasource.DataSource                   = &notificationChannelConfigsDataSource{}
+	_ datasource.DataSourceWithConfigure      = &notificationChannelConfigsDataSource{}
+	_ datasource.DataSourceWithValidateConfig = &notificationChannelConfigsDataSource{}
 )
 
 // notificationChannelConfigItemModel is one entry of the channel configs list.
@@ -69,7 +71,7 @@ func (d *notificationChannelConfigsDataSource) Schema(_ context.Context, _ datas
 			"scope": schema.StringAttribute{
 				MarkdownDescription: "Whether to list the calling user's own configs (`user`) or a " +
 					"project's configs (`project`). `project_id` and `org_id` are required when this is " +
-					"`project`.",
+					"`project`; `org_id` must be omitted when this is `user` (see `org_id`).",
 				Required: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf(circleci.NotificationScopeUser, circleci.NotificationScopeProject),
@@ -82,7 +84,12 @@ func (d *notificationChannelConfigsDataSource) Schema(_ context.Context, _ datas
 			},
 			"org_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the organization the project belongs " +
-					"to. Required when `scope = \"project\"`.",
+					"to. Required when `scope = \"project\"`.\n\n" +
+					"~> **Must be omitted when `scope = \"user\"`.** CircleCI's user-scoped listing takes " +
+					"no organization parameter at all, so a value here would not be honoured -- it would " +
+					"be silently ignored, and the result would be the calling user's channel configs " +
+					"across every organization rather than just this one. That combination is rejected " +
+					"at plan time instead of being accepted and doing the wrong thing.",
 				Optional: true,
 			},
 			"channel_configs": schema.ListNestedAttribute{
@@ -133,6 +140,51 @@ func (d *notificationChannelConfigsDataSource) Schema(_ context.Context, _ datas
 			},
 		},
 	}
+}
+
+// ValidateConfig refuses org_id together with scope = "user".
+//
+// ListNotificationChannelConfigs always sends filter[org_id] when OrgID is
+// set, regardless of scope, but the service method behind
+// filter[scope]=user takes no organization argument at all: filter[org_id]
+// is neither honoured nor rejected by that path, so a practitioner asking
+// for one org's user-scoped configs would silently receive the calling
+// user's configs across every organization instead, with no error. This is
+// the only place that can be caught -- the API answers 200, not 4xx -- so it
+// is refused here, at plan time, rather than left to surprise someone
+// reading the result.
+func (d *notificationChannelConfigsDataSource) ValidateConfig(
+	ctx context.Context, req datasource.ValidateConfigRequest, resp *datasource.ValidateConfigResponse,
+) {
+	var config notificationChannelConfigsDataSourceModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if config.Scope.IsNull() || config.Scope.IsUnknown() {
+		return
+	}
+
+	if config.Scope.ValueString() != circleci.NotificationScopeUser {
+		return
+	}
+
+	if config.OrgID.IsNull() || config.OrgID.IsUnknown() || config.OrgID.ValueString() == "" {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		path.Root("org_id"),
+		"org_id is not honored for scope = \"user\"",
+		"CircleCI's user-scoped channel config listing takes no organization: filter[org_id] is "+
+			"silently ignored rather than rejected, so setting org_id here would not scope the result "+
+			"to this organization -- it would return the calling user's channel configs across every "+
+			"organization, with no error to say so.\n\nOmit org_id when scope = \"user\", or set "+
+			"scope = \"project\" (with both project_id and org_id) if you need one organization's "+
+			"configs.",
+	)
 }
 
 // Configure adds the provider configured client to the data source.

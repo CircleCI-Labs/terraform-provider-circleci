@@ -198,8 +198,17 @@ func (r *organizationSettingsResource) Schema(_ context.Context, _ resource.Sche
 			"enable_uncertified_public_orbs": toggle(
 				"Allow pipelines in this organization to use public orbs that CircleCI has not certified.",
 			),
+			// The attribute name is CircleCI's; the description is what the setting
+			// does. The API translates this key to `allow_api_trigger_with_config`
+			// before storing it, and that is the accurate name: it governs whether a
+			// pipeline may be triggered through the API with configuration supplied in
+			// the request instead of taken from the repository. It has nothing to do
+			// with a `version` pin.
 			"enable_unversioned_config": toggle(
-				"Allow pipelines to run configuration that carries no `version` pin.",
+				"Allow a pipeline to be triggered through the API with configuration supplied in the " +
+					"request, instead of only the configuration committed to the repository.\n\n" +
+					"~> Despite the name, this is not about a `version` pin. CircleCI stores it as " +
+					"`allow_api_trigger_with_config`.",
 			),
 			"is_bitbucket_workspace_member_org_member": toggle(
 				"Treat every member of the linked Bitbucket workspace as a member of this CircleCI organization.",

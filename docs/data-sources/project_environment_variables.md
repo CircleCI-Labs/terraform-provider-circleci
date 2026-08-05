@@ -15,12 +15,13 @@ one by name.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | yes |
-
-Project environment variables are served by the v2 API, which both deployments
-provide.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Project environment variables are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/project/{project-slug}/envvar` |
+| **Organization type** | Any. GitLab, GitHub App and GitHub Enterprise Server projects address the slug as `circleci/{org-id}/{project-id}`. |
+| **Token** | Any valid API token with read access to the project. |
 
 ~> **Values are masked by the API.** CircleCI never discloses an environment
 variable's value. It returns four `x` characters followed by the last four

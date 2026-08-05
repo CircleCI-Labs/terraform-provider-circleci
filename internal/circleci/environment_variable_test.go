@@ -21,9 +21,8 @@ const testEnvVarProjectSlug = "circleci/AbCdEfG/HiJkLmN"
 func TestListProjectEnvironmentVariables(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the v2 API's env-var-public-view
-	// (the CircleCI API): name, masked value, and a created_at that is
-	// null for variables predating the timestamp.
+	// The shape matches what the API actually returns: name, masked value, and
+	// a created_at that is null for variables predating the timestamp.
 	client, seen := pageListServer(t,
 		`{"items":[{"name":"API_TOKEN","value":"xxxx1234","created_at":"2023-04-14T21:20:14.000Z"}],"next_page_token":"tok-2"}`,
 		`{"items":[{"name":"ZONE","value":"xxxxst-1","created_at":null}],"next_page_token":null}`,
@@ -139,12 +138,18 @@ const testEnvVarContextID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
 func TestListContextEnvironmentVariables(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the API's the CircleCI API:
+	// The shape matches what the API actually returns:
 	// {"items": [...], "next_page_token": ...} with truncated_value rather than
 	// value, because the API never discloses the configured value.
+	// truncated_value carries the tail of the value with NO mask prefix — the
+	// API takes the last four characters, or the last floor(len/2) for a value
+	// of eight characters or fewer. This fixture used to say "xxxx3cr3",
+	// borrowing the *project* environment variable convention, which does
+	// prefix the tail with "xxxx". The two are different shapes from different
+	// routes, and a fixture in the wrong one is not evidence.
 	client, seen := pageListServer(t,
-		`{"items":[{"variable":"API_KEY","context_id":"`+testEnvVarContextID+`","truncated_value":"xxxx3cr3","created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-01-02T03:04:05.000Z"}],"next_page_token":"tok-2"}`,
-		`{"items":[{"variable":"ZONE","context_id":"`+testEnvVarContextID+`","truncated_value":"xxxxst-1","created_at":"2024-02-01T00:00:00.000Z","updated_at":"2024-02-01T00:00:00.000Z"}],"next_page_token":null}`,
+		`{"items":[{"variable":"API_KEY","context_id":"`+testEnvVarContextID+`","truncated_value":"3cr3","created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-01-02T03:04:05.000Z"}],"next_page_token":"tok-2"}`,
+		`{"items":[{"variable":"ZONE","context_id":"`+testEnvVarContextID+`","truncated_value":"st-1","created_at":"2024-02-01T00:00:00.000Z","updated_at":"2024-02-01T00:00:00.000Z"}],"next_page_token":null}`,
 	)
 
 	vars, err := client.ListContextEnvironmentVariables(context.Background(), testEnvVarContextID)
@@ -155,8 +160,8 @@ func TestListContextEnvironmentVariables(t *testing.T) {
 	if len(vars) != 2 {
 		t.Fatalf("variable count = %d, want 2 (both pages drained)", len(vars))
 	}
-	if vars[0].Variable != "API_KEY" || vars[0].TruncatedValue != "xxxx3cr3" {
-		t.Errorf("first variable = %+v, want API_KEY truncated as xxxx3cr3", vars[0])
+	if vars[0].Variable != "API_KEY" || vars[0].TruncatedValue != "3cr3" {
+		t.Errorf("first variable = %+v, want API_KEY truncated as 3cr3", vars[0])
 	}
 	if vars[0].ContextID != testEnvVarContextID {
 		t.Errorf("first variable context_id = %q, want %q", vars[0].ContextID, testEnvVarContextID)
@@ -171,6 +176,59 @@ func TestListContextEnvironmentVariables(t *testing.T) {
 	}
 	if got := (*seen)[1].query; got != "page-token=tok-2" {
 		t.Errorf("second request query = %q, want %q", got, "page-token=tok-2")
+	}
+}
+
+// TestListContextEnvironmentVariablesRepeatedPageTokenErrors covers the one
+// failure mode worse than a wrong answer: a drain that never terminates.
+//
+// This route's pagination is broken server-side. Its handler reads the page token
+// from the request's *path* parameters rather than its query string, and the route
+// declares no such path parameter, so the page-token this client sends is never
+// seen: every request is answered with the first page, and with the same
+// next_page_token. A context holding more than one page of variables (the page
+// size is fixed at 100 by the service, not by this client) therefore made the
+// naive drain re-request page one for ever, accumulating duplicates until the
+// provider ran out of memory.
+//
+// No fake in this repository could have caught that, because every one of them
+// answers with next_page_token null and so terminates on the first page whatever
+// the client does. The server below is the shape the real route has.
+//
+// The repeated token is a hard error rather than a quiet stop on purpose. The
+// remaining variables cannot be fetched through this route at all, and silently
+// returning the first page would make a data source under-report and could make a
+// resource conclude one of its variables had been deleted.
+func TestListContextEnvironmentVariablesRepeatedPageTokenErrors(t *testing.T) {
+	t.Parallel()
+
+	// Always the same page, always the same token, whatever page-token is sent.
+	client, seen := pageListServer(t,
+		`{"items":[{"variable":"API_KEY","context_id":"`+testEnvVarContextID+`","truncated_value":"3cr3",`+
+			`"created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-01-02T03:04:05.000Z"}],`+
+			`"next_page_token":"same-token"}`,
+	)
+
+	vars, err := client.ListContextEnvironmentVariables(context.Background(), testEnvVarContextID)
+	if err == nil {
+		t.Fatalf("ListContextEnvironmentVariables returned %d variables and no error against a route that "+
+			"never advances its page token; a caller has no way to know the list is incomplete", len(vars))
+	}
+	if vars != nil {
+		t.Errorf("a failed drain returned %d variables; it must return none rather than a partial list "+
+			"a caller might mistake for the whole collection", len(vars))
+	}
+	for _, want := range []string{"page token", "incomplete"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q, so it does not say why the list is short", err, want)
+		}
+	}
+
+	// Exactly two requests: the first page, then the one that proves the token is
+	// ignored. Anything more means the guard fires late, and a guard that fires
+	// late on a real API is a guard that never fires at all.
+	if len(*seen) != 2 {
+		t.Errorf("made %d requests, want 2 — the loop must stop as soon as the token repeats", len(*seen))
 	}
 }
 
@@ -197,8 +255,7 @@ func TestUpsertContextEnvironmentVariable(t *testing.T) {
 			t.Fatalf("decoding request body: %v", err)
 		}
 
-		// the API's putContextEnvVar (context_env_var_put.go) EnvVarResponse
-		// carries no value or truncated_value at all.
+		// The PUT response carries no value or truncated_value at all.
 		writeListJSON(w, `{"variable":"API_KEY","context_id":"`+testEnvVarContextID+`",`+
 			`"created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-06-01T00:00:00.000Z"}`)
 	})
@@ -274,7 +331,7 @@ func TestDeleteContextEnvironmentVariable(t *testing.T) {
 }
 
 // TestContextEnvironmentVariableMissingContextAnswers403 documents the same
-// the context-resolution step anti-enumeration behavior as context_test.go's
+// anti-enumeration behavior as context_test.go's
 // TestDeleteContextMissingAnswers403, for both mutating routes.
 func TestContextEnvironmentVariableMissingContextAnswers403(t *testing.T) {
 	t.Parallel()
@@ -331,7 +388,7 @@ func newEnvVarAPI(t *testing.T, notFoundMessage string) (*httptest.Server, func(
 		}
 
 		if r.Method == http.MethodDelete {
-			// delete-env-var-response answers 200 with
+			// The delete route answers 200 with
 			// {"message": "Environment variable deleted."}.
 			_ = json.NewEncoder(w).Encode(map[string]string{"message": "Environment variable deleted."})
 
@@ -350,10 +407,9 @@ func newEnvVarAPI(t *testing.T, notFoundMessage string) (*httptest.Server, func(
 	}
 }
 
-// The shape mirrors circle.http.api.v2.project's create-env-var-response and
-// get-env-var-response, both built from project/env-var-read-api: {name,
-// value, created_at}, with value already masked even on the create response —
-// the literal value configured is never echoed back by any route.
+// The shape matches what the API actually returns: {name, value, created_at},
+// with value already masked even on the create response — the literal value
+// configured is never echoed back by any route.
 const testEnvVarBody = `{"name":"API_TOKEN","value":"xxxx1234","created_at":"2023-04-14T21:20:14.000Z"}`
 
 func TestCreateProjectEnvironmentVariable(t *testing.T) {

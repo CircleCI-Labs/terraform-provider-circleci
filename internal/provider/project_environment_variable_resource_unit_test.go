@@ -5,6 +5,7 @@ package provider
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
@@ -111,6 +112,41 @@ func TestProjectEnvVarResourceUnit_Import(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestProjectEnvVarResourceUnit_ImportWarnsValueIsUnset proves ImportState
+// (project_environment_variable_resource.go) tells the practitioner what
+// TestProjectEnvVarResourceUnit_Import's ImportStateVerifyIgnore only
+// documents in a comment: the value cannot be read back, so it must be
+// supplied from the configuration before plan or apply can proceed.
+func TestProjectEnvVarResourceUnit_ImportWarnsValueIsUnset(t *testing.T) {
+	t.Parallel()
+
+	schema := projectEnvVarResourceSchemaForTest(t)
+	r := &projectEnvironmentVariableResource{}
+	resp := &fwresource.ImportStateResponse{
+		State: projectEnvVarResourceStateForTest(t, schema, projectEnvVarModel("", "", "")),
+	}
+
+	r.ImportState(t.Context(), fwresource.ImportStateRequest{ID: testEnvVarProjectSlug + "/" + testEnvVarName}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ImportState diagnostics: %+v", resp.Diagnostics)
+	}
+
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Fatal("ImportState produced no warning that value cannot be read back")
+	}
+
+	var sawValueWarning bool
+	for _, d := range resp.Diagnostics.Warnings() {
+		if strings.Contains(d.Summary(), "cannot be read") {
+			sawValueWarning = true
+		}
+	}
+	if !sawValueWarning {
+		t.Errorf("ImportState warnings = %+v, want one about value being unreadable", resp.Diagnostics.Warnings())
+	}
 }
 
 // TestProjectEnvVarResourceUnit_ImportRejectsMalformedID covers the guard in

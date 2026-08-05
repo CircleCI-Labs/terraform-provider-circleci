@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
@@ -517,10 +518,25 @@ resource "circleci_oidc_custom_claims" "test" {
 				PreConfig: func() {
 					api.reset("/api/v2/org/" + testOIDCOrgID + "/oidc-custom-claims")
 				},
-				// A refresh finds nothing customized and drops the resource, so the
-				// plan that follows recreates it rather than reporting no changes.
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				Config: config,
+				// A refresh finds nothing customized and drops the resource (see
+				// oidcCustomClaimsResource.Read), so the plan that follows recreates
+				// it rather than reporting no changes.
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_oidc_custom_claims.test",
+							plancheck.ResourceActionCreate,
+						),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_oidc_custom_claims.test",
+						tfjsonpath.New("ttl"),
+						knownvalue.StringExact("1h"),
+					),
+				},
 			},
 		},
 	})
@@ -552,11 +568,19 @@ resource "circleci_oidc_custom_claims" "test" {
 
 // TestOIDCCustomClaimsRejectsInvalidTTL covers the duration validator, which
 // turns an HTTP 400 into a plan-time error.
+//
+// "1d" and "1w" are the cases that matter. CircleCI's own OpenAPI document gives
+// this field the pattern `^([0-9]+(ms|s|m|h|d|w)){1,7}$`, so both look supported
+// and a validator written from the specification accepts them — but nothing
+// enforces that pattern, and the API parses the value with Go's
+// duration parser, which has no unit longer than an hour. A day or a week is a
+// completely natural token lifetime to reach for, which is what makes accepting
+// it here expensive: the plan is clean and the apply fails on the first request.
 func TestOIDCCustomClaimsRejectsInvalidTTL(t *testing.T) {
 	api := newOIDCClaimsAPI()
 	srv := newOIDCClaimsServer(t, api)
 
-	for _, ttl := range []string{"1.5h", "1", "forever"} {
+	for _, ttl := range []string{"1d", "1w", "1d12h", "1", "forever", "1y", "1 h"} {
 		t.Run(ttl, func(t *testing.T) {
 			resource.UnitTest(t, resource.TestCase{
 				ProtoV6ProviderFactories: governanceProviderFactories,
@@ -568,12 +592,48 @@ resource "circleci_oidc_custom_claims" "test" {
   ttl             = %q
 }
 `, testOIDCOrgID, ttl),
-						ExpectError: regexp.MustCompile(`(?s)must be a duration of unit-suffixed integers`),
+						ExpectError: regexp.MustCompile(`(?s)must be a duration of unit-suffixed numbers`),
 					},
 				},
 			})
 		})
 	}
+}
+
+// TestOIDCCustomClaimsAcceptsFractionalTTL is the other half of the case above.
+//
+// The validator was previously derived from the published pattern, which requires
+// integers, so "1.5h" was refused at plan time even though the API takes it — the
+// value goes to Go's duration parser, which accepts a fraction and stores the
+// result as "1h30m0s". Rejecting a value the API accepts is milder than accepting
+// one it rejects, but it is the same mistake, and a test that only checks the
+// rejections would be satisfied by reverting to the specification's pattern.
+func TestOIDCCustomClaimsAcceptsFractionalTTL(t *testing.T) {
+	api := newOIDCClaimsAPI()
+	srv := newOIDCClaimsServer(t, api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: governanceProviderConfig(srv.URL) + fmt.Sprintf(`
+resource "circleci_oidc_custom_claims" "test" {
+  organization_id = %q
+  ttl             = "1.5h"
+}
+`, testOIDCOrgID),
+				ConfigStateChecks: []statecheck.StateCheck{
+					// "1.5h", "90m" and the "1h30m0s" the API stores all compare equal,
+					// so the configured spelling survives in state.
+					statecheck.ExpectKnownValue(
+						"circleci_oidc_custom_claims.test",
+						tfjsonpath.New("ttl"),
+						knownvalue.StringExact("1.5h"),
+					),
+				},
+			},
+		},
+	})
 }
 
 func TestOIDCCustomClaimsImportIDValidation(t *testing.T) {
@@ -603,7 +663,7 @@ resource "circleci_oidc_custom_claims" "test" {
 
 // oidcNormalizeTTL reproduces the API's rewriting of a duration.
 //
-// the API formats the stored TTL with time.Duration.String(), so a
+// The API formats the stored TTL with time.Duration.String(), so a
 // request of "3h" is answered with "3h0m0s". A mock that echoed the request could
 // never surface the resulting drift.
 func oidcNormalizeTTL(ttl *string) *string {
@@ -624,7 +684,7 @@ func oidcNormalizeTTL(ttl *string) *string {
 // TestAccOIDCCustomClaimsTTLSpellingDoesNotDiff is the regression test for the
 // duration the API rewrites.
 //
-// the API formats the stored TTL with time.Duration.String(), so a
+// The API formats the stored TTL with time.Duration.String(), so a
 // configured "90m" is returned as "1h30m0s". With a plain string attribute that
 // produced "Provider produced inconsistent result after apply" on create and a
 // diff on every plan afterwards. durationValue compares the two as durations.

@@ -85,6 +85,11 @@ func (d *orbsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, r
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Lists CircleCI orbs, optionally scoped to a namespace, a name, a " +
 			"visibility or the certified set. Every page of results is fetched.\n\n" +
+			"~> **The filters are not additive, and the API's precedence is not obvious.** `name` " +
+			"overrides everything else; `visibility` is read only alongside `namespace_id`, where " +
+			"it selects public-only or private-only rather than widening the set; `certified` is " +
+			"read only when neither `name` nor `namespace_id` is set. Each attribute below says so " +
+			"for itself.\n\n" +
 			"~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI " +
 			"Server does not route.",
 		Attributes: map[string]schema.Attribute{
@@ -94,18 +99,26 @@ func (d *orbsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, r
 			},
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Only return orbs matching this fully qualified " +
-					"`<namespace>/<orb>` name.",
+					"`<namespace>/<orb>` name.\n\n" +
+					"This is an exact lookup that the API serves on its own, so setting it makes " +
+					"`namespace_id`, `certified` and `visibility` have no effect. It does find a " +
+					"private orb without being asked to.",
 				Optional: true,
 			},
 			"certified": schema.BoolAttribute{
-				MarkdownDescription: "Set to `true` to return only CircleCI-certified orbs, or " +
-					"`false` to exclude them. Omit to let the API decide, which is not the same " +
-					"as `false`.",
+				MarkdownDescription: "Set to `true` to return only CircleCI-certified orbs.\n\n" +
+					"The API reads `false` as \"no certification filter\", exactly as if the " +
+					"attribute were omitted, so it cannot be used to *exclude* certified orbs. It " +
+					"is also ignored when `namespace_id` or `name` is set.",
 				Optional: true,
 			},
 			"visibility": schema.StringAttribute{
-				MarkdownDescription: "Restrict the listing to `public` or `private` orbs. " +
-					"Private orbs are not returned unless asked for.",
+				MarkdownDescription: "Restrict the listing to `public` or `private` orbs.\n\n" +
+					"~> This is only honoured together with `namespace_id`, and it *selects* one " +
+					"set rather than widening the other: a namespace listing returns public orbs " +
+					"only, unless `visibility = \"private\"` makes it return private orbs only. " +
+					"There is no single request that returns both. Set without `namespace_id` it " +
+					"has no effect at all.",
 				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf(circleci.OrbVisibilityPublic, circleci.OrbVisibilityPrivate),
@@ -206,8 +219,9 @@ func (d *orbsDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
 		Visibility:  config.Visibility.ValueString(),
 	}
 	if !config.Certified.IsNull() && !config.Certified.IsUnknown() {
-		// A pointer, because omitting filter[certified] is not the same request as
-		// asking for filter[certified]=false.
+		// Sent as configured even though the API treats false as "no filter", so
+		// that the request reflects the configuration rather than the client's
+		// opinion of it. See ListOrbPackagesOptions.Certified.
 		certified := config.Certified.ValueBool()
 		opts.Certified = &certified
 	}

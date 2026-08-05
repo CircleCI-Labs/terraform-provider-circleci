@@ -28,9 +28,10 @@ var checkoutKeyProjectSlugPattern = regexp.MustCompile(`^[^/]+/[^/]+/[^/]+$`)
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &checkoutKeyResource{}
-	_ resource.ResourceWithConfigure   = &checkoutKeyResource{}
-	_ resource.ResourceWithImportState = &checkoutKeyResource{}
+	_ resource.Resource                     = &checkoutKeyResource{}
+	_ resource.ResourceWithConfigure        = &checkoutKeyResource{}
+	_ resource.ResourceWithImportState      = &checkoutKeyResource{}
+	_ resource.ResourceWithConfigValidators = &checkoutKeyResource{}
 )
 
 // checkoutKeyResourceModel maps the resource schema.
@@ -68,11 +69,19 @@ func (r *checkoutKeyResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"your project's source. Available on CircleCI Cloud and CircleCI Server.\n\n" +
 			"Checkout keys have no update endpoint, so every configurable attribute forces a new resource. " +
 			"Creating a key never returns its private half, and a replacement gets a new fingerprint.\n\n" +
-			"~> **Not available for GitLab or GitHub App projects.** The CircleCI API only manages checkout " +
-			"keys for projects integrated through GitHub OAuth or Bitbucket. Requests for a GitLab or " +
-			"GitHub App project (that is, a project whose slug starts with `circleci/`) are rejected.\n\n" +
+			"Three conditions make checkout keys unavailable for a project. Only the first is checked here, " +
+			"at plan time, because it is the only one this provider can know without asking the API:\n\n" +
+			"~> **Not available for GitHub App, GitLab or standalone projects.** The API answers " +
+			"`400 This API is not supported for this project.` for any project whose slug starts with " +
+			"`circleci/` — that prefix covers all three integration types. This configuration is rejected " +
+			"before anything is sent, with a diagnostic naming the reason, rather than surfacing that message " +
+			"at apply.\n\n" +
+			"~> **Not available when the organization disables user keys.** This is an organization-level " +
+			"setting this provider has no route to read, so it is left to the API: creating a checkout key " +
+			"for such an organization fails at apply with a 400.\n\n" +
 			"~> **Creating a `user-key` requires a user API token**, not a project token, and the user must " +
-			"have authorized their VCS account with CircleCI first (Project Settings > SSH Keys).",
+			"have authorized their VCS account with CircleCI first (Project Settings > SSH Keys). A project " +
+			"token fails at apply with a 403.",
 		Attributes: map[string]schema.Attribute{
 			"project_slug": schema.StringAttribute{
 				MarkdownDescription: "The project slug in the format `vcs-type/org-name/repo-name`, " +
@@ -136,6 +145,65 @@ func (r *checkoutKeyResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 		},
 	}
+}
+
+// ConfigValidators returns the cross-attribute checks that run at validate and
+// plan time, before anything is written.
+func (r *checkoutKeyResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		standaloneSlugRejectsCheckoutKeyValidator{},
+	}
+}
+
+// standaloneSlugRejectsCheckoutKeyValidator rejects a circleci/-prefixed
+// project_slug at plan time.
+//
+// That prefix is shared by every GitHub App, GitLab and standalone project, and
+// the checkout keys API answers all three with the same
+// 400 "This API is not supported for this project." The slug shape is known from
+// configuration alone, so there is no need to reach the API to catch this one —
+// unlike the other two ways a checkout key create can fail (the organization
+// disabling user keys, and a user-key created with a project rather than a user
+// token), which cannot be determined without asking it.
+type standaloneSlugRejectsCheckoutKeyValidator struct{}
+
+func (standaloneSlugRejectsCheckoutKeyValidator) Description(_ context.Context) string {
+	return "project_slug must not start with circleci/: checkout keys are only available for GitHub OAuth and Bitbucket Cloud projects"
+}
+
+func (v standaloneSlugRejectsCheckoutKeyValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (standaloneSlugRejectsCheckoutKeyValidator) ValidateResource(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var slug types.String
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("project_slug"), &slug)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if slug.IsNull() || slug.IsUnknown() {
+		return
+	}
+
+	if !strings.HasPrefix(slug.ValueString(), "circleci/") {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		path.Root("project_slug"),
+		"Checkout keys are not available for this project",
+		fmt.Sprintf(
+			"project_slug %q starts with \"circleci/\", which is the prefix every GitHub App, GitLab and "+
+				"standalone project slug shares. CircleCI's checkout keys API rejects all three with "+
+				"400 \"This API is not supported for this project.\" — it only manages checkout keys for "+
+				"projects integrated through GitHub OAuth or Bitbucket Cloud.\n\n"+
+				"This is a property of the project's VCS integration, not something Terraform or this "+
+				"provider can change.",
+			slug.ValueString(),
+		),
+	)
 }
 
 // Create creates the resource and sets the initial Terraform state.

@@ -21,7 +21,7 @@ import (
 // newMockGitHubAppInstallationAPI serves
 // GET /api/v2/github-app/organization/{org_id}/installation. installed
 // controls whether it answers 200 with the fixture below or 404, so tests can
-// exercise both of the API's "installed"/"not installed" cases.
+// exercise both the "installed" and "not installed" cases the route has.
 func newMockGitHubAppInstallationAPI(t *testing.T, installed bool) string {
 	t.Helper()
 

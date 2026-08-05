@@ -157,7 +157,8 @@ func TestAccOrganizationDataSourceRequiresExactlyOneIdentifier(t *testing.T) {
 	}
 }
 
-// TestAccContextDataSourceByName covers issue #118.
+// TestAccContextDataSourceByName covers
+// CircleCI-Public/terraform-provider-circleci#118.
 //
 // The API has no lookup-by-name route, so the provider lists the organization's
 // contexts and matches exactly. Names are unique within an organization, which is

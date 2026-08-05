@@ -273,23 +273,6 @@ func orgIDDataSourceCases() map[string]orgIDDataSourceCase {
 			},
 		},
 
-		"circleci_group_membership": {
-			payload: "user_ids",
-			setup: func(t *testing.T) orgIDDataSourceFixture {
-				api, host := newMockMembershipAPI(t)
-				api.seedMembers(testUserA, testUserB)
-
-				return orgIDDataSourceFixture{
-					providerConfig: testAccMembershipProviderConfig(host, "cloud"),
-					orgID:          testMembershipOrgID,
-					block: orgIDDataSourceBlock(
-						"circleci_group_membership",
-						fmt.Sprintf("  group_id = %q", testMembershipGroupID),
-					),
-				}
-			},
-		},
-
 		// The iOS signing fake answers an unfiltered listing with everything it
 		// holds, so the only certificate it holds belongs to another
 		// organization: a listing that lost the organization reports it, and the

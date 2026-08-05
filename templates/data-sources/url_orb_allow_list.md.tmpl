@@ -11,7 +11,13 @@ Fetches every entry in a CircleCI organization's URL orb allow list.
 
 ## Availability
 
-**Available on CircleCI Cloud and CircleCI Server.** This data source uses the CircleCI v2 API, which both serve, so it works regardless of the provider's `deployment` setting.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Settled by route ownership, not by API version: `url-orb-allow-list` isn't proxied to a separate backend at all — CircleCI serves it directly, storing the allow list on the organization document, and a Server installation's gateway forwards this route by default. Being v2 is not evidence on its own — some v2 routes are forwarded by a Server installation's gateway and others are not: `circleci_pipeline_definition` is also v2 and unavailable, because *its* routes go to a backend Server does not forward to. Nothing gates this data source. |
+| **API** | `GET /api/v2/organization/{org_id}/url-orb-allow-list` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 Related organization settings: `enable_private_orbs`, `enable_certified_public_orbs` and `enable_uncertified_public_orbs` on the `circleci_organization_settings` data source report which registry orbs an organization may use. They are separate from this allow list, which covers orbs fetched from a URL.
 

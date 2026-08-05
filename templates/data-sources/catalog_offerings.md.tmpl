@@ -25,6 +25,8 @@ The practical use is validating a `resource_class` string before an apply, rathe
 
 ~> **What you see depends on the token's organization entitlements.** A resource class present for one organization may be absent for another — macOS and Windows are the obvious cases, and both appear as empty maps when the organization has no entitlement for them. A check against this data source is therefore only meaningful when the provider is configured with a token for the organization the jobs will actually run in.
 
+The route itself takes no arguments at all — no organization, no filter, no page cursor — which is why this data source has none either. The scoping comes entirely from the token. It is also a single entity rather than a collection: there is nothing to paginate, and one request always returns the whole catalog.
+
 ## Deprecated classes
 
 `deprecated` lists resource classes that still run but are scheduled for removal. An organization with `enable_resource_class_brownouts` set (see `circleci_organization_settings`) will see jobs on these classes fail during a brownout window, so treat anything listed there as needing migration.

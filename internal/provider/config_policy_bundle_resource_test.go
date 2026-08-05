@@ -15,6 +15,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
@@ -368,9 +369,28 @@ func TestAccConfigPolicyBundleEmptiedOutsideTerraform(t *testing.T) {
 		Steps: []resource.TestStep{
 			{Config: config},
 			{
-				PreConfig:          func() { api.emptyBundle("config") },
-				RefreshState:       true,
-				ExpectNonEmptyPlan: true,
+				// Read treats an emptied bundle as gone and drops it from state (see
+				// configPolicyBundleResource.Read), so the plan that follows recreates
+				// it rather than reporting no changes.
+				PreConfig: func() { api.emptyBundle("config") },
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_config_policy_bundle.test",
+							plancheck.ResourceActionCreate,
+						),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_config_policy_bundle.test",
+						tfjsonpath.New("policies"),
+						knownvalue.MapExact(map[string]knownvalue.Check{
+							"a.rego": knownvalue.StringExact("package org.a"),
+						}),
+					),
+				},
 			},
 		},
 	})
@@ -382,10 +402,10 @@ func TestAccConfigPolicyBundleEmptiedOutsideTerraform(t *testing.T) {
 func TestAccConfigPolicyBundleCustomContext(t *testing.T) {
 	t.Parallel()
 
-	// CircleCI documents a "custom" policy context, but every the API route
-	// validates its context with validation.In(internal.Config) and rejects
-	// anything else with a 400. Offering it in the schema invited a failure at
-	// apply, so the validator refuses it at plan time instead.
+	// CircleCI documents a "custom" policy context, but the API rejects
+	// anything other than the values it actually accepts with a 400.
+	// Offering it in the schema invited a failure at apply, so the validator
+	// refuses it at plan time instead.
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{{

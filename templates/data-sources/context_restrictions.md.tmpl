@@ -14,11 +14,13 @@ conditions may use a context. Manage one with
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | yes |
-
-Context restrictions are served by the v2 API, which both deployments provide.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Contexts are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/context/{context_id}/restrictions` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the context's organization. |
 
 -> **An empty list is a meaningful answer** An unrestricted context is usable by
 every project in the organization. `restrictions` is empty in that case rather

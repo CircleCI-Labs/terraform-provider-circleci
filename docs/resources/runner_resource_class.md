@@ -76,7 +76,7 @@ output "builders_resource_class_id" {
 
 ### Optional
 
-- `description` (String) Description of the runner resource class.
+- `description` (String) Description of the runner resource class. Changing this value forces a new resource to be created: the runner API has no update route for a resource class at all (see CreateResourceClass and DeleteResourceClass in internal/circleci/runner.go — there is no method between them), so without this modifier an edited description planned an in-place update, Update() had nothing to call and silently persisted the plan into state, and the next Read then overwrote it back to the API's unchanged value — reporting apply success while changing nothing.
 - `force_delete` (Boolean) If true, deletes the resource class even if it has associated tokens.
 - `org_id` (String) The unique identifier (UUID) of the organization that owns this runner resource class.
 
@@ -97,4 +97,4 @@ Import is supported using the resource class name in `namespace/name` format:
 terraform import circleci_runner_resource_class.example "my-namespace/my-runner"
 ```
 
-After import, Terraform will call the API to populate the full state. Note that `organization_id` is resolved from the resource class during the subsequent read.
+After import, Terraform calls the API to populate `id` and `description`. `organization_id`/`org_id` are **not** resolved this way and stay null: the runner API's resource class representation carries no organization field for a read to recover one from (the import ID is the resource class string alone, with no organization in it either). Supplying an organization in your configuration after import is a genuine, real one-time change — an in-place update, not a replacement, since this resource does not force replacement on an organization change — and it settles after the first apply. `force_delete` is also left null; it is delete-only behavior the API never reports, so nothing to resolve exists for it at all.

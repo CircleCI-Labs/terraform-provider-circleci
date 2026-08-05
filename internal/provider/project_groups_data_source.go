@@ -102,6 +102,10 @@ func (d *projectGroupsDataSource) ConfigValidators(_ context.Context) []datasour
 
 // Read lists the groups granted a role on the project.
 func (d *projectGroupsDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
+	if !requireStandaloneCapable(d.client, "circleci_project_groups", &resp.Diagnostics) {
+		return
+	}
+
 	var state projectGroupsDataSourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {

@@ -12,10 +12,7 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// The response body below is the shape production sends, taken from the
-// "installation" schema in the API's
-// openapi_definitions/v2_endpoints/github_app/schemas.yaml and confirmed
-// against the CircleCI API's fixture.
+// The response body below is the shape production sends.
 const testGitHubAppInstallationBody = `{
   "id": 12345678,
   "target_type": "Organization",
@@ -64,9 +61,7 @@ func TestGitHubAppGetInstallation(t *testing.T) {
 
 // TestGitHubAppGetInstallationNotFound confirms a missing installation
 // answers an ordinary 404 (IsNotFound), rather than the 403 anti-enumeration
-// pattern circleci_group uses for a missing group. Confirmed against
-// the API's "404 response when the GitHub App is not installed" case,
-// which asserts ExpectedResponseCode: http.StatusNotFound.
+// pattern circleci_group uses for a missing group.
 func TestGitHubAppGetInstallationNotFound(t *testing.T) {
 	t.Parallel()
 

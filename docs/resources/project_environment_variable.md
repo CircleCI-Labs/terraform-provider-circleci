@@ -74,4 +74,6 @@ Import is supported using `project_slug/env_var_name`:
 terraform import circleci_project_environment_variable.example "github/my-org/my-repo/MY_SECRET"
 ```
 
-After import, run `terraform plan` to verify state. The API has no update route, so any change to `value`, `value_wo_version`, `name`, or `project_slug` destroys and recreates the resource.
+`project_slug` and `name` are the only attributes import can populate. `value` cannot come along: CircleCI never returns a project environment variable's value on any route, so it stays unset after import — there is no read that could fill it in. Set it in your configuration, as `value` or as `value_wo` plus `value_wo_version`, before running `terraform plan`; the resource requires exactly one of the two, so a generated configuration that names neither fails validation rather than applying.
+
+Because the API has no update route, any subsequent change to `value`, `value_wo_version`, `name`, or `project_slug` destroys and recreates the resource — including the first apply after import, if the value your configuration sets does not match the secret actually stored, since there is no read to catch the mismatch before it overwrites the variable. Source the value from wherever the real secret already lives (a secret manager, through `value_wo`) rather than retyping it by hand.

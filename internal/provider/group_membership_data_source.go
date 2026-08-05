@@ -64,10 +64,10 @@ func (d *groupMembershipDataSource) Schema(_ context.Context, _ datasource.Schem
 			"organization: the API documents group creation as supported only for standalone " +
 			"organizations, and a CircleCI Server installation is always a `github` type " +
 			"organization.\n\n" +
-			"~> **Only the first page of members is returned.** The endpoint reports a next page token " +
-			"but ignores one on the way in, so later pages cannot be requested.\n\n" +
-			"~> **These endpoints are not part of the published CircleCI OpenAPI specification** and may " +
-			"change without notice.",
+			"~> **This data source is backed by a private, unofficial CircleCI API** with no published " +
+			"specification: the same route the CircleCI web app's own group management UI calls, not " +
+			"anything in the public OpenAPI spec. It may change without notice, and is only reachable " +
+			"on CircleCI Cloud — a Server installation's gateway does not route it at all.",
 		Attributes: map[string]schema.Attribute{
 			// See org_id_deprecation.go for why the organization is accepted under
 			// two names.

@@ -51,8 +51,13 @@ type OrganizationSettings struct {
 	// EnableUncertifiedPublicOrbs allows use of public orbs CircleCI has not
 	// certified.
 	EnableUncertifiedPublicOrbs *bool `json:"enable_uncertified_public_orbs,omitempty"`
-	// EnableUnversionedConfig allows pipelines to run configuration that carries
-	// no version pin.
+	// EnableUnversionedConfig allows a pipeline to be triggered through the API
+	// with configuration supplied in the request, rather than only the
+	// configuration committed to the repository.
+	//
+	// The v3 name is misleading and the underlying name is the accurate one: this
+	// key is translated to allow_api_trigger_with_config on the way to the service
+	// that stores it. It is not about unpinned config versions.
 	EnableUnversionedConfig *bool `json:"enable_unversioned_config,omitempty"`
 	// IsBitbucketWorkspaceMemberOrgMember treats every member of the linked
 	// Bitbucket workspace as a member of the CircleCI organization.

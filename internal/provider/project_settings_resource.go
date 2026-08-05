@@ -199,8 +199,9 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages the advanced settings of an existing CircleCI project.\n\n" +
-			"Works against both CircleCI Cloud and CircleCI Server, because project settings are " +
-			"served by the v2 API on both.\n\n" +
+			"Available on CircleCI Cloud and CircleCI Server. Note that individual toggles are not " +
+			"uniformly available across VCS integrations — see the compatibility matrix in the " +
+			"README.\n\n" +
 			"Use this rather than `circleci_project` when the project already exists: " +
 			"`circleci_project` creates a project and owns its settings, whereas this resource " +
 			"adopts the settings of a project it did not create. Do not manage the same project " +
@@ -280,9 +281,13 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 			// unchanged. TestListToSetNeedsNoStateUpgrade proves it.
 			"pr_only_branch_overrides": schema.SetAttribute{
 				MarkdownDescription: "Branches that always trigger a build, even when `build_prs_only` is enabled. " +
-					"The set replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. " +
+					"The set replaces whatever CircleCI currently holds. " +
 					"Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches. " +
-					"Order is not significant: CircleCI does not preserve the order branches are sent in.",
+					"Order is not significant: CircleCI does not preserve the order branches are sent in.\n\n" +
+					"~> **Cannot be cleared.** Setting this to `[]` is rejected at plan time. CircleCI's API " +
+					"accepts an empty list with HTTP 200 but silently leaves the existing branches in place, so " +
+					"there is no way to clear the list through this route. Remove the attribute from the " +
+					"configuration instead: that stops managing it and leaves the existing branches as they are.",
 				Optional:    true,
 				ElementType: types.StringType,
 			},
@@ -295,6 +300,7 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 func (r *projectSettingsResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		explicitForkSecretsValidator{},
+		noClearingBranchOverridesValidator{},
 	}
 }
 
@@ -550,6 +556,66 @@ func addUnconfiguredClientError(diags *diag.Diagnostics) {
 	)
 }
 
+// noClearingBranchOverridesValidator rejects
+// pr_only_branch_overrides = [] at plan time. It is shared by circleci_project
+// and circleci_project_settings, which expose the same attribute.
+//
+// The API cannot honour that write: sending an empty list answers HTTP 200 and
+// silently keeps whatever branches were already configured, because the service
+// fronting this route drops a zero-length list via `omitempty` on its way to the
+// v1.1 body it forwards. UpdateProjectSettings
+// (internal/circleci/project_settings.go) already turns that mismatch into
+// ErrCannotClearBranchOverrides after the fact, which is enough to stop bad state
+// being written but still lets the practitioner reach apply before finding out —
+// where Terraform's own error names no attribute
+// ("Provider produced inconsistent result after apply"). Rejecting the
+// configuration before anything is sent turns that into a diagnostic that says
+// what is wrong and what to do instead.
+type noClearingBranchOverridesValidator struct{}
+
+func (noClearingBranchOverridesValidator) Description(_ context.Context) string {
+	return "pr_only_branch_overrides cannot be cleared by setting it to an empty list; CircleCI's API " +
+		"accepts the write and silently ignores it"
+}
+
+func (v noClearingBranchOverridesValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (noClearingBranchOverridesValidator) ValidateResource(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var overrides types.Set
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("pr_only_branch_overrides"), &overrides)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Null (attribute omitted) and unknown (value not yet resolved) are both fine:
+	// the first means "leave the existing branches alone", which is the only way
+	// this API can express "don't touch it", and the second cannot be judged yet.
+	if overrides.IsNull() || overrides.IsUnknown() {
+		return
+	}
+
+	if len(overrides.Elements()) > 0 {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		path.Root("pr_only_branch_overrides"),
+		"Cannot clear pr_only_branch_overrides",
+		"CircleCI's project settings API does not support clearing pr_only_branch_overrides this way: "+
+			"sending an empty list is accepted with HTTP 200, but the request is silently dropped before "+
+			"it reaches the setting itself, so the branches already configured stay in force. Terraform "+
+			"would then see the API report the very branches this configuration asked to remove — a "+
+			"contradiction that surfaces at apply as an opaque \"Provider produced inconsistent result "+
+			"after apply\" naming no attribute, rather than as this diagnostic.\n\n"+
+			"Remove pr_only_branch_overrides from the configuration instead. That stops managing the "+
+			"attribute and leaves the branches CircleCI already has in place, which is the closest any "+
+			"request to this API can get to clearing the list.",
+	)
+}
+
 // explicitForkSecretsValidator requires forks_receive_secret_env_vars to be set
 // explicitly whenever build_fork_prs is enabled. It is shared by
 // circleci_project and circleci_project_settings, which expose the same pair of
@@ -557,10 +623,10 @@ func addUnconfiguredClientError(diags *diag.Diagnostics) {
 //
 // Leaving an unset setting out of the request is the right Terraform semantic and
 // is what both resources now do — but it makes CircleCI's own default apply, and
-// forks_receive_secret_env_vars defaults to *true* on a private project
-// CircleCI's own default)) in the API's feature registry).
-// So a configuration that enables fork builds without mentioning it hands the
-// project's secrets to anyone who can open a pull request, silently.
+// forks_receive_secret_env_vars defaults to *true* on a private project and to
+// *false* on a public one. So a configuration that enables fork builds without
+// mentioning it hands the project's secrets to anyone who can open a pull
+// request, silently.
 //
 // The check is deliberately narrow: CircleCI only exposes secrets to a fork build
 // when both settings are on, so it fires only for that combination rather than

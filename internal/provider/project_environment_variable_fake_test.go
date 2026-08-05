@@ -18,8 +18,7 @@ import (
 //
 // The field key is "created_at" (underscore), matching
 // internal/circleci/environment_variable.go's ProjectEnvironmentVariable and
-// the production shape confirmed against the API's env-var-public-view
-// (the CircleCI API). An earlier revision of this fake sent the
+// the production shape. An earlier revision of this fake sent the
 // hyphenated "created-at" that the old vendored client library's own (wrongly
 // tagged) environment-variable type decoded, which meant the real API's
 // created_at was silently dropped whatever that library reported — that
@@ -122,10 +121,9 @@ func (a *fakeEnvVarAPI) handleCreate(w http.ResponseWriter, r *http.Request, slu
 	a.vars[slug][body.Name] = fakeEnvVar{value: body.Value, createdAt: "2024-01-02T03:04:05.000Z"}
 	a.mu.Unlock()
 
-	// Matches create-env-var-response (the CircleCI API): even
-	// the create response's value comes back through env-var-read-api, i.e.
-	// already masked. No route ever discloses the literal value, not even the
-	// one that just set it.
+	// Even the create response's value comes back masked, the same as a
+	// read. No route ever discloses the literal value, not even the one
+	// that just set it.
 	a.write(w, http.StatusCreated, map[string]any{
 		"name":       body.Name,
 		"value":      maskEnvVarValue(body.Value),
@@ -156,7 +154,14 @@ func (a *fakeEnvVarAPI) handleGet(w http.ResponseWriter, slug, name string) {
 		return
 	}
 
-	body := map[string]any{"name": name, "value": maskEnvVarValue(v.value)}
+	// created_at is always present and null when unrecorded, never absent. The
+	// API builds the response with the key unconditionally, so "no timestamp"
+	// is a null value rather than a missing key. This fake used to omit the
+	// key instead, which decodes to the same "" in Go and so hid nothing —
+	// but a fake that models a different shape from the service is one
+	// refactor away from hiding something, and plural_fake_test.go's
+	// seedEnvVar already had it right.
+	body := map[string]any{"name": name, "value": maskEnvVarValue(v.value), "created_at": nil}
 	if v.createdAt != "" {
 		body["created_at"] = v.createdAt
 	}
@@ -175,7 +180,7 @@ func (a *fakeEnvVarAPI) handleDelete(w http.ResponseWriter, slug, name string) {
 	}
 
 	delete(a.vars[slug], name)
-	a.write(w, http.StatusOK, map[string]any{"message": "ok"})
+	a.write(w, http.StatusOK, map[string]any{"message": "Environment variable deleted."})
 }
 
 func (a *fakeEnvVarAPI) write(w http.ResponseWriter, status int, body any) {
@@ -185,14 +190,24 @@ func (a *fakeEnvVarAPI) write(w http.ResponseWriter, status int, body any) {
 	}
 }
 
-// maskEnvVarValue mirrors the real API: four "x" characters followed by the
-// last four characters of the real value (internal/circleci/environment_variable.go).
+// maskEnvVarValue mirrors how the API masks a value: four "x" characters
+// followed by *up to* the last four characters of the real value.
+//
+// The tail is min(4, len/2) characters, rounded down — not a flat four. So a
+// five-character value reveals two ("xxxxue" for "value") and a one-character
+// value reveals none. This fake used to reveal four whenever the value was
+// longer than four, which is right for anything eight characters or longer and
+// wrong for the five-to-seven range. Nothing asserts on the mask for a value in
+// that range today, so it hid nothing; it is corrected because a fake that
+// invents its own masking rule is not evidence about the API's.
+//
+// Note that a context environment variable's truncated_value is a DIFFERENT
+// shape — the same tail with no "xxxx" prefix, from a different service. See
+// truncateContextEnvVarValue in context_fake_test.go.
 func maskEnvVarValue(value string) string {
-	if len(value) <= 4 {
-		return "xxxx"
-	}
+	revealed := min(4, len(value)/2)
 
-	return "xxxx" + value[len(value)-4:]
+	return "xxxx" + value[len(value)-revealed:]
 }
 
 // seed adds an environment variable directly, bypassing Create, for tests

@@ -31,11 +31,19 @@ type triggerDataSourceModel struct {
 	EventSourceProvider                 types.String `tfsdk:"event_source_provider"`
 	EventSourceRepositoryName           types.String `tfsdk:"event_source_repository_name"`
 	EventSourceRepositoryExternalId     types.String `tfsdk:"event_source_repository_external_id"`
-	EventSourceWebHookUrl               types.String `tfsdk:"event_source_webhook_url"`
+	EventSourceWebhookURL               types.String `tfsdk:"event_source_webhook_url"`
 	EventSourceScheduleCronExpression   types.String `tfsdk:"event_source_schedule_cron_expression"`
 	EventSourceScheduleAttributionActor types.String `tfsdk:"event_source_schedule_attribution_actor"`
 	Disabled                            types.Bool   `tfsdk:"disabled"`
 	Parameters                          types.Map    `tfsdk:"parameters"`
+
+	// The three attributes below carry the same values as
+	// EventSourceRepositoryName, EventSourceRepositoryExternalId and
+	// EventSourceWebhookURL, spelled the way `circleci_trigger` (the resource)
+	// spells them. See trigger_event_source_spelling.go.
+	EventSourceRepoFullName   types.String `tfsdk:"event_source_repo_full_name"`
+	EventSourceRepoExternalId types.String `tfsdk:"event_source_repo_external_id"`
+	EventSourceWebHookURL     types.String `tfsdk:"event_source_web_hook_url"`
 }
 
 // NewTriggerDataSource is a helper function to simplify the provider implementation.
@@ -55,6 +63,20 @@ func (d *TriggerDataSource) Metadata(_ context.Context, req datasource.MetadataR
 
 // Schema defines the schema for the data source.
 func (d *TriggerDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	// See trigger_event_source_spelling.go for why each of these comes in a
+	// deprecated/current pair.
+	//
+	// Both spellings of the webhook URL come from the shared builder, which marks
+	// them Sensitive. This attribute used to be declared by hand here without that
+	// flag, which meant the deprecated spelling printed a live credential in
+	// `terraform plan` output — the URL carries its authenticating secret as a query
+	// parameter — while the identical value under the current spelling was
+	// suppressed. Marking it Sensitive is not a breaking change: it suppresses
+	// console and log output and does not alter what is stored in state.
+	eventSourceRepoFullNameDeprecatedAttr, eventSourceRepoFullNameCurrentAttr := eventSourceRepoFullNameAttributes()
+	eventSourceRepoExternalIDDeprecatedAttr, eventSourceRepoExternalIDCurrentAttr := eventSourceRepoExternalIDAttributes()
+	eventSourceWebhookURLDeprecatedAttr, eventSourceWebHookURLCurrentAttr := eventSourceWebhookURLAttributes()
+
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches information about a CircleCI pipeline trigger.\n\n" +
 			"!> **CircleCI Cloud only.** Triggers live under `/api/v2` but are served by the public API " +
@@ -92,18 +114,14 @@ func (d *TriggerDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 				MarkdownDescription: "The event source provider (e.g., `github_app`, `webhook`, `schedule`).",
 				Computed:            true,
 			},
-			"event_source_repository_name": schema.StringAttribute{
-				MarkdownDescription: "The full name of the event source repository.",
-				Computed:            true,
-			},
-			"event_source_repository_external_id": schema.StringAttribute{
-				MarkdownDescription: "The external ID of the event source repository.",
-				Computed:            true,
-			},
-			"event_source_webhook_url": schema.StringAttribute{
-				MarkdownDescription: "The webhook URL for webhook-based triggers.",
-				Computed:            true,
-			},
+			"event_source_repository_name": eventSourceRepoFullNameDeprecatedAttr,
+			"event_source_repo_full_name":  eventSourceRepoFullNameCurrentAttr,
+
+			"event_source_repository_external_id": eventSourceRepoExternalIDDeprecatedAttr,
+			"event_source_repo_external_id":       eventSourceRepoExternalIDCurrentAttr,
+
+			"event_source_webhook_url":  eventSourceWebhookURLDeprecatedAttr,
+			"event_source_web_hook_url": eventSourceWebHookURLCurrentAttr,
 			"event_source_schedule_cron_expression": schema.StringAttribute{
 				MarkdownDescription: "The cron expression for scheduled triggers.",
 				Computed:            true,
@@ -184,10 +202,15 @@ func (d *TriggerDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		EventSourceProvider:                 types.StringValue(retrievedTrigger.EventSource.Provider),
 		EventSourceRepositoryName:           types.StringValue(retrievedTrigger.EventSource.Repo.FullName),
 		EventSourceRepositoryExternalId:     types.StringValue(retrievedTrigger.EventSource.Repo.ExternalID),
-		EventSourceWebHookUrl:               types.StringValue(retrievedTrigger.EventSource.Webhook.URL),
+		EventSourceWebhookURL:               types.StringValue(retrievedTrigger.EventSource.Webhook.URL),
 		EventSourceScheduleCronExpression:   types.StringValue(retrievedTrigger.EventSource.Schedule.CronExpression),
 		EventSourceScheduleAttributionActor: types.StringValue(retrievedTrigger.EventSource.Schedule.AttributionActor.ID),
-		Parameters:                          parameters,
+		// Same values as the three deprecated attributes above, spelled the way
+		// `circleci_trigger` (the resource) spells them.
+		EventSourceRepoFullName:   types.StringValue(retrievedTrigger.EventSource.Repo.FullName),
+		EventSourceRepoExternalId: types.StringValue(retrievedTrigger.EventSource.Repo.ExternalID),
+		EventSourceWebHookURL:     types.StringValue(retrievedTrigger.EventSource.Webhook.URL),
+		Parameters:                parameters,
 	}
 
 	// Set state

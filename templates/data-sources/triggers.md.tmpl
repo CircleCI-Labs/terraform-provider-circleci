@@ -13,15 +13,13 @@ trigger by id, and [`circleci_trigger`](../resources/trigger) to manage one.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Triggers live under `/api/v2` but are served by the public API service rather than
-the v2 API, and CircleCI Server does not route them there. A Server
-installation answers HTTP 404, which is indistinguishable from a pipeline
-definition that does not exist, so this data source rejects
-`deployment = "server"` outright with an explanatory error.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — and **not** for the v3 reason. `triggers` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. `deployment = "server"` is refused outright rather than left to answer HTTP 404. |
+| **API** | `GET /api/v2/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers` |
+| **Organization type** | Any, but triggers only exist on GitHub App, GitHub OAuth and GitHub Enterprise Server projects. See the compatibility table in the README. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 

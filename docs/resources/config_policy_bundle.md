@@ -9,9 +9,15 @@ description: |-
 
 Manages an organization's whole bundle of CircleCI config policies: the Rego documents evaluated against a pipeline's configuration before it runs.
 
-Works against both **CircleCI Cloud and CircleCI Server** — config policies are served by the v2 API. Note the plan and version requirements below, though: this is not available on every account.
+## Availability
 
-> **Requires the Scale plan on CircleCI Cloud**, or **CircleCI Server 4.2 or later**. On other Cloud plans the API rejects these requests, and on older Server releases the routes do not exist.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on the Scale plan. |
+| **CircleCI Server** | Yes on CircleCI Server 4.2 and later. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `POST /api/v2/owner/{org_id}/context/{policy_context}/policy-bundle`, `GET .../policy-bundle/{name}` |
+| **Organization type** | Any. The `{policy_context}` path segment is a *policy* context — a namespace for a bundle of Rego documents — and has nothing to do with a CircleCI context. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -186,9 +192,9 @@ Setting this to `{}` removes every policy from the context. The whole bundle mus
 
 ### Optional
 
-- `policy_context` (String) Which policy context the bundle belongs to. Defaults to `config`, the context evaluated against pipeline configuration; `custom` is evaluated against caller-supplied data instead. Changing this value forces a new resource to be created.
+- `policy_context` (String) Which policy context the bundle belongs to. `config` is the only accepted value, and the default: it is the context evaluated against pipeline configuration. Changing this value forces a new resource to be created.
 
-~> A policy context is **not** a CircleCI context. It has nothing to do with `circleci_context` or the environment variables that live there: it is a namespace for a bundle of policies, and its only valid values are `config`. CircleCI documents a `custom` context, but every the API route rejects it with a 400, so it is not offered here.
+~> A policy context is **not** a CircleCI context. It has nothing to do with `circleci_context` or the environment variables that live there: it is a namespace for a bundle of policies. CircleCI's documentation mentions a `custom` context for policies evaluated against caller-supplied data, but no route accepts it — every handler that takes this path segment validates it against the single value `config` and answers 400 for anything else — so it is not offered here.
 
 ## Why a bundle and not a policy
 

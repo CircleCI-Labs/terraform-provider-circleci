@@ -40,6 +40,12 @@ func ProjectRoles() []string {
 
 // ProjectGroup is a group granted a role on a project. Every member of the group
 // holds that role on the project.
+//
+// The id field is "id", not "group_id", even though the group is identified by
+// its group id and the service behind this route really does send "group_id":
+// the public route's handler rebuilds each item as {id, name, role}, dropping
+// the description and project_id it received. Both spellings appear in the same
+// request path, so this is worth stating rather than inferring.
 type ProjectGroup struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -61,11 +67,23 @@ type updateProjectGroupRoleRequest struct {
 
 // ProjectGroupService reads and writes the groups granted access to a project.
 //
-// There is no endpoint for revoking a grant. The public API routes only a list,
-// an assign and a role update; a delete is described in the API's OpenAPI
-// definition but is not served, so removing a group from a project is only
-// possible in the CircleCI web UI. Callers must surface that rather than
-// silently appearing to revoke.
+// There is no reachable endpoint for revoking a grant. The public API routes
+// only a list, an assign and a role update. Re-confirmed against source: the
+// service fronting these routes registers exactly those three and has no
+// revoke handler of any kind, so the documented
+// DELETE /organizations/{org_id}/projects/{project_id}/groups/{group_id} is
+// answered by the router's own catch-all 404 rather than by a handler.
+//
+// The revoke does exist further in, and its shape is worth recording because it
+// is not the shape the OpenAPI document describes: the enforcing service spells
+// it as a DELETE on the *collection* path with a {"group_ids": [...]} body,
+// whereas the public specification describes a per-group path with no body and
+// a 204. So the gap is not simply an unwired route — the specified route was
+// never implemented in the form it is specified in, which is why nobody should
+// expect it to start working by being plumbed through.
+//
+// Removing a group from a project is therefore only possible in the CircleCI web
+// UI, and callers must surface that rather than silently appearing to revoke.
 type ProjectGroupService struct {
 	client *Client
 }
@@ -75,8 +93,14 @@ func (c *Client) ProjectGroups() *ProjectGroupService {
 	return &ProjectGroupService{client: c}
 }
 
-// List fetches every group granted a role on a project, following pagination to
-// the last page. The result is nil when no groups are assigned.
+// List fetches every group granted a role on a project. The result is nil when
+// no groups are assigned.
+//
+// Draining is a formality here: unlike the two group-list routes, this one does
+// not even advertise pagination — the handler's response type is {"items": [...]}
+// with no next_page_token field — so the first page is always the last. The
+// published schema does describe a next_page_token and a total_count for it;
+// neither is ever sent.
 func (s *ProjectGroupService) List(ctx context.Context, orgID, projectID string) ([]ProjectGroup, error) {
 	return DrainV2(ctx, func(ctx context.Context, pageToken string) (PaginatedResponse[ProjectGroup], error) {
 		var page PaginatedResponse[ProjectGroup]

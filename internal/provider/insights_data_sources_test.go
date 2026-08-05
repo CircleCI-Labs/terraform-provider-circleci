@@ -76,7 +76,7 @@ func TestAccInsightsWorkflowsDataSource(t *testing.T) {
 						tfjsonpath.New("workflows"),
 						knownvalue.ListSizeExact(2),
 					),
-					// Decoded from name, not workflow_name: the v2 API renames its
+					// Decoded from name, not workflow_name: the API renames its
 					// internal config-name key before responding.
 					statecheck.ExpectKnownValue(
 						"data.circleci_insights_workflows.test",

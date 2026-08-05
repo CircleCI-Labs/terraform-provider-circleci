@@ -119,6 +119,19 @@ func (c *Client) CreateWebhook(ctx context.Context, input WebhookInput) (*Webhoo
 
 // GetWebhook returns one webhook by id. A missing webhook is reported as an error
 // satisfying IsNotFound.
+//
+// A webhook the token may not see is a different answer, and the difference
+// matters for drift detection. The route sits in front of a separate webhook
+// service whose gRPC statuses are mapped one for one: NOT_FOUND becomes 404, and
+// PERMISSION_DENIED becomes **403** carrying "The webhook does not exist or you
+// do not have the required permission" — an anti-enumeration message delivered
+// with the forbidden status rather than folded into the 404. So 404 really does
+// mean gone and is safe to treat as drift, while 403 means "cannot tell" and must
+// not be, or a token that merely lost permission would drop a live webhook — and
+// its signing secret — out of state and have it recreated.
+//
+// INVALID_ARGUMENT and FAILED_PRECONDITION both become 400, so a malformed id and
+// a rejected event name are indistinguishable by status alone.
 func (c *Client) GetWebhook(ctx context.Context, id string) (*Webhook, error) {
 	var found Webhook
 	if err := c.GetV2(ctx, webhookRoute, &found, RouteParams(id)); err != nil {

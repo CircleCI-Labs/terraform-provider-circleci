@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -438,8 +439,13 @@ func TestSetPolicyDecisionSettingsPayload(t *testing.T) {
 	})
 	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
+	// PolicyContextConfig, not PolicyContextCustom, even though the client would
+	// happily put either in the path: the settings handlers validate this segment
+	// against the single value "config" and then check it a second time, so a test
+	// built on "custom" would be asserting the shape of a request the API always
+	// answers 400 to.
 	updated, err := c.SetPolicyDecisionSettings(context.Background(),
-		testPolicyOwnerID, circleci.PolicyContextCustom,
+		testPolicyOwnerID, circleci.PolicyContextConfig,
 		circleci.PolicyDecisionSettings{Enabled: ptr(false)})
 	if err != nil {
 		t.Fatalf("SetPolicyDecisionSettings returned error: %v", err)
@@ -448,7 +454,7 @@ func TestSetPolicyDecisionSettingsPayload(t *testing.T) {
 	if gotMethod != http.MethodPatch {
 		t.Errorf("method = %q, want PATCH", gotMethod)
 	}
-	if want := "/api/v2/owner/" + testPolicyOwnerID + "/context/custom/decision/settings"; gotURI != want {
+	if want := "/api/v2/owner/" + testPolicyOwnerID + "/context/config/decision/settings"; gotURI != want {
 		t.Errorf("raw request URI = %q, want %q", gotURI, want)
 	}
 	if !governanceJSONEqual(gotBody, map[string]any{"enabled": false}) {
@@ -459,9 +465,17 @@ func TestSetPolicyDecisionSettingsPayload(t *testing.T) {
 	}
 }
 
-// TestSetPolicyDecisionSettingsOmitsUnsetEnabled covers the PATCH semantics: a
-// nil Enabled must not reach the wire as false, which would switch enforcement
+// TestSetPolicyDecisionSettingsOmitsUnsetEnabled covers the omitempty on Enabled:
+// a nil Enabled must not reach the wire as false, which would switch enforcement
 // off.
+//
+// It does NOT mean the route supports a partial update, which is what the pointer
+// was originally documented as being for. The handler validates the decoded body
+// with a NotNil rule on enabled, so the empty object this produces is rejected
+// with a 400 rather than leaving the current value alone — and the fake here
+// answers exactly that, so nothing in this package can come to rely on a partial
+// PATCH working. Both halves are asserted: the body must be empty (never false),
+// and the call must fail.
 func TestSetPolicyDecisionSettingsOmitsUnsetEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -469,23 +483,39 @@ func TestSetPolicyDecisionSettingsOmitsUnsetEnabled(t *testing.T) {
 
 	srv := newGovernanceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+
+		if _, ok := gotBody["enabled"]; !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"enabled: cannot be blank."}`))
+
+			return
+		}
+
 		_, _ = w.Write([]byte(`{"enabled":true}`))
 	})
 	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
 	_, err := c.SetPolicyDecisionSettings(context.Background(),
 		testPolicyOwnerID, circleci.PolicyContextConfig, circleci.PolicyDecisionSettings{})
-	if err != nil {
-		t.Fatalf("SetPolicyDecisionSettings returned error: %v", err)
-	}
 
 	if !governanceJSONEqual(gotBody, map[string]any{}) {
-		t.Errorf("request body = %#v, want an empty object", gotBody)
+		t.Errorf("request body = %#v, want an empty object rather than {\"enabled\": false}", gotBody)
+	}
+
+	if err == nil {
+		t.Fatal("SetPolicyDecisionSettings succeeded with no enabled value; the real route " +
+			"answers 400, so every caller must set Enabled")
+	}
+	if !circleci.HasStatus(err, http.StatusBadRequest) {
+		t.Errorf("HasStatus(err, 400) = false, err = %v", err)
+	}
+	if got := circleci.Detail(err); !strings.Contains(got, "cannot be blank") {
+		t.Errorf("Detail(err) = %q, want the service's own message", got)
 	}
 }
 
 // TestPolicyContextIsNotACircleCIContext guards the naming: the {context} path
-// segment is a policy context, and the only values CircleCI defines for it are
+// segment is a policy context, and the only values CircleCI documents for it are
 // "config" and "custom". A CircleCI context UUID would be a mistake.
 func TestPolicyContextIsNotACircleCIContext(t *testing.T) {
 	t.Parallel()
@@ -495,5 +525,80 @@ func TestPolicyContextIsNotACircleCIContext(t *testing.T) {
 	}
 	if circleci.PolicyContextCustom != "custom" {
 		t.Errorf("PolicyContextCustom = %q, want %q", circleci.PolicyContextCustom, "custom")
+	}
+}
+
+// TestPolicyContextCustomIsRejectedByEveryRoute states, in a test, the thing
+// PolicyContextCustom exists to document: the constant is spelled correctly and
+// the API refuses it everywhere.
+//
+// Every handler taking the {context} segment validates it against a single
+// permitted value, "config" — the bundle routes with an In(internal.Config) rule
+// and the decision-settings routes with In("config") plus a second explicit
+// comparison. So "custom" is a 400 on all of them, and the fake answers that way
+// rather than accepting it. The client deliberately does not validate the value
+// itself: the API's message is clearer, and the schema refuses it at plan time.
+func TestPolicyContextCustomIsRejectedByEveryRoute(t *testing.T) {
+	t.Parallel()
+
+	srv := newGovernanceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/context/"+circleci.PolicyContextCustom+"/") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"context: must be a valid value."}`))
+
+			return
+		}
+
+		_, _ = w.Write([]byte(`{}`))
+	})
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	calls := map[string]func() error{
+		"GetPolicyBundle": func() error {
+			_, err := c.GetPolicyBundle(context.Background(),
+				testPolicyOwnerID, circleci.PolicyContextCustom)
+
+			return err
+		},
+		"GetPolicyDocument": func() error {
+			_, err := c.GetPolicyDocument(context.Background(),
+				testPolicyOwnerID, circleci.PolicyContextCustom, "policy.rego")
+
+			return err
+		},
+		"SetPolicyBundle": func() error {
+			_, err := c.SetPolicyBundle(context.Background(),
+				testPolicyOwnerID, circleci.PolicyContextCustom, map[string]string{}, false)
+
+			return err
+		},
+		"GetPolicyDecisionSettings": func() error {
+			_, err := c.GetPolicyDecisionSettings(context.Background(),
+				testPolicyOwnerID, circleci.PolicyContextCustom)
+
+			return err
+		},
+		"SetPolicyDecisionSettings": func() error {
+			_, err := c.SetPolicyDecisionSettings(context.Background(),
+				testPolicyOwnerID, circleci.PolicyContextCustom,
+				circleci.PolicyDecisionSettings{Enabled: ptr(true)})
+
+			return err
+		},
+	}
+
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := call()
+			if err == nil {
+				t.Fatalf("%s succeeded with the %q policy context; the API answers 400",
+					name, circleci.PolicyContextCustom)
+			}
+			if !circleci.HasStatus(err, http.StatusBadRequest) {
+				t.Errorf("HasStatus(err, 400) = false, err = %v", err)
+			}
+		})
 	}
 }

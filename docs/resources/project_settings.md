@@ -9,7 +9,15 @@ description: |-
 
 Manages the advanced settings of an existing CircleCI project: the toggles found under Project Settings > Advanced in the CircleCI web application.
 
-Works against both **CircleCI Cloud and CircleCI Server** — project settings are served by the v2 API, which both provide.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The route is served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `PATCH /api/v2/project/{project-slug}/settings` |
+| **Organization type** | Any. GitLab, GitHub App and GitHub Enterprise Server projects address the slug as `circleci/{org-id}/{project-id}`. **Individual toggles vary by VCS integration** — `build_fork_prs`, `oss` and `set_github_status` are not uniformly available; see the compatibility matrix in the README. |
+| **Token** | A personal API token with permission to change the project's settings. |
 
 ## `circleci_project_settings` or `circleci_project`?
 
@@ -102,7 +110,9 @@ Leave this unset to let CircleCI manage it; the provider only writes settings th
 - `forks_receive_secret_env_vars` (Boolean) Run forked pull requests with this project's configuration, environment variables and secrets. The build cache is also shared between the original repository and all forks, so enabling this exposes both to anyone who can open a pull request.
 
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
-- `pr_only_branch_overrides` (Set of String) Branches that always trigger a build, even when `build_prs_only` is enabled. The set replaces whatever CircleCI currently holds, and setting it to `[]` clears every override. Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches. Order is not significant: CircleCI does not preserve the order branches are sent in.
+- `pr_only_branch_overrides` (Set of String) Branches that always trigger a build, even when `build_prs_only` is enabled. The set replaces whatever CircleCI currently holds. Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches. Order is not significant: CircleCI does not preserve the order branches are sent in.
+
+~> **Cannot be cleared.** Setting this to `[]` is rejected at plan time. CircleCI's API accepts an empty list with HTTP 200 but silently leaves the existing branches in place, so there is no way to clear the list through this route. Remove the attribute from the configuration instead: that stops managing it and leaves the existing branches as they are.
 - `set_github_status` (Boolean) Report the status of every pushed commit to GitHub's status API. Updates are reported per job.
 
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.

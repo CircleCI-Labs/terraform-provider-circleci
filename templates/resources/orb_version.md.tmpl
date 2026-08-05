@@ -13,7 +13,15 @@ Publishes a version of a CircleCI orb.
 
 Read the [Lifecycle](#lifecycle) section before using this resource. Its behaviour differs from an ordinary Terraform resource in ways that matter.
 
-~> **CircleCI Cloud only.** Orb versions are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this resource against a provider configured with `deployment = "server"` fails with an explicit error rather than a confusing HTTP 404.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/orb/versions`, `GET /api/v3/orb/versions/{id}`, `GET /api/v3/orb/versions/{id}/source` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 

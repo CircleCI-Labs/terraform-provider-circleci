@@ -11,7 +11,13 @@ Manages organization-wide CircleCI settings.
 
 ## Availability
 
-**CircleCI Cloud only.** These settings are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Configuring the provider with `deployment = "server"` and using this resource reports an explicit error rather than a confusing HTTP 404.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/orgs/{org_id}/settings` and `POST /api/v3/orgs/{org_id}/update-settings` |
+| **Organization type** | Any. Individual toggles may additionally require a plan that includes the feature. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## A settings resource, not a thing that gets created
 
@@ -100,7 +106,9 @@ Leave this unset to let CircleCI manage it; the provider only writes toggles tha
 - `enable_uncertified_public_orbs` (Boolean) Allow pipelines in this organization to use public orbs that CircleCI has not certified.
 
 Leave this unset to let CircleCI manage it; the provider only writes toggles that appear in the configuration.
-- `enable_unversioned_config` (Boolean) Allow pipelines to run configuration that carries no `version` pin.
+- `enable_unversioned_config` (Boolean) Allow a pipeline to be triggered through the API with configuration supplied in the request, instead of only the configuration committed to the repository.
+
+~> Despite the name, this is not about a `version` pin. CircleCI stores it as `allow_api_trigger_with_config`.
 
 Leave this unset to let CircleCI manage it; the provider only writes toggles that appear in the configuration.
 - `is_bitbucket_workspace_member_org_member` (Boolean) Treat every member of the linked Bitbucket workspace as a member of this CircleCI organization.

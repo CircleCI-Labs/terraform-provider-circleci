@@ -34,6 +34,13 @@ const projectSlugSegments = 3
 
 // GetProject returns the project identified by slug, e.g. "gh/acme/repo" or
 // "circleci/<orgUUID>/<projectUUID>".
+//
+// The route itself also accepts a bare project UUID in place of the slug — the
+// handler matches the slug pattern first and falls back to a lookup by id — but
+// this client requires the three-segment form, because every caller holds a slug
+// and a single-segment argument would be ambiguous with a malformed slug. If a
+// project ever needs addressing by id alone, that is a new method rather than a
+// loosening of projectSlugPath.
 func (c *Client) GetProject(ctx context.Context, slug string) (*Project, error) {
 	path, err := projectSlugPath(slug)
 	if err != nil {

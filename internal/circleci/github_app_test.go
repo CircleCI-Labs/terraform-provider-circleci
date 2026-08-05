@@ -45,11 +45,8 @@ func newGitHubAppServer(t *testing.T, handler http.HandlerFunc) (*circleci.Clien
 	return circleci.New(circleci.Config{Host: srv.URL, Token: "tok"}), &seen
 }
 
-// The response body below is the shape production sends, taken from the
-// repository schema in the API's
-// openapi_definitions/v2_endpoints/github_app/schemas.yaml and the matching Go
-// struct in the CircleCI API In particular the full name
-// is repo_full_name, not full_name.
+// The response body below is the shape production sends. In particular the
+// full name is repo_full_name, not full_name.
 const testGitHubAppRepositoriesBody = `{
   "items": [
     {

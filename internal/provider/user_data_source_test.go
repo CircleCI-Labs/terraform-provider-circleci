@@ -214,8 +214,11 @@ data "circleci_user_collaborations" "test" {}
 						tfjsonpath.New("collaborations").AtSliceIndex(0).AtMapKey("id"),
 						knownvalue.StringExact("11111111-1111-1111-1111-111111111111"),
 					),
-					// Decoded from vcs_type, which is how the v2 API spells it on the
-					// wire even though it declares the key in kebab-case internally.
+					// The HCL attribute is vcs_type; the wire key it is decoded from is
+					// "vcs-type", hyphenated, which is unique to this route. This
+					// assertion is what fails if the tag is ever "corrected" to match
+					// the organization routes: the attribute goes empty rather than
+					// missing, so nothing else notices.
 					statecheck.ExpectKnownValue(
 						"data.circleci_user_collaborations.test",
 						tfjsonpath.New("collaborations").AtSliceIndex(0).AtMapKey("vcs_type"),

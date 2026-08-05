@@ -80,7 +80,7 @@ data "circleci_job" "test" {
 func TestAccJobDataSource_availableOnServer(t *testing.T) {
 	_, host := newMockObservabilityAPI(t)
 
-	// Jobs by project slug and number are served by the API, which is
+	// Jobs by project slug and number are served by a backend that is
 	// deployed on both CircleCI Cloud and CircleCI Server.
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: observabilityProviderFactories,

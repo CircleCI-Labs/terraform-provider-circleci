@@ -4,115 +4,193 @@
 package provider
 
 import (
-	"fmt"
-	"regexp"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
-	"github.com/hashicorp/terraform-plugin-testing/statecheck"
-	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
-func testAccGroupMembershipDataSourceConfig(host, deployment string) string {
-	return testAccMembershipProviderConfig(host, deployment) + fmt.Sprintf(`
-data "circleci_group_membership" "test" {
-  organization_id = %[1]q
-  group_id        = %[2]q
-}
-`, testMembershipOrgID, testMembershipGroupID)
+// Same constraint as group_membership_resource_test.go: circleci_group_membership
+// (the data source too) is served on Client.PrivateHost(), which has no
+// provider-schema override, so these drive Read directly rather than through
+// resource.UnitTest and an HCL "data" block.
+
+// groupMembershipDataSourceSchemaForTest returns the data source's schema.
+func groupMembershipDataSourceSchemaForTest(t *testing.T) dschema.Schema {
+	t.Helper()
+
+	resp := &datasource.SchemaResponse{}
+	(&groupMembershipDataSource{}).Schema(t.Context(), datasource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	return resp.Schema
 }
 
-func TestAccGroupMembershipDataSource(t *testing.T) {
+func TestGroupMembershipDataSourceRead(t *testing.T) {
+	t.Parallel()
+
 	api, host := newMockMembershipAPI(t)
 	api.seedMembers(testUserA, testUserB)
+	schema := groupMembershipDataSourceSchemaForTest(t)
 
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipDataSourceConfig(host, "cloud"),
-				ConfigStateChecks: []statecheck.StateCheck{
-					// user_ids is the shape the resource consumes.
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("user_ids"),
-						knownvalue.SetExact([]knownvalue.Check{
-							knownvalue.StringExact(testUserA),
-							knownvalue.StringExact(testUserB),
-						}),
-					),
-					// members carries the display fields alongside each id.
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("members"),
-						knownvalue.ListSizeExact(2),
-					),
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("members").AtSliceIndex(0).AtMapKey("user_id"),
-						knownvalue.StringExact(testUserA),
-					),
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("members").AtSliceIndex(0).AtMapKey("username"),
-						knownvalue.StringExact("user-"+testUserA[:4]),
-					),
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("members").AtSliceIndex(0).AtMapKey("email"),
-						knownvalue.StringExact(testUserA[:4]+"@example.com"),
-					),
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("members").AtSliceIndex(0).AtMapKey("avatar_url"),
-						knownvalue.StringExact("https://avatars.example/"+testUserA[:4]+".png"),
-					),
-				},
-			},
-		},
-	})
+	d := &groupMembershipDataSource{client: (&mockMembershipAPI{}).client(host)}
+
+	cfgState := tfsdk.State{Schema: schema}
+	if diags := cfgState.Set(t.Context(), groupMembershipDataSourceModel{
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringNull(),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        types.SetUnknown(types.StringType),
+		Members:        nil,
+	}); diags.HasError() {
+		t.Fatalf("could not build a config value: %+v", diags)
+	}
+
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	d.Read(t.Context(), datasource.ReadRequest{Config: tfsdk.Config{Schema: schema, Raw: cfgState.Raw}}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var out groupMembershipDataSourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+
+	if len(out.Members) != 2 {
+		t.Fatalf("members = %v, want 2", out.Members)
+	}
+
+	byID := map[string]groupMemberItemModel{}
+	for _, m := range out.Members {
+		byID[m.UserId.ValueString()] = m
+	}
+
+	a, ok := byID[testUserA]
+	if !ok {
+		t.Fatalf("members does not include %s: %v", testUserA, out.Members)
+	}
+	if want := "user-" + testUserA[:4]; a.Username.ValueString() != want {
+		t.Errorf("username = %q, want %q", a.Username.ValueString(), want)
+	}
+	if want := testUserA[:4] + "@example.com"; a.Email.ValueString() != want {
+		t.Errorf("email = %q, want %q", a.Email.ValueString(), want)
+	}
+	if want := "https://avatars.example/" + testUserA[:4] + ".png"; a.AvatarUrl.ValueString() != want {
+		t.Errorf("avatar_url = %q, want %q", a.AvatarUrl.ValueString(), want)
+	}
+
+	var gotIDs []string
+	if diags := out.UserIds.ElementsAs(t.Context(), &gotIDs, false); diags.HasError() {
+		t.Fatalf("reading back user_ids: %v", diags)
+	}
+	if len(gotIDs) != 2 {
+		t.Errorf("user_ids = %v, want 2 entries", gotIDs)
+	}
 }
 
-func TestAccGroupMembershipDataSource_emptyGroup(t *testing.T) {
-	_, host := newMockMembershipAPI(t)
+// TestGroupMembershipDataSourceRead_emptyGroup covers that an empty group
+// reports an empty, non-null members list and user_ids set, so `for_each` and
+// `length()` keep working against it rather than erroring on a null value.
+func TestGroupMembershipDataSourceRead_emptyGroup(t *testing.T) {
+	t.Parallel()
 
-	// An empty, non-null list keeps for_each and length() working against a group
-	// with no members.
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccGroupMembershipDataSourceConfig(host, "cloud"),
-				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("members"),
-						knownvalue.ListSizeExact(0),
-					),
-					statecheck.ExpectKnownValue(
-						"data.circleci_group_membership.test",
-						tfjsonpath.New("user_ids"),
-						knownvalue.SetSizeExact(0),
-					),
-				},
-			},
-		},
-	})
+	_, host := newMockMembershipAPI(t)
+	schema := groupMembershipDataSourceSchemaForTest(t)
+
+	d := &groupMembershipDataSource{client: (&mockMembershipAPI{}).client(host)}
+
+	cfgState := tfsdk.State{Schema: schema}
+	if diags := cfgState.Set(t.Context(), groupMembershipDataSourceModel{
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringNull(),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        types.SetUnknown(types.StringType),
+		Members:        nil,
+	}); diags.HasError() {
+		t.Fatalf("could not build a config value: %+v", diags)
+	}
+
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	d.Read(t.Context(), datasource.ReadRequest{Config: tfsdk.Config{Schema: schema, Raw: cfgState.Raw}}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var out groupMembershipDataSourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+
+	if out.Members == nil || len(out.Members) != 0 {
+		t.Errorf("members = %#v, want a non-nil empty slice", out.Members)
+	}
+	if out.UserIds.IsNull() {
+		t.Error("user_ids is null, want a non-null empty set")
+	}
+	var gotIDs []string
+	if diags := out.UserIds.ElementsAs(t.Context(), &gotIDs, false); diags.HasError() {
+		t.Fatalf("reading back user_ids: %v", diags)
+	}
+	if len(gotIDs) != 0 {
+		t.Errorf("user_ids = %v, want none", gotIDs)
+	}
 }
 
-func TestAccGroupMembershipDataSource_serverDeployment(t *testing.T) {
-	_, host := newMockMembershipAPI(t)
+// TestGroupMembershipDataSourceRead_requiresStandaloneOrganization mirrors the
+// resource's gate: deployment = "server" must be rejected with the same
+// message, before any request reaches the API.
+func TestGroupMembershipDataSourceRead_requiresStandaloneOrganization(t *testing.T) {
+	t.Parallel()
 
-	// Groups need a `circleci` type (standalone) organization. A CircleCI Server
-	// installation is always a `github` type organization, so deployment =
-	// "server" must be rejected with an explanatory error rather than attempting
-	// a request the API would refuse.
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{{
-			Config:      testAccGroupMembershipDataSourceConfig(host, "server"),
-			ExpectError: regexp.MustCompile(`circleci_group_membership requires a standalone CircleCI organization`),
-		}},
+	api, host := newMockMembershipAPI(t)
+	schema := groupMembershipDataSourceSchemaForTest(t)
+
+	serverClient := circleci.New(circleci.Config{
+		Host:        "http://127.0.0.1:1",
+		PrivateHost: host,
+		Token:       "fake",
+		Deployment:  circleci.DeploymentServer,
 	})
+	d := &groupMembershipDataSource{client: serverClient}
+
+	cfgState := tfsdk.State{Schema: schema}
+	if diags := cfgState.Set(t.Context(), groupMembershipDataSourceModel{
+		OrganizationId: types.StringValue(testMembershipOrgID),
+		OrgId:          types.StringNull(),
+		GroupId:        types.StringValue(testMembershipGroupID),
+		UserIds:        types.SetUnknown(types.StringType),
+		Members:        nil,
+	}); diags.HasError() {
+		t.Fatalf("could not build a config value: %+v", diags)
+	}
+
+	resp := &datasource.ReadResponse{State: tfsdk.State{Schema: schema}}
+	d.Read(t.Context(), datasource.ReadRequest{Config: tfsdk.Config{Schema: schema, Raw: cfgState.Raw}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Read on a server deployment produced no diagnostics, want one")
+	}
+	found := false
+	for _, diag := range resp.Diagnostics {
+		if diag.Summary() == "circleci_group_membership requires a standalone CircleCI organization" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("diagnostics = %v, want a %q summary", resp.Diagnostics, "circleci_group_membership requires a standalone CircleCI organization")
+	}
+
+	if len(api.calls()) != 0 {
+		t.Errorf("server deployment reached the fake API: %v, want no requests at all", api.calls())
+	}
 }

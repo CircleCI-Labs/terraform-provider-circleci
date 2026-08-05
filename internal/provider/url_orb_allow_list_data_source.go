@@ -64,8 +64,15 @@ func (d *urlOrbAllowListDataSource) Metadata(_ context.Context, req datasource.M
 func (d *urlOrbAllowListDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every entry in a CircleCI organization's URL orb allow list.\n\n" +
-			"**Available on CircleCI Cloud and CircleCI Server.** This data source uses the v2 API, " +
-			"which both serve.",
+			"Available on CircleCI Cloud **and on CircleCI Server**: this is a v2 organization " +
+			"route served by CircleCI itself rather than by a service behind the public API proxy, " +
+			"and a Server installation's gateway sends every API path it does not route elsewhere " +
+			"to that component. Being v2 would not be evidence on its own — " +
+			"`circleci_pipeline_definition` is v2 and unavailable on Server — but the owner is. " +
+			"Nothing gates this data source.\n\n" +
+			"~> A 404 from this data source is about the *organization*, not the allow list: an " +
+			"organization that does not exist and one the API token may not view answer " +
+			"identically.",
 		Attributes: map[string]schema.Attribute{
 			"organization": schema.StringAttribute{
 				MarkdownDescription: urlOrbAllowListOrganizationDescription,

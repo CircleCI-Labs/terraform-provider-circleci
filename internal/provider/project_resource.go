@@ -185,7 +185,11 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			// a set unchanged. TestListToSetNeedsNoStateUpgrade proves it.
 			"pr_only_branch_overrides": schema.SetAttribute{
 				MarkdownDescription: "Branches that override the PR-only build setting. " +
-					"Order is not significant: CircleCI does not preserve the order branches are sent in.",
+					"Order is not significant: CircleCI does not preserve the order branches are sent in.\n\n" +
+					"~> **Cannot be cleared.** Setting this to `[]` is rejected at plan time. CircleCI's API " +
+					"accepts an empty list with HTTP 200 but silently leaves the existing branches in place, so " +
+					"there is no way to clear the list through this route. Remove the attribute from the " +
+					"configuration instead: that stops managing it and leaves the existing branches as they are.",
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.StringType,
@@ -200,6 +204,7 @@ func (r *projectResource) ConfigValidators(_ context.Context) []resource.ConfigV
 	return []resource.ConfigValidator{
 		explicitForkSecretsValidator{},
 		orgIDConfigValidator(),
+		noClearingBranchOverridesValidator{},
 	}
 }
 
@@ -348,9 +353,19 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 
 	apiProject, err := r.client.GetProject(ctx, projectState.Slug.ValueString())
 	if err != nil {
+		// A project that no longer exists is drift, not an error. Without this,
+		// unfollowing or deleting the project in the CircleCI UI made every
+		// subsequent `terraform plan` fail outright instead of proposing to
+		// recreate it — and this is the most widely used resource here.
+		if circleci.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
 		resp.Diagnostics.AddError(
 			"Unable to Read CircleCI project with Slug "+projectState.Slug.ValueString(),
-			err.Error(),
+			circleci.Detail(err),
 		)
 		return
 	}
@@ -386,22 +401,55 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 		)
 		return
 	}
-	projectState.AutoCancelBuilds = types.BoolPointerValue(projectSettings.AutocancelBuilds)
-	projectState.BuildForkPrs = types.BoolPointerValue(projectSettings.BuildForkPrs)
-	projectState.BuildPrsOnly = types.BoolPointerValue(projectSettings.BuildPrsOnly)
-	projectState.DisableSSH = types.BoolPointerValue(projectSettings.DisableSSH)
-	projectState.ForksReceiveSecretEnvVars = types.BoolPointerValue(projectSettings.ForksReceiveSecretEnvVars)
+	// projectSettingRefresh (project_settings_resource.go) is what circleci_project_settings
+	// uses for the same purpose: a toggle that was null before this Read stays null
+	// rather than adopting whatever the API happens to report.
+	//
+	// This resource's toggles are Optional+Computed rather than Optional-only, so
+	// they cannot stay null forever the way circleci_project_settings' can — Create
+	// must resolve every one of them to a known value, because a Computed attribute
+	// cannot be left unknown once an apply finishes. But once a toggle *is* null in
+	// state — which is exactly the state ImportState leaves every toggle in, since it
+	// sets only slug — adopting the API's value unconditionally here used to make
+	// this Read indistinguishable from a practitioner declaring the value outright.
+	// Because these attributes are Optional+Computed, a null config falls back to
+	// the prior *state* value on the next plan, so the adopted value would then be
+	// read back out of the plan and sent to the API on the next Update — pinning
+	// whatever CircleCI happened to report at the moment of that one Read, and
+	// fighting any later change of CircleCI's own default for a setting nobody ever
+	// configured.
+	projectState.AutoCancelBuilds = projectSettingRefresh(projectState.AutoCancelBuilds, projectSettings.AutocancelBuilds)
+	projectState.BuildForkPrs = projectSettingRefresh(projectState.BuildForkPrs, projectSettings.BuildForkPrs)
+	projectState.BuildPrsOnly = projectSettingRefresh(projectState.BuildPrsOnly, projectSettings.BuildPrsOnly)
+	projectState.DisableSSH = projectSettingRefresh(projectState.DisableSSH, projectSettings.DisableSSH)
+	projectState.ForksReceiveSecretEnvVars = projectSettingRefresh(projectState.ForksReceiveSecretEnvVars, projectSettings.ForksReceiveSecretEnvVars)
+	// oss is always adopted, unlike every other setting: it is Computed-only and
+	// cannot be written, so reporting what CircleCI holds can never turn into a
+	// write the practitioner did not ask for. See project_settings_resource.go's
+	// refresh method, which documents the same exception.
 	projectState.OSS = types.BoolPointerValue(projectSettings.OSS)
-	projectState.SetGithubStatus = types.BoolPointerValue(projectSettings.SetGithubStatus)
-	projectState.SetupWorkflows = types.BoolPointerValue(projectSettings.SetupWorkflows)
-	projectState.WriteSettingsRequiresAdmin = types.BoolPointerValue(projectSettings.WriteSettingsRequiresAdmin)
+	projectState.SetGithubStatus = projectSettingRefresh(projectState.SetGithubStatus, projectSettings.SetGithubStatus)
+	projectState.SetupWorkflows = projectSettingRefresh(projectState.SetupWorkflows, projectSettings.SetupWorkflows)
+	projectState.WriteSettingsRequiresAdmin = projectSettingRefresh(projectState.WriteSettingsRequiresAdmin, projectSettings.WriteSettingsRequiresAdmin)
 
-	overrides, overrideDiags := branchOverrideSet(ctx, projectSettings.PROnlyBranchOverrides)
-	resp.Diagnostics.Append(overrideDiags...)
-	if resp.Diagnostics.HasError() {
-		return
+	// Gated on being null exactly like every boolean toggle just above, and for
+	// the same reason (see the long comment there): pr_only_branch_overrides is
+	// Optional+Computed too, and adopting whatever CircleCI currently holds
+	// whenever this attribute happens to be undeclared — which is exactly the
+	// state ImportState leaves it in, since it sets only slug — would make "not
+	// managed" indistinguishable from "managed as whatever the API reports",
+	// and pin that value for the next Update to send back. This used to run
+	// unconditionally, which meant importing a project adopted its branch
+	// overrides on the very first refresh even though the equivalent booleans
+	// stayed null until a configuration named them.
+	if !projectState.PROnlyBranchOverrides.IsNull() {
+		overrides, overrideDiags := branchOverrideSet(ctx, projectSettings.PROnlyBranchOverrides)
+		resp.Diagnostics.Append(overrideDiags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		projectState.PROnlyBranchOverrides = overrides
 	}
-	projectState.PROnlyBranchOverrides = overrides
 
 	// Set state
 	diags = resp.State.Set(ctx, &projectState)
@@ -518,9 +566,15 @@ func (r *projectResource) Delete(ctx context.Context, req resource.DeleteRequest
 	// Delete existing project
 	err := r.client.DeleteProject(ctx, state.Slug.ValueString())
 	if err != nil {
+		// Already gone is the desired end state, so a destroy of a project someone
+		// removed in the UI succeeds rather than erroring on the way out.
+		if circleci.IsNotFound(err) {
+			return
+		}
+
 		resp.Diagnostics.AddError(
-			"Error Deleting CircleCi Project",
-			"Could not delete project, unexpected error: "+err.Error(),
+			"Error Deleting CircleCI Project",
+			"Could not delete project: "+circleci.Detail(err),
 		)
 		return
 	}

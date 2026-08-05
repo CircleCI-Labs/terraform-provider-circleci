@@ -80,12 +80,11 @@ func (d *jobDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, re
 			"and `parallel_runs` change while the job runs. Use this data source for inspection and in " +
 			"`check` blocks; using it to derive a resource attribute will cause a perpetual diff.\n\n" +
 			"-> **Addressed by number, not by the id the API reference documents.** The CircleCI v2 API " +
-			"reference documents `GET /api/v2/jobs/{id}`, but that route is served by the API " +
-			"through the API and has no CircleCI Server equivalent — it is absent from " +
-			"CircleCI Server's gateway routes served entirely. `GET /api/v2/project/{slug}/job/{job-number}` " +
-			"is used instead: it is implemented by the API, which *is* deployed on CircleCI " +
-			"Server and routed there. That makes `project_slug` and `job_number` the identifying inputs " +
-			"here, not a job id.\n\n" +
+			"reference documents `GET /api/v2/jobs/{id}`, but that route is a pass-through to a backend " +
+			"that only exists on CircleCI Cloud, and CircleCI Server has no equivalent route at all. " +
+			"`GET /api/v2/project/{slug}/job/{job-number}` is used instead, which *is* available on " +
+			"CircleCI Server. That makes `project_slug` and `job_number` the identifying inputs here, " +
+			"not a job id.\n\n" +
 			"Per-step detail (the equivalent of `circleci_job`'s `parallel_runs[].steps`) and artifacts/test " +
 			"results are not exposed: they are unbounded, per-build detail that would make this read as a " +
 			"partial build log rather than a job summary. Use the CircleCI web UI or the REST API directly " +
@@ -236,7 +235,8 @@ func (d *jobDataSource) Configure(_ context.Context, req datasource.ConfigureReq
 // jobToModel converts a circleci.Job into its Terraform model. projectSlug and
 // jobNumber are echoed back from the configuration rather than read from the
 // API response, because the job's own "number" field can be an untyped
-// pass-through from the v2 API and the slug is not returned at all.
+// pass-through rather than a normalized value, and the slug is not returned
+// at all.
 func jobToModel(ctx context.Context, projectSlug string, jobNumber int64, job circleci.Job) (jobDataSourceModel, diag.Diagnostics) {
 	var diags diag.Diagnostics
 

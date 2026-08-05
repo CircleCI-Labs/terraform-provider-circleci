@@ -12,20 +12,15 @@ inherits the project and context permissions granted to that group.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No, for two independent reasons. CircleCI groups require a `circleci` type (standalone) organization, and a CircleCI Server installation is always a `github` type organization, so it can never hold a group to put anyone in — and separately, this resource is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this resource with `deployment = "server"` reports an explicit error at plan time either way. |
+| **API** | `GET /private/ciam/orgs/{org_id}/groups/{group_id}/users`, `POST .../add-users` and `POST .../delete-users` |
+| **Organization type** | `circleci` (standalone) only. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud, and the provider cannot detect that from an organization UUID alone — the request fails against the API instead. |
+| **Token** | A personal API token belonging to an organization admin. |
 
-Group membership uses the
-`/api/v2/organizations/{organization_id}/groups/{group_id}/users` and
-`.../remove_users` endpoints. These sit under the
-`/api/v2/organizations/{organization_id}/groups` prefix, which is one of the few
-paths a CircleCI Server installation forwards to the public API service, so this
-resource works against both Cloud and Server.
-
-~> **This API is not part of the published CircleCI OpenAPI specification** and
-may change without notice. It is not documented publicly rather than on the public
-API reference, so treat it as less stable than the rest of the provider.
+~> **This route carries no published specification and CircleCI may change or remove it without notice.** It is not part of the versioned public API, and not the same routes as `circleci_group` and `circleci_project_group`: the equivalent public-looking paths (`/api/v2/organizations/{org_id}/groups/{group_id}/users` and `.../remove_users`) answer HTTP 404 in production even for a group that demonstrably exists — the published OpenAPI spec confirms this with a per-route `servers:` override pointing at a host reserved for internal traffic. The routes this resource actually uses are the ones CircleCI's own web application calls for its group management UI, confirmed against that UI's own source, alongside CircleCI's org-migration tooling, which adds users to a group in production the same way — that is how this provider knows the add path works with a plain personal token. Treat this as best-effort all the same.
 
 ## Exclusive ownership
 
@@ -45,15 +40,15 @@ Consequences to plan around:
   the group itself in place. Use `circleci_group` to manage the group.
 
 Members are converged with a delta rather than a wholesale replacement, because
-the API offers only bulk add and bulk remove actions and no way to set a
-membership outright. Terraform reads the group's current members, then issues at
-most one remove call and one add call for the difference. Members that are both
-configured and already present are left untouched.
+the API offers only bulk add-users and bulk delete-users actions and no way to
+set a membership outright. Terraform reads the group's current members, then
+issues at most one delete-users call and one add-users call for the difference.
+Members that are both configured and already present are left untouched.
 
 ## Identifying users
 
 Users are addressed by **UUID**. A login, username or email address is not
-accepted by the add and remove endpoints. Use the
+accepted by the add-users and delete-users endpoints. Use the
 `circleci_group_membership` data source, or the organization's members page in the
 web UI, to find a user's UUID.
 

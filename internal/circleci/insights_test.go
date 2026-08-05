@@ -39,11 +39,10 @@ func newInsightsServer(t *testing.T, handler http.HandlerFunc) (*circleci.Client
 	return circleci.New(circleci.Config{Host: srv.URL, Token: "tok"}), &seen
 }
 
-// testInsightsWorkflowsBody is the shape production sends. The API's
-// project-workflows-grpc->rest renames its internal keys before responding, which
-// is why the workflow name arrives as name (not workflow_name), the duration block
-// as duration_metrics (not duration_stats) and its 95th percentile as p95 (not
-// ninety_fifth).
+// testInsightsWorkflowsBody is the shape production sends. The API renames its
+// internal keys before responding, which is why the workflow name arrives as
+// name (not workflow_name), the duration block as duration_metrics (not
+// duration_stats) and its 95th percentile as p95 (not ninety_fifth).
 const testInsightsWorkflowsBody = `{
   "items": [
     {
@@ -355,8 +354,8 @@ func TestInsightsRejectsMalformedSlugs(t *testing.T) {
 	}
 }
 
-// testInsightsFlakyTestsBody is the shape production sends. The v2 API drops
-// org-id and project-id from the gRPC response and then converts every remaining
+// testInsightsFlakyTestsBody is the shape production sends. The API drops
+// org-id and project-id from the response and then converts every remaining
 // kebab-case key to snake_case, which is what makes these flaky_tests /
 // total_flaky_tests / workflow_created_at rather than the hyphenated originals.
 const testInsightsFlakyTestsBody = `{
@@ -474,7 +473,7 @@ func TestInsightsGetFlakyTestsEmpty(t *testing.T) {
 }
 
 // testInsightsSummaryBody is the shape production sends. Note that
-// org_project_data carries project_name rather than project_id: the v2 API looks
+// org_project_data carries project_name rather than project_id: the API looks
 // the name up and removes the id before responding. Throughput is present on the
 // organization block but absent from the per-project blocks.
 const testInsightsSummaryBody = `{

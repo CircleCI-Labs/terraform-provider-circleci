@@ -11,7 +11,13 @@ Manages one entry in a CircleCI organization's URL orb allow list. Each entry pe
 
 ## Availability
 
-**Available on CircleCI Cloud and CircleCI Server.** This resource uses the CircleCI v2 API, which both serve, so it works regardless of the provider's `deployment` setting.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Settled by route ownership, not by API version: `url-orb-allow-list` isn't proxied to a separate backend at all — CircleCI serves it directly, storing the allow list on the organization document, and a Server installation's gateway forwards this route by default. Being v2 is not evidence on its own — some v2 routes are forwarded by a Server installation's gateway and others are not: `circleci_pipeline_definition` is also v2 and unavailable, because *its* routes go to a backend Server does not forward to. Nothing gates this resource. |
+| **API** | `GET`, `POST` and `DELETE /api/v2/organization/{org_id}/url-orb-allow-list`, the last addressing one entry by id |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Behaviour
 
@@ -63,6 +69,8 @@ resource "circleci_url_orb_allow_list_entry" "internal_mirror" {
 - `name` (String) A human-readable name for the entry. Changing this value forces a new resource to be created, because the API has no route that updates an entry in place.
 - `organization` (String) The organization the allow list belongs to, as either an organization UUID or a slug in `vcs-slug/org-name` form such as `gh/CircleCI-Public`. For GitLab and GitHub App organizations, use `circleci/<organization-id>`. Changing this value forces a new resource to be created.
 - `prefix` (String) The URL prefix to allow, for example `https://raw.githubusercontent.com/CircleCI-Public/orbs/refs/heads/main/`. A URL orb reference is permitted when it starts with this prefix, so keep the prefix as narrow as possible. Changing this value forces a new resource to be created.
+
+The API requires the `https` scheme and a path that ends in `/`, so `https://example.com/orbs/` is accepted and `https://example.com/orbs` is not. That is checked at plan time here rather than left to fail at apply time.
 
 ### Read-Only
 

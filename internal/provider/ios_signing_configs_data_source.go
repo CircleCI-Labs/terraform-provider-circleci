@@ -63,8 +63,11 @@ func (d *iosSigningConfigsDataSource) Metadata(_ context.Context, req datasource
 func (d *iosSigningConfigsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every iOS signing configuration in a CircleCI organization, " +
-			"including configurations created outside Terraform. Pagination is followed " +
-			"internally, so the result covers every configuration rather than one page.\n\n" +
+			"including configurations created outside Terraform.\n\n" +
+			"Pagination is followed internally. The signing routes do not paginate today -- the " +
+			"handler renders the whole collection with no cursor set, so the response carries no " +
+			"page object at all -- but a cursor would be followed if one appeared, so the whole " +
+			"collection is covered either way.\n\n" +
 			"~> **CircleCI Cloud only.** Signing configurations are served by the CircleCI v3 " +
 			"API, which CircleCI Server does not route.\n\n" +
 			"-> **There is no singular data source.** The API has no route to fetch a single " +
@@ -103,8 +106,10 @@ func (d *iosSigningConfigsDataSource) Schema(_ context.Context, _ datasource.Sch
 							Computed:            true,
 						},
 						"certificate_type": schema.StringAttribute{
-							MarkdownDescription: "The paired certificate's type, `distribution` " +
-								"or `development`.",
+							MarkdownDescription: "The paired certificate's type: one of " +
+								"`distribution`, `development`, `developer-id-application`, " +
+								"`developer-id-installer`, `mac-development`, " +
+								"`mac-app-distribution` or `mac-installer-distribution`.",
 							Computed: true,
 						},
 						"provisioning_profiles": schema.ListNestedAttribute{

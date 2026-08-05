@@ -21,6 +21,13 @@ const DefaultRunnerHost = "https://runner.circleci.com"
 //
 // LastUsed is a pointer because the API sends null for an agent that has never
 // claimed a task.
+//
+// Status is a property of the listing rather than of the agent. The API
+// computes it by cross-referencing the organization's in-flight tasks, which it
+// only does for an org-id-scoped listing; the resource-class and namespace
+// listings leave it unset. Because the field is `json:"status,omitempty"`
+// server-side, those listings omit the key entirely and Status decodes to "".
+// The only two values it ever holds are "busy" and "idle".
 type Runner struct {
 	ResourceClass  string  `json:"resource_class,omitempty"`
 	Hostname       string  `json:"hostname"`
@@ -33,8 +40,16 @@ type Runner struct {
 	Status         string  `json:"status,omitempty"`
 }
 
-// ListRunnersParams scopes a runner listing. The API requires exactly one of
-// ResourceClass or Namespace.
+// ListRunnersParams scopes a runner listing.
+//
+// The API honours exactly one scope per request, in a fixed priority order:
+// OrgID wins outright; failing that, ResourceClass is taken only when
+// Namespace is empty, and Namespace only when ResourceClass is empty. Setting
+// both of the latter with no OrgID is the one combination that errors — HTTP
+// 400 "must specify exactly one of resource-class or namespace". Every other
+// over-specified combination succeeds
+// while silently ignoring the narrower filter, so callers must not send more than
+// one; the provider's data source enforces that at plan time.
 type ListRunnersParams struct {
 	ResourceClass string
 	Namespace     string
@@ -43,11 +58,11 @@ type ListRunnersParams struct {
 
 // runnerItems is the response envelope for a runner listing.
 //
-// This type exists because of a real bug. The runner admin API answers
-// `{"items": [...]}`, but circleci-sdk-go decodes `GET /api/v3/runner` into a
-// bare []Runner, so ListRunners always returned an empty slice against
-// production. The SDK's own test fake serves a bare array too, so the mistake was
-// self-consistent across two layers of fake and invisible in tests.
+// This type exists because of a real bug. The API answers `{"items": [...]}`,
+// but circleci-sdk-go decodes `GET /api/v3/runner` into a bare []Runner, so
+// ListRunners always returned an empty slice against production. The SDK's
+// own test fake serves a bare array too, so the mistake was self-consistent
+// across two layers of fake and invisible in tests.
 type runnerItems struct {
 	Items []Runner `json:"items"`
 }
@@ -79,17 +94,15 @@ func (c *Client) RunnerHost() string { return c.runnerHost }
 
 // Runner resource classes, tokens and task counts.
 //
-// The runner admin API (the CircleCI API) serves two competing
-// surfaces for resource classes: the legacy, flat one this client uses
-// (the CircleCI API the CircleCI API mounted at
-// /api/v3/runner/resource and /api/v3/runner/token on the runner host) and a
-// newer JSON:API one (api/v3/the API, mounted at
-// /api/v3/runner/resource-classes on circleci.com, proxied through
-// the API to the API). DESIGN.md records the decision to stay
-// on the legacy surface: it is what CircleCI Server also serves, and the newer
-// one was being actively reshaped. The shapes below are confirmed against the
-// legacy surface's handlers directly, not against circleci-sdk-go or the OpenAPI
-// spec — see DESIGN.md's "Mocks are derived from production service source".
+// The runner API serves two competing surfaces for resource classes: the
+// legacy, flat one this client uses (mounted at /api/v3/runner/resource and
+// /api/v3/runner/token on the runner host) and a newer JSON:API one (mounted
+// at /api/v3/runner/resource-classes on circleci.com). DESIGN.md records the
+// decision to stay on the legacy surface: it is what CircleCI Server also
+// serves, and the newer one was being actively reshaped. The shapes below are
+// confirmed against the legacy surface's own behaviour directly, not against
+// circleci-sdk-go or the OpenAPI spec — see DESIGN.md's "Mocks are derived
+// from production service source".
 //
 // circleci-cli's internal/apiclient/runner.go (MIT) covers the same legacy
 // surface and its patterns are cribbed here (route names, the {"items": [...]}
@@ -120,6 +133,18 @@ const runnerTasksRunningRoute = runnerTasksRoute + "/running"
 
 // ResourceClass is a runner resource class: a named pool of self-hosted runner
 // capacity that jobs target via `resource_class` in their config.
+//
+// The three fields here are the intersection of two different response shapes.
+// The create route answers with exactly these three fields; the list route
+// adds `active_tasks` (int) and a `runners` array of the same shape as
+// Runner, with status populated. Those two are deliberately not decoded —
+// nothing in the provider exposes them, and a listing
+// that embedded every agent would make circleci_runner_resource_classes a
+// live-state data source rather than a configuration one. Adding them later is a
+// pure addition; the decode already tolerates their presence.
+//
+// There is no created_at on this surface. The newer resource-classes surface has
+// one; this one does not.
 type ResourceClass struct {
 	ID string `json:"id"`
 	// ResourceClass is the "namespace/name" slug, e.g. "acme/linux".
@@ -136,14 +161,19 @@ type resourceClassItems struct {
 
 // ResourceClassInput is the create body for a runner resource class.
 //
-// OrganizationID is carried here even though the API's create handler
-// (the CircleCI API the API) does not read an
-// org_id from the body at all: it derives the owning organization from
+// OrganizationID is carried here even though the create route does not read
+// an org_id from the body at all: it derives the owning organization from
 // resource_class's namespace prefix and the caller's own admin permissions on
-// that namespace. Sending it anyway is harmless (the handler decodes into a
-// struct with only ResourceClass and Description fields, so an unrecognized
-// org_id key is simply ignored) and keeps the field consistent with
-// TokenInput and with organization_id being Required on the Terraform schema.
+// that namespace. Sending it anyway is harmless and keeps the field consistent
+// with TokenInput and with organization_id being Required on the Terraform
+// schema.
+//
+// "Harmless" is a fact about this surface specifically, re-confirmed against
+// the service: it binds with gin's default JSON binding into a struct naming
+// only resource_class and description, so an unrecognised key is discarded
+// rather than rejected. The newer resource-classes surface does the
+// opposite — it answers HTTP 400 for an unexpected field — so this extra key
+// is one of the things that would have to go if the client ever moved there.
 type ResourceClassInput struct {
 	OrganizationID string `json:"org_id"`
 	ResourceClass  string `json:"resource_class"`
@@ -154,8 +184,7 @@ type ResourceClassInput struct {
 // orgID. At least one should be set; the API answers HTTP 400 for neither.
 //
 // When both are set, the server checks orgID first and ignores namespace
-// entirely (the CircleCI API the API's switch),
-// so the result is every resource class the organization owns, not the
+// entirely, so the result is every resource class the organization owns, not the
 // namespace-scoped subset — callers that need an exact "namespace/name" match
 // filter the result themselves rather than relying on the namespace parameter
 // to narrow it.
@@ -177,6 +206,12 @@ func (c *Client) ListResourceClasses(ctx context.Context, namespace, orgID strin
 }
 
 // CreateResourceClass creates a runner resource class and returns it as stored.
+//
+// A namespace holds at most 650 resource classes; the next create answers
+// HTTP 403 with a message naming the limit. A duplicate answers HTTP 409, and
+// a malformed resource_class HTTP 400
+// "resource class not valid" — which is why the provider checks the format
+// against the service's own rules at plan time.
 func (c *Client) CreateResourceClass(ctx context.Context, input ResourceClassInput) (*ResourceClass, error) {
 	var created ResourceClass
 
@@ -196,10 +231,9 @@ func (c *Client) CreateResourceClass(ctx context.Context, input ResourceClassInp
 // DeleteResourceClass deletes a resource class by id. With force, it deletes
 // even if tokens still reference it; without force, the API answers HTTP 409
 // for a resource class that still has tokens. A missing resource class answers
-// HTTP 404, satisfying IsNotFound — the same status an unauthorized caller gets
-// (the CircleCI API the API: both cases call
-// middleware.AccessDeniedMsg), so absence and a permissions problem cannot be
-// told apart from the status code alone.
+// HTTP 404, satisfying IsNotFound — the same status an unauthorized caller
+// gets, so absence and a permissions problem cannot be told apart from the
+// status code alone.
 func (c *Client) DeleteResourceClass(ctx context.Context, id string, force bool) error {
 	route := runnerResourceItemRoute
 	if force {
@@ -224,10 +258,8 @@ type Token struct {
 	CreatedAt     string `json:"created_at"`
 	// Token is the secret value. It is populated only in CreateToken's response;
 	// ListTokens omits the field entirely rather than sending an empty string
-	// (the CircleCI API tokenListHandler calls the API(r, "") for every
-	// list item, and the field is tagged `json:"token,omitempty"`), because the
-	// runner admin API hands out a token's secret exactly once, at creation, and
-	// never discloses it again.
+	// (the field is tagged `json:"token,omitempty"`), because the API hands out
+	// a token's secret exactly once, at creation, and never discloses it again.
 	Token string `json:"token,omitempty"`
 }
 
@@ -239,10 +271,9 @@ type tokenItems struct {
 // TokenInput is the create body for a runner token.
 //
 // OrganizationID is carried for the same reason as on ResourceClassInput:
-// the API's create handler (the CircleCI API the API)
-// does not read an org_id from the body and instead derives the owning
-// organization from resource_class's namespace, but the extra field is
-// harmlessly ignored rather than rejected.
+// the create route does not read an org_id from the body and instead derives
+// the owning organization from resource_class's namespace, but the extra
+// field is harmlessly ignored rather than rejected.
 type TokenInput struct {
 	OrganizationID string `json:"org_id"`
 	ResourceClass  string `json:"resource_class"`
@@ -252,6 +283,11 @@ type TokenInput struct {
 // CreateToken creates a runner token and returns it, including the secret
 // value. This is the only response that ever carries the secret — see Token's
 // doc comment.
+//
+// A resource class holds at most 10 tokens; the eleventh create answers HTTP
+// 403 with a message naming the limit. A resource class that does not exist
+// answers HTTP 400 `no such resource class "..."`, not 404, because the
+// insert itself fails rather than a lookup happening first.
 func (c *Client) CreateToken(ctx context.Context, input TokenInput) (*Token, error) {
 	var created Token
 
@@ -287,9 +323,8 @@ func (c *Client) ListTokens(ctx context.Context, resourceClass string) ([]Token,
 }
 
 // DeleteToken deletes a token by id. A missing token answers HTTP 404,
-// satisfying IsNotFound — the same status an unauthorized caller gets
-// (the CircleCI API the API calls middleware.AccessDeniedMsg
-// when the token's namespace cannot be resolved).
+// satisfying IsNotFound — the same status an unauthorized caller gets when
+// the token's namespace cannot be resolved.
 func (c *Client) DeleteToken(ctx context.Context, id string) error {
 	_, err := c.raw.Call(ctx, httpcl.NewRequest(
 		http.MethodDelete,

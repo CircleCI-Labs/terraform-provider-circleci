@@ -9,6 +9,13 @@ vars:
   # Module path as declared in go.mod. Note it is NOT prefixed with a VCS host.
   MODULE_PATH: terraform-provider-circleci
 
+  # The provider's Terraform Registry address, NAMESPACE/TYPE. `validate-examples`
+  # uses it twice — once for the dev_overrides key and once for the required_providers
+  # block it injects into examples that declare none — and both must match the address
+  # the examples themselves use, or Terraform reports the provider as unavailable
+  # rather than as overridden. Defining it once is what stops those three drifting.
+  PROVIDER_SOURCE: CircleCI-Public/circleci
+
   RESULTS_DIR: test-reports
   TEST_REPORT: test-reports/tests.xml
   LINT_REPORT: test-reports/lint.xml
@@ -114,7 +121,7 @@ tasks:
         cat >"$work/cli.tfrc" <<TFRC
         provider_installation {
           dev_overrides {
-            "CircleCI-Public/circleci" = "$root"
+            "{{.PROVIDER_SOURCE}}" = "$root"
           }
           direct {}
         }
@@ -163,7 +170,7 @@ tasks:
         terraform {
           required_providers {
             circleci = {
-              source = "CircleCI-Public/circleci"
+              source = "{{.PROVIDER_SOURCE}}"
             }
           }
         }

@@ -9,15 +9,13 @@ import "context"
 // organization's audit log events, as JSON objects written to a
 // customer-owned S3 (or S3-compatible) bucket.
 //
-// the API's routes served (the API) names these routes
-// "/api/v2/organizations/{org_id}/audit-log/configs" and
-// "/api/v2/audit-log/configs[/{id}]"; its the API proxy config
-// (server.go's auditLogConfig) rewrites only the URL path before forwarding to
-// the API — the request and response bodies below are exactly
-// what the API's internal fileconfig handler sends and expects.
-// See DESIGN.md for why that distinction matters: the proxy's own handler
-// tests use fabricated placeholder bodies ("s3"/"bucket"/"name") that do not
-// reflect the real wire shape.
+// These are "/api/v2/organizations/{org_id}/audit-log/configs" and
+// "/api/v2/audit-log/configs[/{id}]". The public API only rewrites the URL
+// path before forwarding to the backend that actually owns them — the
+// request and response bodies below are exactly what that backend sends and
+// expects. See DESIGN.md for why that distinction matters: the public API's
+// own tests use fabricated placeholder bodies ("s3"/"bucket"/"name") that do
+// not reflect the real wire shape.
 //
 // Unlike the collection routes, the single-config routes (get, update,
 // delete) are NOT nested under /organizations/{org_id}/...: they address a
@@ -61,10 +59,10 @@ const (
 )
 
 // auditLogConfigPurpose is sent as the required "purpose" field on every
-// create and update. It exists purely for the API's own metrics
-// and audit trail — other consumers of the same underlying
-// file-notification-config API use different values — but this client only
-// ever manages audit log streaming, so it is not exposed as configurable.
+// create and update. It exists purely for the backend's own metrics and
+// audit trail — other consumers of the same underlying API use different
+// values — but this client only ever manages audit log streaming, so it is
+// not exposed as configurable.
 const auditLogConfigPurpose = "audit-logs"
 
 // AuditLogS3Config is the S3 (or S3-compatible) destination for an audit log
@@ -171,7 +169,7 @@ type CreateAuditLogConfigRequest struct {
 }
 
 // createAuditLogConfigBody is the POST body. Field names and nesting mirror
-// the API's FileNotificationCreateRequest exactly.
+// the backend's own create request type exactly.
 type createAuditLogConfigBody struct {
 	TargetType string           `json:"target_type"`
 	IsDisabled bool             `json:"is_disabled"`
@@ -182,7 +180,7 @@ type createAuditLogConfigBody struct {
 // CreateAuditLogConfig creates an audit log streaming config for an
 // organization.
 //
-// The API verifies connectivity to the destination bucket as part
+// The backend verifies connectivity to the destination bucket as part
 // of create — using the same OIDC-assumed role that will later write to it —
 // so a create can fail with a connectivity or permission error even when
 // IsDisabled is true. It also requires the organization to be on a CircleCI
@@ -215,7 +213,7 @@ type UpdateAuditLogConfigRequest struct {
 	// which organization owns it through this route.
 	OrgID string
 	// TargetType is AuditLogTargetTypeS3 or AuditLogTargetTypeS3Compatible.
-	// The service allows changing this in place; it does not re-run the
+	// The API allows changing this in place; it does not re-run the
 	// create-time conflict check against the organization's other configs.
 	TargetType string
 	// IsDisabled updates whether streaming is turned off. Connectivity is
@@ -227,7 +225,7 @@ type UpdateAuditLogConfigRequest struct {
 }
 
 // updateAuditLogConfigBody is the PUT body. Field names mirror
-// the API's FileNotificationUpdateRequest exactly.
+// the backend's own update request type exactly.
 type updateAuditLogConfigBody struct {
 	ID         string           `json:"id"`
 	OrgID      string           `json:"org_id"`

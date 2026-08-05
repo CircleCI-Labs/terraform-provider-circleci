@@ -73,9 +73,9 @@ const (
 	pipelineRenameDefinitionID = "bbbbbbbb-0000-1111-2222-333333333333"
 )
 
-// newPipelineRenameAPI serves the one route the renamed data source reads, from
-// the API. Anything else is a 404 naming the path, so a data source that
-// asks for the wrong id fails loudly instead of reading an empty result.
+// newPipelineRenameAPI serves the one route the renamed data source reads.
+// Anything else is a 404 naming the path, so a data source that asks for the
+// wrong id fails loudly instead of reading an empty result.
 func newPipelineRenameAPI(t *testing.T) string {
 	t.Helper()
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -41,10 +42,10 @@ const signingCertificateEntityBody = `{
 // load-bearing test for the create path.
 //
 // POST .../signing/certificates answers 201 with only {"data":{"id"}} in
-// production (see post_certificate_v3.go in circleci/the API) --
-// cert_blob and cert_password are never echoed back, on this call or any
-// other. CreateSigningCertificate must not mistake the create response for the
-// full representation; it has to make the documented follow-up GET.
+// production -- cert_blob and cert_password are never echoed back, on this
+// call or any other. CreateSigningCertificate must not mistake the create
+// response for the full representation; it has to make the documented
+// follow-up GET.
 func TestCreateSigningCertificateSendsEnvelopeAndFollowsUpWithGet(t *testing.T) {
 	t.Parallel()
 
@@ -172,9 +173,8 @@ func TestGetSigningCertificateDecodesEntityWithOrgReference(t *testing.T) {
 func TestGetSigningCertificateNotFound(t *testing.T) {
 	t.Parallel()
 
-	// v3 404s answer {"error":{"id","title"}} with no "detail" -- confirmed
-	// against circleci/the API's the API path. Detail must still
-	// render something sensible from the title alone.
+	// v3 404s answer {"error":{"id","title"}} with no "detail". Detail must
+	// still render something sensible from the title alone.
 	client, _ := newOrbClient(t, orbStatus(http.StatusNotFound,
 		`{"error":{"id":"trace-1","title":"Not Found"}}`))
 
@@ -189,11 +189,11 @@ func TestGetSigningCertificateNotFound(t *testing.T) {
 
 // TestListSigningCertificatesOmitsReferences pins the production shape where
 // the list endpoint's items carry no "references" object at all -- the org is
-// already known from filter[org_id], so certificateEntity's org reference (used
-// by the single-entity GET) has no counterpart on listCertificatesV3's items.
-// A client that expected references on list items would silently read a zero
-// value; this fixture is written in the production shape so a regression in
-// either direction is caught.
+// already known from filter[org_id], so the org reference used by the
+// single-entity GET has no counterpart on the list route's items. A client
+// that expected references on list items would silently read a zero value;
+// this fixture is written in the production shape so a regression in either
+// direction is caught.
 func TestListSigningCertificatesOmitsReferences(t *testing.T) {
 	t.Parallel()
 
@@ -298,5 +298,92 @@ func TestDeleteSigningCertificateIsNoContent(t *testing.T) {
 	}
 	if want := "/api/v3/signing/certificates/" + signingCertID; got.path != want {
 		t.Errorf("path = %q, want %q", got.path, want)
+	}
+}
+
+// TestSigningCertificateTypes pins the cert_type value set.
+//
+// This exists because the set was wrong: two constants were declared and the
+// documentation said "distribution or development", where the service classifies
+// an uploaded certificate into one of seven types by matching its X.509 Subject
+// Common Name against a fixed list of Apple prefixes. Five values were simply
+// missing, and three of the five change whether a signing configuration may
+// carry provisioning profiles at all -- so an incomplete set was not a cosmetic
+// documentation gap, it hid a combination the provider cannot express.
+//
+// Only a source read can settle this: no response from an account that happens to
+// hold two iOS certificates would show the other five.
+func TestSigningCertificateTypes(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"distribution",
+		"development",
+		"developer-id-application",
+		"developer-id-installer",
+		"mac-development",
+		"mac-app-distribution",
+		"mac-installer-distribution",
+	}
+
+	if !slices.Equal(circleci.SigningCertificateTypes, want) {
+		t.Errorf("SigningCertificateTypes = %v, want %v", circleci.SigningCertificateTypes, want)
+	}
+
+	// Every constant appears in the slice, so neither can drift from the other.
+	for _, certType := range []string{
+		circleci.SigningCertificateTypeDistribution,
+		circleci.SigningCertificateTypeDevelopment,
+		circleci.SigningCertificateTypeDeveloperIDApplication,
+		circleci.SigningCertificateTypeDeveloperIDInstaller,
+		circleci.SigningCertificateTypeMacDevelopment,
+		circleci.SigningCertificateTypeMacAppDistribution,
+		circleci.SigningCertificateTypeMacInstallerDistribution,
+	} {
+		if !slices.Contains(circleci.SigningCertificateTypes, certType) {
+			t.Errorf("SigningCertificateTypes is missing the constant %q", certType)
+		}
+	}
+}
+
+// TestSigningCertificateTypeRequiresProvisioningProfile pins the two-sided rule
+// the create-signing-config route enforces from the referenced certificate's
+// type.
+//
+// The client used to document the opposite of half of it -- "an empty list is
+// accepted" -- which is true for exactly the three types below that report false
+// and false for the four that report true, where an empty list is a 400. Getting
+// it backwards mattered: circleci_ios_signing_config requires at least one
+// profile, so the three false cases cannot be used with that resource at all.
+func TestSigningCertificateTypeRequiresProvisioningProfile(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]bool{
+		circleci.SigningCertificateTypeDistribution:             true,
+		circleci.SigningCertificateTypeDevelopment:              true,
+		circleci.SigningCertificateTypeMacDevelopment:           true,
+		circleci.SigningCertificateTypeMacAppDistribution:       true,
+		circleci.SigningCertificateTypeDeveloperIDApplication:   false,
+		circleci.SigningCertificateTypeDeveloperIDInstaller:     false,
+		circleci.SigningCertificateTypeMacInstallerDistribution: false,
+	}
+
+	for certType, requires := range want {
+		if got := circleci.SigningCertificateTypeRequiresProvisioningProfile(certType); got != requires {
+			t.Errorf("SigningCertificateTypeRequiresProvisioningProfile(%q) = %t, want %t", certType, got, requires)
+		}
+	}
+
+	// Every declared type is covered, so a new one cannot be added without
+	// deciding which side of the rule it falls on.
+	if len(want) != len(circleci.SigningCertificateTypes) {
+		t.Errorf("covered %d types, want all %d", len(want), len(circleci.SigningCertificateTypes))
+	}
+
+	// An unrecognized type follows the service's own default rather than being
+	// treated as exempt, so a value this package has not caught up with fails
+	// closed towards requiring a profile.
+	if !circleci.SigningCertificateTypeRequiresProvisioningProfile("something-new") {
+		t.Error("SigningCertificateTypeRequiresProvisioningProfile(unknown) = false, want true")
 	}
 }

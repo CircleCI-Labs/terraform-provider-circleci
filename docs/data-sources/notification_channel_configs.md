@@ -11,11 +11,13 @@ Lists CircleCI notification channel configs for the calling user, or for one pro
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Channel configs are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/notification/channel-configs` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 `project_id` and `org_id` are required when `scope = "project"`, and must be omitted when `scope = "user"`.
 
@@ -44,11 +46,13 @@ output "project_channel_config_ids" {
 
 ### Required
 
-- `scope` (String) Whether to list the calling user's own configs (`user`) or a project's configs (`project`). `project_id` and `org_id` are required when this is `project`.
+- `scope` (String) Whether to list the calling user's own configs (`user`) or a project's configs (`project`). `project_id` and `org_id` are required when this is `project`; `org_id` must be omitted when this is `user` (see `org_id`).
 
 ### Optional
 
 - `org_id` (String) Unique identifier (UUID) of the organization the project belongs to. Required when `scope = "project"`.
+
+~> **Must be omitted when `scope = "user"`.** CircleCI's user-scoped listing takes no organization parameter at all, so a value here would not be honoured -- it would be silently ignored, and the result would be the calling user's channel configs across every organization rather than just this one. That combination is rejected at plan time instead of being accepted and doing the wrong thing.
 - `project_id` (String) Unique identifier (UUID) of the project to list configs for. Required when `scope = "project"`.
 
 ### Read-Only

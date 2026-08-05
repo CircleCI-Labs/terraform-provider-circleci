@@ -9,11 +9,17 @@ description: |-
 
 Fetches every checkout key of a CircleCI project, including keys created outside Terraform.
 
-Works against both **CircleCI Cloud and CircleCI Server** — checkout keys are served by the v2 API, which both provide.
-
-> **Not available for GitLab or GitHub App projects.** The CircleCI API only exposes checkout keys for projects integrated through GitHub OAuth or Bitbucket. A project whose slug starts with `circleci/` is a GitLab or GitHub App project, and requests for its checkout keys are rejected.
-
 > **Note:** A key created with `type = "user-key"` is reported by the API as `github-user-key`. This data source returns the API's own value; the `circleci_checkout_key` resource normalizes it back to `user-key` to match your configuration.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Checkout keys are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/project/{project-slug}/checkout-key` |
+| **Organization type** | **GitHub OAuth (`gh/<org>`) and Bitbucket Cloud (`bb/<org>`) projects only.** Not available to GitHub App, GitHub Enterprise Server, GitLab.com or GitLab self-managed projects: those check out over HTTPS and need no key, their slugs take the `circleci/<org-id>/<project-id>` form, and CircleCI rejects the request. Note a read/write asymmetry — only `POST` carries the restriction, so a `GET` on a GitLab project succeeds and returns the auto-provisioned key, which means a resource reads fine and fails only on create. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 

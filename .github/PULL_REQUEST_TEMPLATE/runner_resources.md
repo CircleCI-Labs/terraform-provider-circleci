@@ -19,10 +19,11 @@
      - Service initialized in Configure()
      - Resource/data source registered in Resources() or DataSources() -->
 
-### SDK Dependency
+### API client
 
-<!-- Does this require the local circleci-sdk-go replace directive in go.mod?
-     If so, note which package(s) and when they are expected to be published remotely. -->
+<!-- Which internal/circleci client methods does this use, and are they new?
+     A new route needs a client method with an httptest-backed test of its own,
+     derived from what the API actually returns rather than from what we expect. -->
 
 ## Schema Reference
 
@@ -53,7 +54,7 @@ resource "circleci_runner_token" "example" {
 
 - [ ] `go build ./...` passes
 - [ ] Acceptance tests require a CircleCI token with **self-hosted runner admin** permissions (separate scope from the standard `CIRCLE_TOKEN` used by other tests)
-- [ ] `TF_ACC=1 CIRCLE_TOKEN=<runner-admin-token> go test ./internal/provider/ -run TestAccRunner -v -timeout 120s`
+- [ ] `TF_ACC=1 CIRCLE_TOKEN=<token-with-that-scope> go test ./internal/provider/ -run TestAccRunner -v -timeout 120s`
 - [ ] Create and Read verified against live API
 - [ ] Delete (and force-delete if applicable) verified
 - [ ] ImportState verified

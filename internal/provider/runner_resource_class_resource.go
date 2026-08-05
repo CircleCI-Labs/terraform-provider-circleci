@@ -27,14 +27,31 @@ import (
 // provider's runner_host attribute into circleci.Client's runnerHost.
 //
 // Canonical surface: every runner resource and data source in this provider
-// deliberately targets the established `{runner_host}/api/v3/runner/...` surface
-// (`/runner/resource`, `/runner/token`, `/runner/tasks` — see
-// internal/circleci/runner.go). A newer surface exists at
-// `circleci.com/api/v3/runner/resource-classes` (plural, with an `/update` action),
-// served by the API's api/v3 package and proxied through the API,
-// but it is being actively reshaped, so it is intentionally NOT used here. Do not
-// migrate until that surface is stable; the existing surface is the one CircleCI
-// Server also serves.
+// targets the flat `{runner_host}/api/v3/runner/...` surface (`/runner/resource`,
+// `/runner/token`, `/runner/tasks`, `/runner` — see internal/circleci/runner.go),
+// which upstream calls the "legacy" one. The newer surface —
+// `/api/v3/runner/resource-classes` (plural, with an `/update` action),
+// `/runner/tokens`, `/runner/agents`, `/runner/metrics` — is designated canonical
+// upstream and is the one CircleCI Cloud's public API proxies to. Both are
+// served by the same backend behind the same ingress, so both are reachable
+// at runner_host.
+//
+// Staying on the flat surface is still deliberate, for reasons stronger than "the
+// new one is in flux":
+//
+//   - It is what CircleCI Server serves, and runner_host exists so one
+//     configuration works on Cloud and Server alike.
+//   - The newer agents route drops fields circleci_runners exposes today: it has
+//     no hostname, no ip and no last_used, and replaces the status string with an
+//     is_busy boolean. Migrating would be a breaking change to that data source
+//     for less data.
+//   - It requires a different request and response shape throughout — a
+//     `{"data": {"attributes": …, "references": …}}` envelope, `filter[org_id]`
+//     and `filter[resource_class]` query parameters, and an org supplied as
+//     `references.org.id` rather than a body field — and it rejects unrecognised
+//     request fields outright, unlike the flat surface, which ignores them.
+//
+// Revisit if the flat surface is announced for removal, not merely superseded.
 
 // runnerOrgIDPattern recognises the UUID that the runner API expects for
 // organization identifiers. The runner API takes a UUID only — it does not accept
@@ -43,7 +60,42 @@ import (
 var runnerOrgIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // runnerResourceClassPattern recognises a "namespace/name" resource class.
-var runnerResourceClassPattern = regexp.MustCompile(`^[^/]+/[^/]+$`)
+//
+// It mirrors the API's own resource-class validation rules, rather than
+// merely checking for one slash. Those rules are:
+//
+//   - exactly one "/", splitting the value into a namespace and a class;
+//   - no "." anywhere in the value — the API rejects the whole string on
+//     sight of one, because a dot is how a fully qualified id separates the
+//     executor ("runner.acme/linux") and callers must not supply that part;
+//   - the namespace matches `^[a-z0-9_-]+$` — lower case only;
+//   - the class matches `^[a-zA-Z0-9:_+.-]+$`, minus the dot the rule above
+//     already forbids, so mixed case is fine here but not in the namespace.
+//
+// The looser `^[^/]+/[^/]+$` this replaced accepted two shapes the API then
+// refused with an opaque HTTP 400 at apply time: an upper-case namespace
+// ("MyOrg/linux") and any dotted name ("acme/ubuntu-22.04"). Catching the wrong
+// shape while the plan is being made is the whole point of having the check, so
+// the check has to know the same rules the service does.
+var runnerResourceClassPattern = regexp.MustCompile(`^[a-z0-9_-]+/[a-zA-Z0-9:_+-]+$`)
+
+// runnerResourceClassFormatMessage explains runnerResourceClassPattern. The
+// namespace's case rule is called out because it is the half practitioners get
+// wrong: an organization's display name is usually capitalised and its runner
+// namespace is not.
+const runnerResourceClassFormatMessage = "must be in the format 'namespace/name', " +
+	"where the namespace is lower-case letters, digits, '_' or '-', and neither part contains a '.'"
+
+// runnerNamespacePattern recognises a bare runner namespace, mirroring the
+// API's own validation: it rejects any value containing "." or "/" outright
+// and then applies the same lower-case namespace rule as
+// runnerResourceClassPattern. Without it a namespace filter with the wrong shape
+// reached the API and came back as HTTP 400 "invalid namespace".
+var runnerNamespacePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
+
+// runnerNamespaceFormatMessage explains runnerNamespacePattern.
+const runnerNamespaceFormatMessage = "must be a runner namespace: lower-case letters, digits, " +
+	"'_' or '-', with no '.' or '/'"
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -105,7 +157,10 @@ func (r *runnerResourceClassResource) Schema(_ context.Context, _ resource.Schem
 	orgID.Validators = orgIDValidators
 
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a CircleCI runner resource class.",
+		MarkdownDescription: "Manages a CircleCI runner resource class.\n\n" +
+			"~> **A namespace holds at most 650 resource classes.** Creating one past the limit is " +
+			"refused with HTTP 403 and a message naming it. The limit counts the whole namespace, " +
+			"including resource classes created outside Terraform.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the runner resource class.",
@@ -120,18 +175,35 @@ func (r *runnerResourceClassResource) Schema(_ context.Context, _ resource.Schem
 				MarkdownDescription: "The resource class name in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.",
 				Required:            true,
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerResourceClassPattern, "must be in the format 'namespace/name'"),
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
 				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"description": schema.StringAttribute{
-				MarkdownDescription: "Description of the runner resource class.",
-				Optional:            true,
-				Computed:            true,
+				MarkdownDescription: "Description of the runner resource class. Changing this value " +
+					"forces a new resource to be created: the runner API has no update route for a " +
+					"resource class at all (see CreateResourceClass and DeleteResourceClass in " +
+					"internal/circleci/runner.go — there is no method between them), so without this " +
+					"modifier an edited description planned an in-place update, Update() had nothing to " +
+					"call and silently persisted the plan into state, and the next Read then overwrote it " +
+					"back to the API's unchanged value — reporting apply success while changing nothing.",
+				Optional: true,
+				Computed: true,
 				PlanModifiers: []planmodifier.String{
+					// UseStateForUnknown must run first: it resolves an unconfigured
+					// description to its prior state value before RequiresReplaceIfConfigured
+					// ever compares anything, which is what keeps a merely-unknown value (for
+					// example while organization_id is still being computed) from planning a
+					// spurious replacement. RequiresReplaceIfConfigured rather than plain
+					// RequiresReplace for the same reason org_id_deprecation.go gives: this
+					// attribute is Optional+Computed, so a plain RequiresReplace would also fire
+					// on the value UseStateForUnknown itself retains, if modifier order ever
+					// changed. Conditioning on the configuration, not on any diff, is what makes
+					// this safe independent of ordering.
 					stringplanmodifier.UseStateForUnknown(),
+					stringplanmodifier.RequiresReplaceIfConfigured(),
 				},
 			},
 			"force_delete": schema.BoolAttribute{
@@ -209,9 +281,9 @@ func (r *runnerResourceClassResource) Create(ctx context.Context, req resource.C
 	organizationID := effectiveOrgID(plan.OrganizationId, plan.OrgId)
 
 	// The schema requires an organization, so one is always sent here even though
-	// the production create handler (the CircleCI API) derives the
-	// owning org from resource_class's namespace and never reads org_id from the
-	// body — see circleci.ResourceClassInput's doc comment.
+	// the create route derives the owning org from resource_class's namespace and
+	// never reads org_id from the body — see circleci.ResourceClassInput's doc
+	// comment.
 	createReq := circleci.ResourceClassInput{
 		OrganizationID: organizationID,
 		ResourceClass:  plan.ResourceClass.ValueString(),

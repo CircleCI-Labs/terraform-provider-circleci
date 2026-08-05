@@ -16,7 +16,7 @@ This is the discovery counterpart to the rest of the provider. Almost every Circ
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | Yes — the route is v2, which CircleCI Server serves. |
+| **CircleCI Server** | Yes. The route is served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
 | **API** | `GET /api/v2/me/collaborations` |
 | **Organization type** | Any; the listing spans every VCS type the user is connected to. |
 | **Token** | A **personal** API token. The route reports the authenticated user's collaborations, so a project or organization token is rejected. |

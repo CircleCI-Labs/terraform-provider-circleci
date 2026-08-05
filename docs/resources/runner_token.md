@@ -77,8 +77,6 @@ resource "circleci_runner_token" "agent_rotated" {
 - `org_id` (String) The unique identifier (UUID) of the organization that owns this runner token.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.
-
-Changing this value forces a new resource to be created.
 - `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this runner token.
 
 ~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
@@ -87,7 +85,7 @@ Changing this value forces a new resource to be created.
 
 - `created_at` (String) The time at which the token was created.
 - `id` (String) Unique identifier (UUID) of the runner token.
-- `token` (String, Sensitive) The token value used to authenticate a runner agent. Only available at creation time — this value is not returned by the API on subsequent reads and will be empty after an import.
+- `token` (String, Sensitive) The token value used to authenticate a runner agent. Only available at creation time — this value is not returned by the API on subsequent reads and is null after an import.
 
 ## Import
 
@@ -97,4 +95,6 @@ Import is supported using `resource_class/token_id` (e.g., `my-namespace/my-runn
 terraform import circleci_runner_token.example "my-namespace/my-runner/<token_id>"
 ```
 
-> **Warning:** After import, the `token` value will be empty because the CircleCI API does not return token values after creation. Importing a runner token is only useful for tracking the token's lifecycle in Terraform state. The actual token value cannot be recovered.
+> **Warning:** After import, the `token` value is null because the CircleCI API does not return token values after creation. Importing a runner token is only useful for tracking the token's lifecycle in Terraform state. The actual token value cannot be recovered — provision a fresh token and update your runner agents' configuration if you need the value.
+
+`organization_id`/`org_id` are also null after import — the token representation carries no organization for a read to recover one from — but supplying one afterwards is a genuine, one-time in-place update, not a replacement: this resource does not force replacement on an organization change (see the schema documentation above), and there is nothing to invalidate by updating it. `resource_class` and `nickname` both come back from the subsequent read and match the values already in state, so once the organization is supplied the plan settles to empty.

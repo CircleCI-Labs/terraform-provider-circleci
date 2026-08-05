@@ -11,11 +11,13 @@ Uploads an Apple code-signing certificate (a `.p12` file and its password) to a 
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-~> **Not available on CircleCI Server.** Signing certificates are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. The certificate itself is only useful to a **macOS executor** building and signing an iOS app.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/signing/certificates`, `GET` and `DELETE /api/v3/signing/certificates/{id}` |
+| **Organization type** | Any. The certificate is only usable by a **macOS executor**, so an organization with no macOS plan can hold one but never use it. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -25,9 +27,31 @@ Uploads an Apple code-signing certificate (a `.p12` file and its password) to a 
 
 ## Immutability
 
-The CircleCI API has no update endpoint for a signing certificate: the routes served is `GET`/`POST /signing/certificates` and `GET`/`DELETE /signing/certificates/{id}`, nothing else. Every configurable attribute — `organization_id`, `file_name`, `certificate_blob`, `certificate_password` and `certificate_wo_version` — is therefore `RequiresReplace`. Changing any of them uploads a brand new certificate and deletes the old one; it is not a design preference, there is simply no other operation the API supports.
+The CircleCI API has no update endpoint for a signing certificate: the routes are `GET`/`POST /signing/certificates` and `GET`/`DELETE /signing/certificates/{id}`, nothing else. Every configurable attribute — `organization_id`, `file_name`, `certificate_blob`, `certificate_password` and `certificate_wo_version` — is therefore `RequiresReplace`. Changing any of them uploads a brand new certificate and deletes the old one; it is not a design preference, there is simply no other operation the API supports.
 
 There is also no read route for a certificate's content or password, on this or any other endpoint. `cert_type`, `fingerprint`, `created_at` and `expires_at` are the only attributes CircleCI genuinely reports back; see "Security" below for what that means for the certificate inputs.
+
+## One resource per certificate
+
+`file_name` is a label, not part of a certificate's identity. CircleCI keys a stored certificate on the organization and the certificate's own fingerprint, and re-uploading the same `.p12` returns the id of the first upload and leaves its `file_name` alone.
+
+Two of these resources holding the same certificate under different names therefore collide onto one id: the second apply reads back the first one's `file_name` and Terraform reports the provider produced an inconsistent result. Use one resource per distinct certificate.
+
+## Certificate types
+
+`cert_type` is derived from the certificate rather than configured — CircleCI matches its X.509 Subject Common Name against a fixed set of Apple prefixes, and rejects a certificate matching none of them outright. There are seven values, and which one a certificate has decides whether [`circleci_ios_signing_config`](./ios_signing_config) can be used with it at all:
+
+| `cert_type` | Apple common name prefix | Works with `circleci_ios_signing_config` |
+| --- | --- | --- |
+| `distribution` | `iPhone Distribution:` / `Apple Distribution:` | Yes |
+| `development` | `iPhone Developer:` / `Apple Development:` | Yes |
+| `mac-development` | `Mac Developer:` | Yes |
+| `mac-app-distribution` | `3rd Party Mac Developer Application:` | Yes |
+| `developer-id-application` | `Developer ID Application:` | No |
+| `developer-id-installer` | `Developer ID Installer:` | No |
+| `mac-installer-distribution` | `3rd Party Mac Developer Installer:` | No |
+
+The three that do not work are the ones with no provisioning profile in Apple's own workflow, and CircleCI enforces that: it **refuses** a signing configuration carrying any provisioning profile for a certificate of one of those types. `circleci_ios_signing_config` requires at least one profile, so there is nothing to pair such a certificate with. You can still upload it with this resource — it just cannot be referenced by a signing configuration.
 
 ## Security
 
@@ -74,3 +98,17 @@ Either way:
 This resource deliberately has **no computed attribute that echoes back a masked form** of the certificate or its password (contrast [`circleci_webhook`](./webhook)'s `has_signing_secret`, which exists because that API genuinely reports whether a secret is configured). A certificate cannot exist without content and a password — one of the two spellings is always configured — so there is no "configured or not" ambiguity for a boolean to resolve, and a `Sensitive` string that only ever held a fixed mask would look like a credential without being one.
 
 See the [Managing secrets](../guides/managing-secrets) guide for how this compares with the provider's other secret-bearing resources.
+
+## Import
+
+Import is supported using the certificate's id:
+
+```shell
+terraform import circleci_ios_signing_certificate.distribution "11111111-1111-1111-1111-111111111111"
+```
+
+`organization_id`, `file_name`, `cert_type`, `fingerprint`, `created_at` and `expires_at` all come back from the subsequent read. `certificate_blob` and `certificate_password` do not, and cannot: CircleCI never discloses either value again after the upload that set them, on this or any other route.
+
+!> **The very next plan replaces the imported certificate.** Both credential attributes — `certificate_blob`/`certificate_password` and `certificate_blob_wo`/`certificate_password_wo` plus `certificate_wo_version` — are `RequiresReplace` (see "Immutability" above), and `RequiresReplace` fires on *any* change to the attribute's value, including from null (what import leaves behind) to whatever the configuration supplies. There is no exception in the plugin framework for "this is import filling in a gap the API cannot fill," and this provider adds none of its own: adding one would mean silently accepting a config-supplied credential into state without ever uploading it, which is worse. So a configuration written after import — by either spelling, since one of the two is always required — plans a **destroy and recreate** of the certificate on the first `terraform plan` that follows, not an empty plan. This was confirmed against a real plan; see `TestAccIOSSigningCertificateResource_ImportForcesReplacement` and its write-only counterpart.
+
+Practically, that leaves import useful for one thing: carrying the identity and the read-only attributes into state without a create call, for example while migrating a configuration that used to manage this resource by hand. It does not let a practitioner adopt the specific certificate object CircleCI already has — the replacement uploads a new one with a new `id` and deletes the old one. If keeping the exact existing certificate matters, do not import; leave it unmanaged instead.

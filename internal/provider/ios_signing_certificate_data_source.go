@@ -75,8 +75,10 @@ func (d *iosSigningCertificateDataSource) Schema(_ context.Context, _ datasource
 				Computed:            true,
 			},
 			"cert_type": schema.StringAttribute{
-				MarkdownDescription: "The certificate's type, `distribution` or `development`.",
-				Computed:            true,
+				MarkdownDescription: "The certificate's type: one of `distribution`, `development`, " +
+					"`developer-id-application`, `developer-id-installer`, `mac-development`, " +
+					"`mac-app-distribution` or `mac-installer-distribution`.",
+				Computed: true,
 			},
 			"fingerprint": schema.StringAttribute{
 				MarkdownDescription: "The certificate's fingerprint.",

@@ -11,23 +11,15 @@ Fetches the users that are members of a CircleCI group.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No, for two independent reasons. CircleCI groups require a `circleci` type (standalone) organization, and a CircleCI Server installation is always a `github` type organization, so it can never hold a group whose members this could read — and separately, this data source is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this data source with `deployment = "server"` reports an explicit error either way. |
+| **API** | `GET /private/ciam/orgs/{org_id}/groups/{group_id}/users` |
+| **Organization type** | `circleci` (standalone) only. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud. |
+| **Token** | A personal API token with read access to the organization. |
 
-This data source uses
-`/api/v2/organizations/{organization_id}/groups/{group_id}/users`, which sits
-under the `/api/v2/organizations/{organization_id}/groups` prefix that a CircleCI
-Server installation forwards to the public API service, so it works against both
-Cloud and Server.
-
-~> **This API is not part of the published CircleCI OpenAPI specification** and
-may change without notice.
-
-~> **Only the first page of members is returned.** The response carries a
-`next_page_token`, but the endpoint does not forward a page token to the service
-behind it, so requesting a later page returns the first page again. There is no
-way to read past the first page, and the provider does not try.
+~> **This route carries no published specification and CircleCI may change or remove it without notice.** It is not part of the versioned public API, and not the same route as `circleci_group`: the equivalent public-looking path (`/api/v2/organizations/{org_id}/groups/{group_id}/users`) answers HTTP 404 in production even for a group that demonstrably exists — the published OpenAPI spec confirms this with a per-route `servers:` override pointing at a host reserved for internal traffic. The route this data source actually uses is the one CircleCI's own web application calls for its group management UI, confirmed against that UI's own source. Treat this as best-effort all the same.
 
 Members are exposed two ways: `user_ids` is the flat set of UUIDs that the
 `circleci_group_membership` resource consumes, and `members` carries the display

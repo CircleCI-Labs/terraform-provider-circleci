@@ -13,11 +13,25 @@ import (
 	"testing"
 )
 
-// The runner admin API lives on its own origin, which the provider reaches
+// The runner API lives on its own origin, which the provider reaches
 // through the runner_host attribute (see provider.go). That makes it easy to
 // point the runner service at a fake: these helpers stand up an httptest server
 // that speaks the runner API and record every request it receives, so tests can
 // assert on what the provider actually sent rather than only on resulting state.
+//
+// This fake deliberately does NOT reject unrecognised request fields, unlike
+// rejectUnexpectedFields in trigger_resource_fake_test.go. That pattern exists
+// because the trigger API's binder makes the request struct an exact
+// allow-list and answers `400 Unexpected field '<name>'`, so a fake that ignored
+// unknown fields could not catch a misspelled key. The routes served here are the
+// opposite case, checked against the service rather than assumed: the runner
+// API's handlers bind with gin's default JSON binding and never call
+// gin.EnableDecoderDisallowUnknownFields, so an unrecognised key is
+// silently discarded. Adding strict checking here would make the fake stricter
+// than production and would reject the org_id the provider sends on purpose (see
+// circleci.ResourceClassInput). Note that the newer resource-classes surface
+// *does* reject unknown members — if the client is ever moved there, this fake
+// must gain the strict behaviour at the same time.
 
 // runnerFakeRequest is one request the fake runner API received.
 type runnerFakeRequest struct {

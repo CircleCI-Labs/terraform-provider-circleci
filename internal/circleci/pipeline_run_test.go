@@ -12,15 +12,15 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// v2Request is one request as a mock v2 API server saw it.
+// v2Request is one request as the mock v2 server saw it.
 type v2Request struct {
 	method string
 	path   string
 	rawURI string
 }
 
-// newV2Server serves v2-shaped routes from handler and records every
-// request, so tests can assert on the exact paths and raw request lines sent.
+// newV2Server serves v2-shaped routes from handler and records every request,
+// so tests can assert on the exact paths and raw request lines sent.
 func newV2Server(t *testing.T, handler http.HandlerFunc) (*circleci.Client, *[]v2Request) {
 	t.Helper()
 

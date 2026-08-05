@@ -74,7 +74,7 @@ func (d *runnerTokensDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 					"format (e.g. `myorg/myrunner`).",
 				Required: true,
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerResourceClassPattern, "must be in the format 'namespace/name'"),
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
 				},
 			},
 			"tokens": schema.ListNestedAttribute{

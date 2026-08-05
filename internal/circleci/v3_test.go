@@ -160,3 +160,88 @@ func equal[T comparable](a, b []T) bool {
 
 	return true
 }
+
+// TestDrainStopsWhenPaginationDoesNotAdvance pins the guard against the shape of
+// bug that hung Terraform: an endpoint that answers every request with a full
+// first page and the same token it was given.
+//
+// The pre-existing empty-page check cannot catch this — a full page satisfies it
+// on every iteration — which is why this needed its own guard rather than a
+// tweak to the old one.
+func TestDrainStopsWhenPaginationDoesNotAdvance(t *testing.T) {
+	t.Parallel()
+
+	t.Run("v2 refuses to spin", func(t *testing.T) {
+		t.Parallel()
+
+		calls := 0
+		_, err := circleci.DrainV2(context.Background(), func(_ context.Context, token string) (circleci.PaginatedResponse[string], error) {
+			calls++
+			if calls > 10 {
+				t.Fatal("DrainV2 kept requesting pages: the guard did not fire")
+			}
+
+			return circleci.PaginatedResponse[string]{
+				Items:         []string{"a", "b"},
+				NextPageToken: "stuck",
+			}, nil
+		})
+
+		if !errors.Is(err, circleci.ErrPaginationDidNotAdvance) {
+			t.Fatalf("err = %v, want ErrPaginationDidNotAdvance", err)
+		}
+
+		// First request sends "", second sends "stuck" and sees "stuck" back.
+		if calls != 2 {
+			t.Errorf("made %d requests, want 2: the guard should fire as soon as a token repeats", calls)
+		}
+	})
+
+	t.Run("v3 refuses to spin", func(t *testing.T) {
+		t.Parallel()
+
+		calls := 0
+		_, err := circleci.DrainV3(context.Background(), func(_ context.Context, cursor string) (circleci.List[string], error) {
+			calls++
+			if calls > 10 {
+				t.Fatal("DrainV3 kept requesting pages: the guard did not fire")
+			}
+
+			stuck := "stuck"
+
+			return circleci.List[string]{
+				Data: []string{"a", "b"},
+				Page: circleci.Page{Next: &stuck},
+			}, nil
+		})
+
+		if !errors.Is(err, circleci.ErrPaginationDidNotAdvance) {
+			t.Fatalf("err = %v, want ErrPaginationDidNotAdvance", err)
+		}
+
+		if calls != 2 {
+			t.Errorf("made %d requests, want 2", calls)
+		}
+	})
+
+	t.Run("a partial list is not returned", func(t *testing.T) {
+		t.Parallel()
+
+		items, err := circleci.DrainV2(context.Background(), func(_ context.Context, _ string) (circleci.PaginatedResponse[string], error) {
+			return circleci.PaginatedResponse[string]{
+				Items:         []string{"a"},
+				NextPageToken: "stuck",
+			}, nil
+		})
+
+		if err == nil {
+			t.Fatal("want an error")
+		}
+
+		// Returning what it had would be indistinguishable from a complete list,
+		// and callers feed these into lists Terraform reconciles.
+		if items != nil {
+			t.Errorf("returned %v, want nil: a truncated list reads as a complete one", items)
+		}
+	})
+}

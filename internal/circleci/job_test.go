@@ -33,12 +33,12 @@ func TestJobServiceGet(t *testing.T) {
 			"organization": {"name": "CircleCI-Public"},
 			"parallelism": 1,
 			"pipeline": {"id": "1e2d3c4b-5a69-7887-9a0b-1c2d3e4f5061"},
-			"project": {"id": "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f", "slug": "gh/CircleCI-Public/circle", "name": "circle", "external_url": "https://github.com/CircleCI-Public/circle"},
-			"web_url": "https://app.circleci.com/pipelines/github/CircleCI-Public/circle/jobs/578122"
+			"project": {"id": "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f", "slug": "gh/example-org/example-repo", "name": "example-repo", "external_url": "https://github.com/example-org/example-repo"},
+			"web_url": "https://app.circleci.com/pipelines/github/example-org/example-repo/jobs/578122"
 		}`))
 	})
 
-	job, err := client.Jobs().Get(context.Background(), "gh/CircleCI-Public/circle", 578122)
+	job, err := client.Jobs().Get(context.Background(), "gh/example-org/example-repo", 578122)
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
@@ -52,14 +52,14 @@ func TestJobServiceGet(t *testing.T) {
 	if job.Executor == nil || job.Executor.ResourceClass == nil || *job.Executor.ResourceClass != "medium" {
 		t.Errorf("job executor = %+v, want resource_class medium", job.Executor)
 	}
-	if job.Project == nil || job.Project.Slug != "gh/CircleCI-Public/circle" {
-		t.Errorf("job project = %+v, want slug gh/CircleCI-Public/circle", job.Project)
+	if job.Project == nil || job.Project.Slug != "gh/example-org/example-repo" {
+		t.Errorf("job project = %+v, want slug gh/example-org/example-repo", job.Project)
 	}
 	if len(job.ParallelRuns) != 1 || job.ParallelRuns[0].Status != "success" {
 		t.Errorf("job parallel runs = %+v, want one success run", job.ParallelRuns)
 	}
 
-	wantURI := "/api/v2/project/gh/CircleCI-Public/circle/job/578122"
+	wantURI := "/api/v2/project/gh/example-org/example-repo/job/578122"
 	if got := (*seen)[0]; got.method != http.MethodGet || got.rawURI != wantURI {
 		t.Errorf("request = %s %s, want GET %s", got.method, got.rawURI, wantURI)
 	}

@@ -91,7 +91,20 @@ jobs:
       - run: task build
       - go/with-cache:
           steps:
-            - run: task ci:test
+            - run:
+                name: task ci:test
+                # CircleCI kills a step that emits nothing for 10 minutes, and this
+                # one can. `gotestsum --junitfile` uses its pkgname format, which
+                # prints a single line per package, so with three packages the step
+                # is silent for minutes at a stretch — and internal/provider alone
+                # takes about ten, because its tests drive a real terraform binary.
+                # The suite was passing on the merits and being killed anyway.
+                #
+                # Go's own -timeout is already 120m; this is purely CircleCI's
+                # no-output guard, so it needs to be looser than the whole suite
+                # rather than looser than any one gap in the output.
+                no_output_timeout: 30m
+                command: task ci:test
       - run:
           name: Summarize coverage
           when: always
@@ -125,21 +138,3 @@ workflows:
                 - "1.13.5"
                 # renovate: terraform
                 - "1.14.6"
-
-# Enabling the acceptance tests against a real organization
-#
-# `task ci:test` sets TF_ACC=1, so the acceptance tests are always attempted.
-# Each one skips with a named-variable message unless its fixture is configured,
-# so the build is green without any credentials — but it is also only exercising
-# the mock-backed tests.
-#
-# To run them for real, create a context holding CIRCLE_TOKEN plus the
-# CIRCLECI_TEST_* variables listed in the README, then add it to the
-# build-and-test job:
-#
-#   - build-and-test:
-#       context: <your-context-name>
-#       ...
-#
-# Do not point these at a production organization: the tests create and delete
-# contexts, projects, groups and runner resource classes.

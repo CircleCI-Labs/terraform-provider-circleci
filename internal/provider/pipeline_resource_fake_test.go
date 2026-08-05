@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -23,19 +24,19 @@ import (
 
 // This file backs `circleci_pipeline` (pipeline_resource.go) and its singular
 // data source (pipeline_data_source.go) with an in-process stand-in for the
-// public API service, so their CRUD paths run without TF_ACC or credentials.
+// public API, so their CRUD paths run without TF_ACC or credentials.
 //
 // Both go through internal/circleci's pipeline definition methods
 // (internal/circleci/pipeline_definition.go), whose wire shapes were
-// cross-checked against the CircleCI API:
-//   - the CircleCI API for the create body
+// cross-checked against the real API:
+//   - the create body
 //     (config_source{provider,repo{external_id},file_path},
 //     checkout_source{provider,repo{external_id}})
-//   - the CircleCI API for the update body
+//   - the update body
 //     (config_source{file_path} ONLY — provider/repo are not updatable at all;
 //     checkout_source{provider,repo{external_id}}, same as create)
 //
-// Before the SDK migration (issue #26), circleci_pipeline had
+// Before the SDK migration, circleci_pipeline had
 // three characterized bugs, all fixed by that migration: project_id had no
 // RequiresReplace (an in-place update sent the new project_id with the old
 // pipeline id, 404ing); Read() treated a 404 as a permanent error rather than
@@ -175,9 +176,71 @@ func resolveFullName(externalID string) string {
 	return "acme-org/repo-" + externalID
 }
 
+// rejectInvalidPipelineDefinitionCreate answers HTTP 400 for the create bodies
+// the real API refuses, and reports whether it did.
+//
+// Both rules are enforced by the API's config_source oneOf schema, which runs
+// ahead of the handler:
+//
+//   - a repo on the "circleci" branch of config_source. That branch is
+//     `additionalProperties: false` over only provider and file_path, so a repo
+//     there does not fall back to the VCS branch either — it fails the oneOf
+//     outright, reported as a schema-validation error naming the offending path.
+//   - a repository external id that is not a number, for any provider that takes a
+//     repository at all (config_source's github_app/github_server, and
+//     checkout_source, which always takes one). Confirmed at the client layer by
+//     circleci.TriggerRepoExternalIDIsValid, which the trigger endpoints already
+//     use for the same rule.
+func rejectInvalidPipelineDefinitionCreate(w http.ResponseWriter, body map[string]any) bool {
+	fail := func(message string) bool {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":`+strconv.Quote(message)+`}`)
+
+		return true
+	}
+
+	configSource, _ := body["config_source"].(map[string]any)
+	configProvider, _ := configSource["provider"].(string)
+	configRepo, hasConfigRepo := configSource["repo"].(map[string]any)
+
+	if configProvider == "circleci" {
+		if hasConfigRepo {
+			return fail(`OpenAPI validation error: request body has an error: doesn't match schema ` +
+				`./schemas.yaml#/createPipelineDefinitionRequest: Error at "/config_source/repo": ` +
+				`unexpected property`)
+		}
+	} else if hasConfigRepo {
+		if !isNumericExternalID(configRepo["external_id"]) {
+			return fail("bad request")
+		}
+	}
+
+	checkoutSource, _ := body["checkout_source"].(map[string]any)
+	checkoutRepo, _ := checkoutSource["repo"].(map[string]any)
+	if !isNumericExternalID(checkoutRepo["external_id"]) {
+		return fail("bad request")
+	}
+
+	return false
+}
+
+// isNumericExternalID mirrors circleci.TriggerRepoExternalIDIsValid without
+// importing the provider's own client package into a fake that stands in for the
+// wire, not for this provider's code.
+func isNumericExternalID(v any) bool {
+	s, _ := v.(string)
+	_, err := strconv.ParseInt(s, 10, 64)
+
+	return err == nil
+}
+
 func (a *fakePipelineDefAPI) create(w http.ResponseWriter, projectID string, body map[string]any) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if rejectInvalidPipelineDefinitionCreate(w, body) {
+		return
+	}
 
 	a.nextID++
 	id := fmt.Sprintf("11111111-2222-3333-4444-%012d", a.nextID)
@@ -396,21 +459,21 @@ func TestPipelineResourceUnit_CRUD(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("name"), knownvalue.StringExact("pipe-1")),
 					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("description"), knownvalue.StringExact("original")),
-					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_full_name"), knownvalue.StringExact(resolveFullName("ext-1"))),
-					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("checkout_source_repo_full_name"), knownvalue.StringExact(resolveFullName("ext-2"))),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_full_name"), knownvalue.StringExact(resolveFullName("100001"))),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("checkout_source_repo_full_name"), knownvalue.StringExact(resolveFullName("100002"))),
 				},
 			},
 			{
 				// Update: change description and the checkout external id. This
 				// must produce a PATCH carrying every updatable field.
-				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "updated", "ext-1", "ext-3"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "updated", "100001", "100003"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("description"), knownvalue.StringExact("updated")),
-					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("checkout_source_repo_full_name"), knownvalue.StringExact(resolveFullName("ext-3"))),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("checkout_source_repo_full_name"), knownvalue.StringExact(resolveFullName("100003"))),
 				},
 			},
 			{
@@ -423,8 +486,7 @@ func TestPipelineResourceUnit_CRUD(t *testing.T) {
 	})
 
 	// Pin the create body: every field the schema exposes as settable must be
-	// sent, using the real API's field names (verified against
-	// the API's createRequestConfigSource/createRequestCheckoutSource).
+	// sent, using the real API's field names.
 	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
 	configSource, _ := create.Body["config_source"].(map[string]any)
 	if configSource["provider"] != "github_app" {
@@ -434,15 +496,14 @@ func TestPipelineResourceUnit_CRUD(t *testing.T) {
 		t.Errorf("create config_source.file_path = %v, want config.yml", configSource["file_path"])
 	}
 	repo, _ := configSource["repo"].(map[string]any)
-	if repo["external_id"] != "ext-1" {
-		t.Errorf("create config_source.repo.external_id = %v, want ext-1", repo["external_id"])
+	if repo["external_id"] != "100001" {
+		t.Errorf("create config_source.repo.external_id = %v, want 100001", repo["external_id"])
 	}
 
-	// Pin the update body: config_source must carry ONLY file_path (the real
-	// API's updateRequestConfigSource has no provider/repo fields at all — see
-	// the CircleCI API), while
+	// Pin the update body: config_source must carry ONLY file_path (the update
+	// route's config_source has no provider/repo fields at all), while
 	// checkout_source must carry both provider and repo.external_id, matching
-	// createRequestCheckoutSource (the update handler reuses it).
+	// the create body's checkout_source (the update route reuses it).
 	update := api.lastRequest(t, "PATCH", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions/11111111-2222-3333-4444-000000000001")
 	updateConfigSource, _ := update.Body["config_source"].(map[string]any)
 	if len(updateConfigSource) != 1 {
@@ -456,8 +517,8 @@ func TestPipelineResourceUnit_CRUD(t *testing.T) {
 		t.Errorf("update checkout_source.provider = %v, want github_app", updateCheckoutSource["provider"])
 	}
 	updateCheckoutRepo, _ := updateCheckoutSource["repo"].(map[string]any)
-	if updateCheckoutRepo["external_id"] != "ext-3" {
-		t.Errorf("update checkout_source.repo.external_id = %v, want ext-3", updateCheckoutRepo["external_id"])
+	if updateCheckoutRepo["external_id"] != "100003" {
+		t.Errorf("update checkout_source.repo.external_id = %v, want 100003", updateCheckoutRepo["external_id"])
 	}
 }
 
@@ -498,10 +559,9 @@ func importStateIDFor(resourceAddr, scopeAttr string) func(s *terraform.State) (
 // TestPipelineResourceUnit_ConfigRepoChangeForcesReplacement documents the fix
 // to a fourth bug in this resource, of the same family as project_id's.
 //
-// The API's update handler accepts only `file_path` inside `config_source` — the
-// provider and repo are not updatable at all (verified against
-// the API's the CircleCI API and
-// pinned by the CRUD test above). Before the SDK migration (issue
+// The API's update route accepts only `file_path` inside `config_source` — the
+// provider and repo are not updatable at all (verified against the real API,
+// and pinned by the CRUD test above). Before the SDK migration (issue
 // #26), `config_source_repo_external_id` was a plain Required attribute with no
 // RequiresReplace modifier: changing it planned an in-place update, the PATCH
 // omitted it, and the apply reported success — the worst of the three outcomes
@@ -518,17 +578,17 @@ func TestPipelineResourceUnit_ConfigRepoChangeForcesReplacement(t *testing.T) {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			{Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2")},
+			{Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002")},
 			{
-				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-99", "ext-2"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100099", "100002"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
 						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionDestroyBeforeCreate),
 					},
 				},
 				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_external_id"), knownvalue.StringExact("ext-99")),
-					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_full_name"), knownvalue.StringExact(resolveFullName("ext-99"))),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_external_id"), knownvalue.StringExact("100099")),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("config_source_repo_full_name"), knownvalue.StringExact(resolveFullName("100099"))),
 				},
 			},
 		},
@@ -539,8 +599,8 @@ func TestPipelineResourceUnit_ConfigRepoChangeForcesReplacement(t *testing.T) {
 	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
 	configSource, _ := create.Body["config_source"].(map[string]any)
 	repo, _ := configSource["repo"].(map[string]any)
-	if repo["external_id"] != "ext-99" {
-		t.Errorf("create config_source.repo.external_id = %v, want ext-99", repo["external_id"])
+	if repo["external_id"] != "100099" {
+		t.Errorf("create config_source.repo.external_id = %v, want 100099", repo["external_id"])
 	}
 }
 
@@ -560,9 +620,9 @@ func TestPipelineResourceUnit_RenameForcesReplacement(t *testing.T) {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			{Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2")},
+			{Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002")},
 			{
-				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-renamed", "original", "ext-1", "ext-2"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-renamed", "original", "100001", "100002"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
 						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionDestroyBeforeCreate),
@@ -604,7 +664,7 @@ func TestPipelineResourceUnit_RenameForcesReplacement(t *testing.T) {
 func TestPipelineResourceUnit_ServerErrorMentioning404DoesNotDropState(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
-	config := pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2")
+	config := pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002")
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -655,10 +715,10 @@ func TestPipelineResourceUnit_ProjectIDChangeForcesReplacement(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002"),
 			},
 			{
-				Config: pipelineFakeResourceConfig(host, fakePipelineOtherProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineOtherProjectID, "pipe-1", "original", "100001", "100002"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{
 						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionDestroyBeforeCreate),
@@ -701,11 +761,11 @@ func TestPipelineResourceUnit_DriftRecreatesRatherThanHardError(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				Config: pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002"),
 			},
 			{
 				PreConfig:          func() { api.setMissing(fakePipelineProjectID, "11111111-2222-3333-4444-000000000001", true) },
-				Config:             pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				Config:             pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002"),
 				PlanOnly:           true,
 				ExpectNonEmptyPlan: true,
 			},
@@ -713,7 +773,7 @@ func TestPipelineResourceUnit_DriftRecreatesRatherThanHardError(t *testing.T) {
 				// Restore the definition so the framework's own destroy step
 				// (which reads state before issuing DELETE) succeeds.
 				PreConfig: func() { api.setMissing(fakePipelineProjectID, "11111111-2222-3333-4444-000000000001", false) },
-				Config:    pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "ext-1", "ext-2"),
+				Config:    pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002"),
 			},
 		},
 	})
@@ -747,9 +807,9 @@ resource "circleci_pipeline" "test" {
   description                       = "d"
   config_source_provider            = "github_app"
   config_source_file_path           = "config.yml"
-  config_source_repo_external_id    = "ext-1"
+  config_source_repo_external_id    = "100001"
   checkout_source_provider          = "github_app"
-  checkout_source_repo_external_id  = "ext-2"
+  checkout_source_repo_external_id  = "100002"
 }
 `, fakePipelineProjectID)
 
@@ -780,9 +840,72 @@ func TestPipelineResourceUnit_Create4xxIsADiagnosticNotAPanic(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config:      pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "d", "ext-1", "ext-2"),
+				Config:      pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "d", "100001", "100002"),
 				ExpectError: regexp.MustCompile(`(?s)Error creating CircleCI pipeline.*already exists`),
 			},
 		},
 	})
+}
+
+// TestFakePipelineDefAPIRefusesWhatTheRealAPIRefuses talks to the fake directly,
+// with bodies the provider does not currently produce, so it can assert the fake
+// would *catch* a wrong request rather than merely mirror what the client already
+// sends correctly. Same rationale as
+// TestFakeTriggerAPIRefusesWhatTheRealAPIRefuses in trigger_resource_fake_test.go.
+func TestFakePipelineDefAPIRefusesWhatTheRealAPIRefuses(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	createPath := "/api/v2/projects/" + fakePipelineProjectID + "/pipeline-definitions"
+
+	cases := map[string]struct {
+		body        string
+		wantMessage string
+	}{
+		"a repo alongside a circleci-hosted config source": {
+			body: `{
+				"name": "pipe-1", "description": "d",
+				"config_source": {"provider": "circleci", "file_path": ".circleci/config.yml",
+				                   "repo": {"external_id": "123456"}},
+				"checkout_source": {"provider": "github_app", "repo": {"external_id": "123456"}}
+			}`,
+			wantMessage: `OpenAPI validation error: request body has an error: doesn't match schema ` +
+				`./schemas.yaml#/createPipelineDefinitionRequest: Error at "/config_source/repo": ` +
+				`unexpected property`,
+		},
+		"a repository name where the API parses a numeric config_source id": {
+			body: `{
+				"name": "pipe-1", "description": "d",
+				"config_source": {"provider": "github_app", "file_path": ".circleci/config.yml",
+				                   "repo": {"external_id": "acme-org/repo"}},
+				"checkout_source": {"provider": "github_app", "repo": {"external_id": "123456"}}
+			}`,
+			wantMessage: "bad request",
+		},
+		"a repository name where the API parses a numeric checkout_source id": {
+			body: `{
+				"name": "pipe-1", "description": "d",
+				"config_source": {"provider": "github_app", "file_path": ".circleci/config.yml",
+				                   "repo": {"external_id": "123456"}},
+				"checkout_source": {"provider": "github_app", "repo": {"external_id": "acme-org/repo"}}
+			}`,
+			wantMessage: "bad request",
+		},
+	}
+
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := postJSON(t, host+createPath, testCase.body)
+
+			if got.status != http.StatusBadRequest {
+				t.Fatalf("answered %d, want 400: %s", got.status, got.body)
+			}
+			if message, _ := got.decoded["message"].(string); message != testCase.wantMessage {
+				t.Errorf("message = %q, want %q", message, testCase.wantMessage)
+			}
+		})
+	}
+
+	if stored := len(api.definitions); stored != 0 {
+		t.Errorf("the fake stored %d definitions, want 0: a rejected request must not create one", stored)
+	}
 }

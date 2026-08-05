@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +56,13 @@ import (
 //     unit tests, since they assert on wall-clock behavior that would be
 //     awkward to observe through a plan/apply.
 
+// createUsageExportJobFields is the create route's request struct, field for
+// field. There is nothing else in it, and no nested object, so any other key
+// is a 400.
+var createUsageExportJobFields = map[string][]string{
+	"": {"start", "end", "shared_org_ids"},
+}
+
 // newUsageExportFakeAPI starts a fake of the usage export v2 routes. Get
 // answers "processing" for processingCalls requests and then settles on
 // terminalState with downloadURLs/errorReason, so tests can exercise the poll
@@ -64,16 +73,45 @@ func newUsageExportFakeAPI(t *testing.T, terminalState string, downloadURLs []st
 	var postCalls, getCalls int32
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v2/organizations/{org_id}/usage_export_job", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /api/v2/organizations/{org_id}/usage_export_job", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&postCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
+
+		// This route is served directly rather than proxied, and the API
+		// answers "Unexpected field '<name>'." for any key it doesn't bind.
+		// So an unrecognised key is a hard 400 here, not something quietly
+		// dropped, and a fake that ignored unknown keys could not tell a correct
+		// field name from a wrong one.
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding create body: %v", err)
+		}
+		if rejectUnexpectedFields(w, body, createUsageExportJobFields) {
+			return
+		}
+		// Validate() only requires start and end; shared_org_ids is optional.
+		for _, required := range []string{"start", "end"} {
+			if _, ok := body[required]; !ok {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprint(w, `{"message":"Missing one or more JSON fields."}`)
+
+				return
+			}
+		}
+
+		// state is hard-coded "created" by the service rather than reporting what the
+		// queued query has already become, and download_urls is null rather than []:
+		// URLs are only minted for a job already observed to be complete, and the
+		// field carries no omitempty anywhere along the chain, so the key is always
+		// present and always null here. A fake sending [] would be emitting a value
+		// the API cannot produce.
 		w.WriteHeader(http.StatusCreated)
 		_, _ = fmt.Fprint(w, `{
 			"usage_export_job_id": "11111111-1111-1111-1111-111111111111",
 			"state": "created",
 			"start": "2024-01-01T00:00:00Z",
 			"end": "2024-01-02T00:00:00Z",
-			"download_urls": []
+			"download_urls": null
 		}`)
 	})
 	mux.HandleFunc("GET /api/v2/organizations/{org_id}/usage_export_job/{id}", func(w http.ResponseWriter, _ *http.Request) {
@@ -81,10 +119,12 @@ func newUsageExportFakeAPI(t *testing.T, terminalState string, downloadURLs []st
 		w.Header().Set("Content-Type", "application/json")
 
 		if int(n) <= processingCalls {
+			// null again, for the same reason: the status handler returns nil URLs for
+			// every state but "completed".
 			_, _ = fmt.Fprint(w, `{
 				"usage_export_job_id": "11111111-1111-1111-1111-111111111111",
 				"state": "processing",
-				"download_urls": []
+				"download_urls": null
 			}`)
 
 			return
@@ -361,5 +401,219 @@ func TestUsageExportAwaitTerminalRespectsContextCancellation(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("awaitTerminal took %s to notice context cancellation, want it to return promptly", elapsed)
+	}
+}
+
+// TestAccUsageExportEphemeralResource_sendsOnlyTheFieldsTheHandlerBinds is the
+// counterpart to the fake's rejectUnexpectedFields call: it proves the request
+// body carries start and end, omits shared_org_ids when the configuration does not
+// set it, and carries nothing else at all.
+//
+// The omission matters because of how this route is served. The API binds
+// the body to a struct and answers 400 "Unexpected field '<name>'." for
+// anything left over, so an extra key is fatal rather than ignored — and the
+// organization travels in the path, not the body, so sending org_id would break
+// every export. shared_org_ids is omitempty for the same reason it is safe to omit:
+// the API only requires start and end.
+func TestAccUsageExportEphemeralResource_sendsOnlyTheFieldsTheHandlerBinds(t *testing.T) {
+	withShortUsageExportPollInterval(t, 20*time.Millisecond)
+
+	var (
+		mu   sync.Mutex
+		body map[string]any
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v2/organizations/{org_id}/usage_export_job", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding create body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprint(w, `{
+			"usage_export_job_id": "11111111-1111-1111-1111-111111111111",
+			"state": "created",
+			"start": "2024-01-01T00:00:00Z",
+			"end": "2024-01-02T00:00:00Z",
+			"download_urls": null
+		}`)
+	})
+	mux.HandleFunc("GET /api/v2/organizations/{org_id}/usage_export_job/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+			"usage_export_job_id": "11111111-1111-1111-1111-111111111111",
+			"state": "completed",
+			"download_urls": ["https://example.com/a.csv.gz"]
+		}`)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	config := usageExportProviderConfig(srv.URL) + `
+ephemeral "circleci_usage_export" "this" {
+  organization_id = "22222222-2222-2222-2222-222222222222"
+  start           = "2024-01-01T00:00:00Z"
+  end             = "2024-01-02T00:00:00Z"
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+		},
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	want := map[string]any{
+		"start": "2024-01-01T00:00:00Z",
+		"end":   "2024-01-02T00:00:00Z",
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Errorf("create body = %#v, want exactly %#v", body, want)
+	}
+}
+
+// TestAccUsageExportEphemeralResource_serverDeployment asserts that
+// circleci_usage_export refuses CircleCI Server.
+//
+// This is not the usual v3-is-not-routed gate, and the API version was the wrong
+// thing to reason from: usage export is v2, and CircleCI Server's own gateway does
+// route both of its paths. What Server does not do is deploy the backend
+// service those routes proxy to, so the request would be accepted and then
+// fail inside CircleCI, which is a worse failure than a 404, and worse again
+// than refusing it here.
+func TestAccUsageExportEphemeralResource_serverDeployment(t *testing.T) {
+	srv, postCalls, _ := newUsageExportFakeAPI(t, circleci.UsageExportJobStateCompleted, nil, "", 0)
+
+	config := fmt.Sprintf(`
+provider "circleci" {
+  host       = %q
+  key        = "fake"
+  deployment = "server"
+}
+
+ephemeral "circleci_usage_export" "this" {
+  org_id = "22222222-2222-2222-2222-222222222222"
+  start  = "2024-01-01T00:00:00Z"
+  end    = "2024-01-02T00:00:00Z"
+}
+`, srv.URL)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      config,
+			ExpectError: regexp.MustCompile(`circleci_usage_export requires CircleCI Cloud`),
+		}},
+	})
+
+	if atomic.LoadInt32(postCalls) != 0 {
+		t.Error("a usage export job was created against a Server deployment, want none")
+	}
+}
+
+// TestAccUsageExportEphemeralResource_windowValidation covers the two window
+// rules that can be decided from the configuration alone.
+//
+// Both are enforced by the service and neither was checked here before, so each
+// was a 400 mid-apply: an inverted window, and a window wider than the 31-day cap.
+// The cap in particular is the kind of value that looks fine in a configuration --
+// "export the last quarter" is an obvious thing to write -- and fails only once
+// the apply reaches CircleCI.
+func TestAccUsageExportEphemeralResource_windowValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		start, end string
+		wantError  string
+	}{
+		"end before start": {
+			start:     "2024-02-01T00:00:00Z",
+			end:       "2024-01-01T00:00:00Z",
+			wantError: `(?s)Export window ends before it starts`,
+		},
+		"window too wide": {
+			start:     "2024-01-01T00:00:00Z",
+			end:       "2024-03-01T00:00:00Z",
+			wantError: `(?s)Export window is too wide`,
+		},
+		// Exactly the cap is accepted: the service refuses strictly more than 31
+		// days, so an off-by-one here would reject a valid export.
+		"exactly the cap is fine": {
+			start:     "2024-01-01T00:00:00Z",
+			end:       "2024-02-01T00:00:00Z",
+			wantError: "",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withShortUsageExportPollInterval(t, 20*time.Millisecond)
+
+			srv, postCalls, _ := newUsageExportFakeAPI(t, circleci.UsageExportJobStateCompleted,
+				[]string{"https://example.com/a.csv.gz"}, "", 0)
+
+			config := usageExportProviderConfig(srv.URL) + fmt.Sprintf(`
+ephemeral "circleci_usage_export" "this" {
+  org_id = "22222222-2222-2222-2222-222222222222"
+  start  = %q
+  end    = %q
+}
+`, tc.start, tc.end)
+
+			step := resource.TestStep{Config: config}
+			if tc.wantError != "" {
+				step.ExpectError = regexp.MustCompile(tc.wantError)
+			}
+
+			resource.UnitTest(t, resource.TestCase{
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				Steps:                    []resource.TestStep{step},
+			})
+
+			created := atomic.LoadInt32(postCalls) != 0
+			if tc.wantError != "" && created {
+				t.Error("a request reached the fake API despite the invalid window, want none")
+			}
+			if tc.wantError == "" && !created {
+				t.Error("no request reached the fake API for a valid window, want one")
+			}
+		})
+	}
+}
+
+// TestAccUsageExportEphemeralResource_rejectsNonUUIDSharedOrgID asserts that a
+// shared organization id that is not a UUID is refused before any request.
+//
+// The service binds shared_org_ids to a slice of UUIDs, so one bad entry fails the
+// whole body with an unattributed "malformed request body" that names neither the
+// field nor the entry -- indistinguishable from a bad timestamp. Naming the index
+// here is the only way a practitioner finds out which one.
+func TestAccUsageExportEphemeralResource_rejectsNonUUIDSharedOrgID(t *testing.T) {
+	srv, postCalls, _ := newUsageExportFakeAPI(t, circleci.UsageExportJobStateCompleted, nil, "", 0)
+
+	config := usageExportProviderConfig(srv.URL) + `
+ephemeral "circleci_usage_export" "this" {
+  org_id         = "22222222-2222-2222-2222-222222222222"
+  start          = "2024-01-01T00:00:00Z"
+  end            = "2024-01-02T00:00:00Z"
+  shared_org_ids = ["33333333-3333-3333-3333-333333333333", "not-a-uuid"]
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      config,
+			ExpectError: regexp.MustCompile(`(?s)Invalid shared organization id`),
+		}},
+	})
+
+	if atomic.LoadInt32(postCalls) != 0 {
+		t.Error("a request reached the fake API despite the non-UUID shared org id, want none")
 	}
 }

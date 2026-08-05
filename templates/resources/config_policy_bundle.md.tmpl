@@ -9,9 +9,15 @@ description: |-
 
 Manages an organization's whole bundle of CircleCI config policies: the Rego documents evaluated against a pipeline's configuration before it runs.
 
-Works against both **CircleCI Cloud and CircleCI Server** — config policies are served by the v2 API. Note the plan and version requirements below, though: this is not available on every account.
+## Availability
 
-> **Requires the Scale plan on CircleCI Cloud**, or **CircleCI Server 4.2 or later**. On other Cloud plans the API rejects these requests, and on older Server releases the routes do not exist.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on the Scale plan. |
+| **CircleCI Server** | Yes on CircleCI Server 4.2 and later. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `POST /api/v2/owner/{org_id}/context/{policy_context}/policy-bundle`, `GET .../policy-bundle/{name}` |
+| **Organization type** | Any. The `{policy_context}` path segment is a *policy* context — a namespace for a bundle of Rego documents — and has nothing to do with a CircleCI context. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 

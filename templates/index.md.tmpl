@@ -103,6 +103,7 @@ resource "circleci_context_restriction" "build" {
 | If you want to | Read |
 |---|---|
 | Go from nothing to a running pipeline | [Getting started](guides/getting-started) |
+| Adopt an organization that already exists | [Importing an existing organization](guides/importing-an-existing-organization) |
 | Understand how CircleCI's objects relate | [CircleCI object model](guides/object-model) |
 | Keep secrets out of Terraform state | [Managing secrets](guides/managing-secrets) |
 | Onboard self-hosted runners | [Self-hosted runners](guides/self-hosted-runners) |
@@ -165,28 +166,74 @@ configuration takes precedence.
 The `deployment` attribute tells the provider which kind of installation `host`
 refers to, and it selects the API version used for each resource.
 
-CircleCI Server does not route the v3 API, so with `deployment = "server"` the
-provider uses v2 throughout. Resources that exist only on v3 are unavailable
-there and report an explicit error rather than a confusing HTTP 404.
+A resource that is unavailable on Server reports an explicit error rather than a
+confusing HTTP 404.
 
-Each resource's documentation states its availability. In summary:
+**The API version is not what decides availability — whether a Server
+installation's gateway forwards the route is.** Some paths are forwarded to their
+backend and some are not, independent of whether the path is v2 or v3. So a
+route is available there when its backend is both deployed and reachable through
+the gateway, whatever version the path carries. All four combinations occur:
+
+| | Available on Server | Not available |
+|---|---|---|
+| **v2** | `circleci_url_orb_allow_list_entry` — served directly, not proxied elsewhere | `circleci_pipeline_definition` — the gateway does not forward `pipeline-definitions`; `circleci_otel_exporter` — owned by a service Server does not deploy |
+| **v3** | the `circleci_runner_*` types — `/api/v3/runner` is explicitly forwarded to the runner service | `circleci_orb`, `circleci_ios_signing_certificate` — no matching v3 route exists |
+
+So "it is v2" is not evidence of availability, and "it is v3" is not evidence
+against it. Two further reasons are unrelated to routing at all:
+`circleci_audit_log_config` is gated on a Cloud billing plan tier, and the group
+types need a `circleci` type (standalone) organization, which a Server
+installation never is. Each type's own page gives its actual reason.
+
+### Which document says what
+
+Three places describe availability, and they answer different questions. Where
+they overlap, the narrower one wins:
+
+| Document | Authoritative for | Scope |
+|---|---|---|
+| Each type's own `## Availability` table | **That one type, on the Cloud/Server axis** — plus its API routes, organization-type requirement and token requirement | One page, next to the schema it describes |
+| The [compatibility matrix in the README](https://github.com/CircleCI-Public/terraform-provider-circleci#compatibility) | **The VCS-integration axis** — GitHub App vs GitHub OAuth vs GitLab vs Bitbucket Cloud vs GitHub Enterprise Server | Every type, per integration |
+| The table below | **Nothing.** It is a summary and must never disagree with either | Grouped by area |
+
+So: if this page and a type's own page disagree, the type's page is right and
+this one is a bug — please report it.
+
+### Summary by area
 
 | Area | Cloud | Server |
 |---|---|---|
 | Contexts, context restrictions, context environment variables | yes | yes |
 | Projects, project settings, project environment variables | yes | yes |
+| Organizations | yes | unverified[^orgserver] |
 | Checkout keys | yes[^ckeyvcs] | yes |
 | Groups, group membership, project role grants | yes[^standalone] | **no** |
+| GitHub App installation and repository discovery | yes[^standalone] | **no** |
 | Webhooks | yes | yes |
 | Plural list data sources (contexts, webhooks, env vars) | yes | yes |
 | Self-hosted runner resource classes and tokens | yes | yes (set `runner_host`) |
-| URL orb allow list | yes | yes |
+| Usage export and ephemeral runner tokens | yes | yes[^ephemeral] |
+| Pipeline runs, workflows and jobs (read-only) | yes | yes |
+| Users and collaborations (read-only) | yes | yes |
+| Insights (read-only) | yes | depends[^insights] |
+| URL orb allow list | yes | unverified[^weakroute] |
+| OpenTelemetry exporters | yes | unverified[^weakroute] |
 | Config policies | yes[^policyplan] | yes[^policyplan] |
 | OIDC custom claims | yes | yes[^oidcserver2] |
-| OpenTelemetry exporters | yes | unverified[^otelserver] |
 | Pipeline definitions and triggers | yes | **no** |
 | Organization settings | yes | **no** |
 | Orb namespaces, orbs, orb versions | yes | **no** |
+| Notification channels, preferences and integration status | yes | **no** |
+| iOS code signing certificates and configurations | yes | **no** |
+| Deploy and release tracking (read-only) | yes | **no** |
+| Execution catalog (read-only) | yes | **no** |
+| Audit log streaming | yes[^scaleplan] | **no**[^scaleplan] |
+| Spend budgets | yes[^privateroute] | **no**[^privateroute] |
+
+The three [provider functions](https://registry.terraform.io/providers/CircleCI-Public/circleci/latest/docs)
+are pure string handling and make no API call, so `deployment` does not affect
+them at all.
 
 ~> **Note** `circleci_pipeline_definition` and `circleci_trigger` are unavailable
 on CircleCI Server. The `pipeline-definitions` and `triggers` endpoints they
@@ -201,6 +248,28 @@ sufficient — `circleci_pipeline_definition` is v2 and still unavailable — so
 treat a `yes` in that column as well-founded but unconfirmed, and please report
 anything that disagrees.
 
+~> **Two VCS integrations are no better evidenced than the Server column.** The
+Server column is the *most* visible gap, not the only one. `TESTING.md`
+enumerates the seven integration types this provider is meant to work against,
+and the acceptance suite does not yet key its skips off which one it is running
+under — so there is no per-integration CI matrix, and the VCS columns in the
+README's compatibility matrix are drawn from CircleCI's own documentation and
+from which routes each deployment serves rather than from test runs. Two are
+worth calling out by name:
+
+* **GitHub Enterprise Server.** The `github_server` provider value in
+  `circleci_pipeline_definition` and `circleci_trigger` exists for this
+  integration and nothing else, and it has never been exercised.
+* **Bitbucket Cloud.** Exercised no more than GHES. Several of its documented
+  differences — no `group` context restrictions, no `schedule` value in the
+  trigger API's event-source enum — are read off CircleCI's documentation, not
+  observed.
+
+Nothing in this provider is *known* to be wrong for either. They are simply
+unmeasured, in the same way and for the same reason as the Server column, and
+this note exists so a `yes` in those columns is not read as stronger evidence
+than it is.
+
 ### The `host` attribute
 
 `host` is a bare origin, such as `https://circleci.com`. The API version is
@@ -213,10 +282,21 @@ suffix is stripped automatically — but the provider emits a warning. Remove th
 
 {{ .SchemaMarkdown | trimspace }}
 
-[^standalone]: Requires a `circleci` type (standalone) organization. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud.
+[^standalone]: Requires a `circleci` type (standalone) organization, so `github` and `bitbucket` organizations cannot use these even on CircleCI Cloud. The provider holds an organization UUID rather than a slug and cannot tell the type without an extra lookup, so it rules out `deployment = "server"` — always a `github` type organization — and leaves the Cloud half to the API. GitHub App discovery additionally needs an actual GitHub App installation, so a standalone organization connected to GitLab has nothing to report.
 
-[^ckeyvcs]: Not available to projects that use GitLab or the GitHub App; those check out over HTTPS and need no keys. See the compatibility table in the README.
+[^ckeyvcs]: Not available to projects that use the GitHub App, GitHub Enterprise Server, GitLab.com or GitLab self-managed; those check out over HTTPS and need no keys. GitHub OAuth and Bitbucket Cloud projects can use them. Note a read/write asymmetry: only `POST` carries the restriction, so a `GET` on GitLab succeeds and returns the auto-provisioned key — a resource reads fine and fails only on create. See the compatibility table in the README.
 
 [^policyplan]: Requires the Scale plan on CircleCI Cloud, or CircleCI Server 4.2 and later.
 [^oidcserver2]: CircleCI Server 4.4 and later. Not available in air-gapped installations.
-[^otelserver]: The route is v2, which Server serves in general, but a Server installation only forwards a subset of paths to the service behind this endpoint. Unconfirmed either way.
+
+[^weakroute]: Owned by a separate backend behind the API gateway, of which a Server installation forwards only a subset of paths. The provider does not gate these, so it will attempt the request; whether it succeeds is unknown. See the type's own page.
+
+[^orgserver]: *Reading* an organization is a v2 route served directly by CircleCI's API and should work. *Creating* one is a different question: a Server installation's organizations come from its VCS and are always `github` type, so a create there likely has nothing to do. Untested either way.
+
+[^ephemeral]: Usage export is a v2 route served on both. Ephemeral runner tokens follow `runner_host`, which on Server is the installation itself.
+
+[^insights]: The routes are v2, but Insights is a separate service a given Server installation may not run. The provider does not block `deployment = "server"`; without Insights the request fails as not-found.
+
+[^scaleplan]: Requires the Scale plan, which is a CircleCI Cloud billing concept a Server installation has no equivalent of. This is the provider's one Cloud-only gate that is *not* about the v3 API, and it is applied out of caution rather than from a confirmed absent route — see `circleci_audit_log_config`.
+
+[^privateroute]: Served on a CircleCI origin that carries no published specification, a fixed address independent of `host` and `deployment` and carrying no published specification. A CircleCI Server installation's gateway never routes to it, so `deployment = "server"` reports an explicit error rather than a confusing failure.

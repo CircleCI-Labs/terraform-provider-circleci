@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -63,6 +65,15 @@ func (d *runnerResourceClassDataSource) Schema(_ context.Context, _ datasource.S
 			"resource_class": schema.StringAttribute{
 				MarkdownDescription: "The resource class name in `namespace/name` format (e.g. `myorg/myrunner`).",
 				Required:            true,
+				// The Read below also checks for a slash, because it needs the
+				// namespace prefix and cannot proceed without one. This validator is
+				// the stricter, earlier check: it enforces the service's own
+				// namespace and class rules at plan time rather than letting the
+				// list request come back as an opaque 400. See
+				// runnerResourceClassPattern.
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
+				},
 			},
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the runner resource class.",

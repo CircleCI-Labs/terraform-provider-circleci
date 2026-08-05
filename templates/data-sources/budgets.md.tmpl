@@ -1,0 +1,34 @@
+---
+page_title: "circleci_budgets Data Source - circleci"
+subcategory: ""
+description: |-
+  Fetches every spend budget configured for a CircleCI organization.
+---
+
+# circleci_budgets (Data Source)
+
+Fetches every spend budget configured for a CircleCI organization: the organization-level budget (`project_id` null), if one is set, and any per-project budgets, including budgets created outside Terraform. There is no pagination on this route — the whole set comes back in one response.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. |
+| **API** | `GET /private/orgs/{org_id}/budgets` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
+
+~> **This route carries no published specification and CircleCI may change or remove it without notice.** It is not part of the versioned public API. It was reverse-engineered from CircleCI's own org-migration tooling, which uses it in production against a plain personal token — that is how this provider knows it works — but treat it as best-effort all the same. See `circleci_budget` for the resource that manages one entry of this same collection.
+
+## Example Usage
+
+{{ tffile "examples/data-sources/circleci_budgets/data-source.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Notes
+
+* `budgets` is always a list, empty when the organization has no budgets configured, so configurations can iterate over it unconditionally.
+* `consumption`, `percentage` and `threshold_exceeded` reflect real spend and can change between reads with no configuration change.
+* The organization-level budget is the entry with `project_id == null`; every other entry is a per-project budget.

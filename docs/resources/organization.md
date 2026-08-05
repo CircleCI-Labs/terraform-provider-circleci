@@ -97,7 +97,9 @@ data "circleci_organization" "other" {
 ### Required
 
 - `name` (String) The name of the CircleCI organization. Changing this value forces a new resource to be created.
-- `vcs_type` (String) The VCS type of the CircleCI organization (e.g., github, bitbucket, circleci). Changing this value forces a new resource to be created.
+- `vcs_type` (String) The VCS type of the CircleCI organization: `github`, `bitbucket` or `circleci`. Changing this value forces a new resource to be created.
+
+~> **Only these three exact spellings are accepted.** The abbreviations that work in an organization *slug* — `gh` and `bb` — are not valid here: the create route validates this field against an enumeration and answers `400` for anything else. This provider rejects it at plan time rather than letting the apply fail.
 
 ### Read-Only
 

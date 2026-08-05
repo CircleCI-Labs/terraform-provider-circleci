@@ -31,10 +31,11 @@ const (
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
-	_ resource.Resource                = &pipelineResource{}
-	_ resource.ResourceWithConfigure   = &pipelineResource{}
-	_ resource.ResourceWithImportState = &pipelineResource{}
-	_ resource.ResourceWithMoveState   = &pipelineResource{}
+	_ resource.Resource                   = &pipelineResource{}
+	_ resource.ResourceWithConfigure      = &pipelineResource{}
+	_ resource.ResourceWithImportState    = &pipelineResource{}
+	_ resource.ResourceWithMoveState      = &pipelineResource{}
+	_ resource.ResourceWithValidateConfig = &pipelineResource{}
 )
 
 // pipelineResourceModel maps the output schema.
@@ -93,7 +94,7 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 					// created under, so an in-place "update" of project_id would send
 					// its PATCH to the new project carrying the old (and, there,
 					// nonexistent) definition id. See DESIGN.md's characterization test
-					// notes for issue #26.
+					// notes.
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
@@ -114,39 +115,66 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:            true,
 			},
 			"config_source_provider": schema.StringAttribute{
-				MarkdownDescription: "The VCS provider for the pipeline's configuration source. Must be one of `github_app` or `github_server`.",
-				Required:            true,
+				MarkdownDescription: "Where the pipeline's configuration is read from: " +
+					markdownValueList(circleci.PipelineConfigSourceProviders()) + ". `github_app` and " +
+					"`github_server` read configuration from a VCS repository, named by " +
+					"`config_source_repo_external_id`. `circleci` is a CircleCI-hosted configuration: " +
+					"there is no repository, and `config_source_repo_external_id` must be omitted — the " +
+					"API rejects a repo on this branch outright rather than ignoring it.\n\n" +
+					"~> **Changing this value forces a new resource to be created.** The update endpoint's " +
+					"`config_source` accepts only `file_path`; provider is immutable after creation.",
+				Required: true,
 				Validators: []validator.String{
-					stringvalidator.OneOf("github_app", "github_server"),
+					stringvalidator.OneOf(circleci.PipelineConfigSourceProviders()...),
+				},
+				PlanModifiers: []planmodifier.String{
+					// The update endpoint's config_source accepts only file_path — provider
+					// (like repo, see config_source_repo_external_id below) is immutable
+					// after creation. Without RequiresReplace a change here plans an
+					// in-place update whose PATCH silently omits it: state would record
+					// the new provider while the API kept the old one, and apply would
+					// report success.
+					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"config_source_file_path": schema.StringAttribute{
-				MarkdownDescription: "The path to the pipeline configuration file within the repository.",
-				Required:            true,
+				MarkdownDescription: "The path to the pipeline configuration file. Required for every " +
+					"config_source_provider, including `circleci`, which still requires `file_path` " +
+					"even though it has no repository to be relative to.",
+				Required: true,
 			},
 			"config_source_repo_full_name": schema.StringAttribute{
-				MarkdownDescription: "The full name of the repository containing the pipeline configuration.",
-				Computed:            true,
+				MarkdownDescription: "The full name of the repository containing the pipeline configuration. " +
+					"Empty when config_source_provider is `circleci`, which has no repository.",
+				Computed: true,
 			},
 			"config_source_repo_external_id": schema.StringAttribute{
-				MarkdownDescription: "The external ID of the repository containing the pipeline configuration. Changing this value forces a new resource to be created.",
-				Required:            true,
+				MarkdownDescription: "The external ID of the repository containing the pipeline " +
+					"configuration: the VCS provider's own numeric repository id, not its name. Required " +
+					"when config_source_provider is `github_app` or `github_server`; must be omitted when " +
+					"it is `circleci`, which has no repository.\n\n" +
+					"~> **Changing this value forces a new resource to be created.**",
+				Optional: true,
 				PlanModifiers: []planmodifier.String{
 					// The update endpoint's config_source accepts only file_path —
-					// provider and repo are immutable after creation (verified against
-					// the API's handler_update.go). Without RequiresReplace
-					// a change here plans an in-place update whose PATCH silently omits
-					// it: state would record the new value while the API kept the old
-					// one, and apply would report success. See DESIGN.md's
-					// characterization test notes for issue #26.
+					// provider and repo are immutable after creation. Without
+					// RequiresReplace a change here plans an in-place update whose
+					// PATCH silently omits it: state would record the new value while
+					// the API kept the old one, and apply would report success. See
+					// DESIGN.md's characterization test notes.
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"checkout_source_provider": schema.StringAttribute{
-				MarkdownDescription: "The VCS provider for the pipeline's checkout source. Must be one of `github_app` or `github_server`.",
-				Required:            true,
+				MarkdownDescription: "The VCS provider for the pipeline's checkout source: " +
+					markdownValueList(circleci.PipelineCheckoutSourceProviders()) + ". Unlike " +
+					"config_source_provider, this has no `circleci` (repo-less) option: the API " +
+					"requires a real repository unconditionally, even when the pipeline's " +
+					"configuration is hosted by CircleCI itself — a definition always checks out " +
+					"code from somewhere.",
+				Required: true,
 				Validators: []validator.String{
-					stringvalidator.OneOf("github_app", "github_server"),
+					stringvalidator.OneOf(circleci.PipelineCheckoutSourceProviders()...),
 				},
 			},
 			"checkout_source_repo_full_name": schema.StringAttribute{
@@ -154,8 +182,10 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:            true,
 			},
 			"checkout_source_repo_external_id": schema.StringAttribute{
-				MarkdownDescription: "The external ID of the repository to check out code from.",
-				Required:            true,
+				MarkdownDescription: "The external ID of the repository to check out code from: the VCS " +
+					"provider's own numeric repository id, not its name. Always required — " +
+					"checkout_source has no repo-less provider.",
+				Required: true,
 			},
 		},
 	}
@@ -173,7 +203,18 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 // pipelineResourceModelFromAPI maps an API pipeline definition onto the
 // resource model. projectID is threaded through rather than read from the API
 // response because the definition itself carries no project_id field.
+//
+// config_source_repo_external_id is Optional rather than Computed (see the schema),
+// so it must come back exactly null when the API sent no repo — a "circleci"
+// config source always has none — or Terraform reports an inconsistent result after
+// apply: the plan carries null (the practitioner omitted it), and a bare
+// types.StringValue("") would not match that.
 func pipelineResourceModelFromAPI(projectID types.String, definition circleci.PipelineDefinition) pipelineResourceModel {
+	configSourceRepoExternalID := types.StringNull()
+	if definition.ConfigSource.Repo.ExternalID != "" {
+		configSourceRepoExternalID = types.StringValue(definition.ConfigSource.Repo.ExternalID)
+	}
+
 	return pipelineResourceModel{
 		Id:                           types.StringValue(definition.ID),
 		ProjectId:                    projectID,
@@ -183,11 +224,23 @@ func pipelineResourceModelFromAPI(projectID types.String, definition circleci.Pi
 		ConfigSourceProvider:         types.StringValue(definition.ConfigSource.Provider),
 		ConfigSourceFilePath:         types.StringValue(definition.ConfigSource.FilePath),
 		ConfigSourceRepoFullName:     types.StringValue(definition.ConfigSource.Repo.FullName),
-		ConfigSourceRepoExternalId:   types.StringValue(definition.ConfigSource.Repo.ExternalID),
+		ConfigSourceRepoExternalId:   configSourceRepoExternalID,
 		CheckoutSourceProvider:       types.StringValue(definition.CheckoutSource.Provider),
 		CheckoutSourceRepoFullName:   types.StringValue(definition.CheckoutSource.Repo.FullName),
 		CheckoutSourceRepoExternalId: types.StringValue(definition.CheckoutSource.Repo.ExternalID),
 	}
+}
+
+// pipelineConfigSourceRepoInput builds the create body's config_source.repo,
+// omitting it entirely for the "circleci" provider: that branch of the API's
+// config_source oneOf has no repo property at all, and sending one fails the oneOf
+// rather than being ignored. See circleci.PipelineConfigSourceProviderNeedsRepo.
+func pipelineConfigSourceRepoInput(provider string, externalID types.String) *circleci.RepoInput {
+	if !circleci.PipelineConfigSourceProviderNeedsRepo(provider) {
+		return nil
+	}
+
+	return &circleci.RepoInput{ExternalID: externalID.ValueString()}
 }
 
 // Create creates the resource and sets the initial Terraform state.
@@ -207,7 +260,7 @@ func (r *pipelineResource) Create(ctx context.Context, req resource.CreateReques
 		Description: plan.Description.ValueString(),
 		ConfigSource: circleci.PipelineConfigSourceInput{
 			Provider: plan.ConfigSourceProvider.ValueString(),
-			Repo:     circleci.RepoInput{ExternalID: plan.ConfigSourceRepoExternalId.ValueString()},
+			Repo:     pipelineConfigSourceRepoInput(plan.ConfigSourceProvider.ValueString(), plan.ConfigSourceRepoExternalId),
 			FilePath: plan.ConfigSourceFilePath.ValueString(),
 		},
 		CheckoutSource: circleci.PipelineCheckoutSourceInput{
@@ -247,7 +300,7 @@ func (r *pipelineResource) Read(ctx context.Context, req resource.ReadRequest, r
 	// error. Absence is tested with circleci.IsNotFound rather than by
 	// string-matching the error: matching "404" also matches a 5xx whose body
 	// happens to mention it, which would silently remove live resources from
-	// state. See DESIGN.md's characterization test notes for issue #26.
+	// state. See DESIGN.md's characterization test notes.
 	if circleci.IsNotFound(err) {
 		resp.State.RemoveResource(ctx)
 

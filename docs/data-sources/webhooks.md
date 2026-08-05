@@ -13,11 +13,13 @@ webhook by id, and [`circleci_webhook`](../resources/webhook) to manage one.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | yes |
-
-Webhooks are served by the v2 API, which both deployments provide.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Outbound webhooks are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/webhook?scope-id={project_id}&scope-type=project` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the project. |
 
 ~> **Signing secrets are not returned.** CircleCI masks every signing secret, so
 this data source reports only *whether* one is set, as `has_signing_secret`. Do

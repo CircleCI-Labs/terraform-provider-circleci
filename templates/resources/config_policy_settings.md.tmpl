@@ -9,9 +9,15 @@ description: |-
 
 Controls whether CircleCI evaluates a policy context's config policies. This is the switch that turns enforcement on: uploading policies with `circleci_config_policy_bundle` does not, by itself, enforce anything.
 
-Works against both **CircleCI Cloud and CircleCI Server** — policy decision settings are served by the v2 API. Note the plan and version requirements below.
+## Availability
 
-> **Requires the Scale plan on CircleCI Cloud**, or **CircleCI Server 4.2 or later**.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on the Scale plan. |
+| **CircleCI Server** | Yes on CircleCI Server 4.2 and later. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `PATCH /api/v2/owner/{org_id}/context/{policy_context}/decision/settings` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 

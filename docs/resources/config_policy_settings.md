@@ -9,9 +9,15 @@ description: |-
 
 Controls whether CircleCI evaluates a policy context's config policies. This is the switch that turns enforcement on: uploading policies with `circleci_config_policy_bundle` does not, by itself, enforce anything.
 
-Works against both **CircleCI Cloud and CircleCI Server** — policy decision settings are served by the v2 API. Note the plan and version requirements below.
+## Availability
 
-> **Requires the Scale plan on CircleCI Cloud**, or **CircleCI Server 4.2 or later**.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on the Scale plan. |
+| **CircleCI Server** | Yes on CircleCI Server 4.2 and later. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `PATCH /api/v2/owner/{org_id}/context/{policy_context}/decision/settings` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 
@@ -59,7 +65,7 @@ resource "circleci_config_policy_bundle" "config" {
 
 # `policy_context` is optional and defaults to "config". Setting it explicitly is
 # fine, but "config" is the only accepted value: CircleCI documents a "custom"
-# policy context and every the API route rejects it with a 400. A policy
+# policy context and every policy route rejects it with a 400. A policy
 # context is also not a CircleCI context — it has nothing to do with
 # circleci_context or the environment variables that live there.
 #
@@ -87,9 +93,9 @@ resource "circleci_config_policy_settings" "sandbox" {
 
 ### Optional
 
-- `policy_context` (String) Which policy context these settings apply to. Defaults to `config`. Changing this value forces a new resource to be created.
+- `policy_context` (String) Which policy context these settings apply to. `config` is the only accepted value, and the default. Changing this value forces a new resource to be created.
 
-~> A policy context is **not** a CircleCI context: it is a namespace for a bundle of policies, unrelated to `circleci_context`. Its only valid values are `config`. CircleCI documents a `custom` context, but every the API route rejects it with a 400, so it is not offered here.
+~> A policy context is **not** a CircleCI context: it is a namespace for a bundle of policies, unrelated to `circleci_context`. CircleCI's documentation mentions a `custom` context, but no route accepts it — the settings handlers check this segment against `config` twice over — so it is not offered here.
 
 ## What enabling does
 

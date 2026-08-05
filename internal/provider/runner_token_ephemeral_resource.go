@@ -107,7 +107,7 @@ func (e *ephemeralRunnerTokenResource) Schema(_ context.Context, _ ephemeral.Sch
 				Required:            true,
 				MarkdownDescription: "The resource class this token grants access to, in `namespace/name` format (e.g. `myorg/myrunner`).",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerResourceClassPattern, "must be in the format 'namespace/name'"),
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
 				},
 			},
 			"nickname": schema.StringAttribute{

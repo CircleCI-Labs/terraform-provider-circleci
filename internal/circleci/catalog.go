@@ -19,8 +19,7 @@ const catalogOfferingsRoute = "/catalog/offerings"
 //
 // Each map goes from resource class name (as written in .circleci/config.yml,
 // for example "medium" or "gpu-nvidia-small") to the machine images available on
-// it. The response comes from the API, which serializes the
-// machine-provisioner Offerings struct straight into a v3 attributes envelope:
+// it. The response is serialized straight into a v3 attributes envelope:
 // four platform keys, each a map of resource class to image list.
 //
 // Deprecated holds resource classes still accepted but scheduled for removal.
@@ -67,11 +66,21 @@ func (o CatalogOfferings) ResourceClasses() []string {
 // singleton rather than an addressable entity, so the envelope carries
 // attributes but no id and no references: the response is
 // {"data": {"attributes": {...}}}.
+//
+// "no id" is a property of the renderer rather than a promise the handler makes:
+// the handler builds a single data entity leaving its id unset, and the v3 entity
+// type omits a zero id. This is also why there is nothing to paginate -- the
+// route renders one entity, not a collection, so it has no cursor, accepts no
+// page parameter, and GetCatalogOfferings makes exactly one request.
 type catalogOfferingsBody struct {
 	Attributes CatalogOfferings `json:"attributes"`
 }
 
 // GetCatalogOfferings reads the execution catalog.
+//
+// The route takes no parameters at all: no filter, no page cursor, no
+// organization. The catalog it returns is nonetheless organization-specific,
+// because it is scoped by the token the request was made with.
 //
 // v3 only: callers must gate this on Client.IsCloud.
 func (c *Client) GetCatalogOfferings(ctx context.Context) (*CatalogOfferings, error) {

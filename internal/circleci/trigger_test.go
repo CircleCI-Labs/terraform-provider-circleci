@@ -6,6 +6,7 @@ package circleci_test
 import (
 	"context"
 	"net/http"
+	"slices"
 	"testing"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -19,9 +20,8 @@ const (
 func TestListTriggers(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the API's
-	// the CircleCI API (an {"items": [...]} envelope with
-	// no next_page_token) and the schedule sub-shape the API returns, where
+	// The shape matches what the API actually returns: an {"items": [...]}
+	// envelope with no next_page_token, and the schedule sub-shape, where
 	// attribution_actor is an object even though a create accepts a bare string.
 	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeListJSON(w, `{"items":[
@@ -198,8 +198,8 @@ func TestCreateTriggerGithubAppRequest(t *testing.T) {
 		t.Errorf("request event_source.repo.external_id = %v, want 123456", repo["external_id"])
 	}
 	// The create body must not carry webhook or schedule for a github_app
-	// trigger: the API's createRequest.Validate rejects a webhook object for
-	// any provider other than "webhook".
+	// trigger: the API rejects a webhook object for any provider other than
+	// "webhook".
 	if _, present := eventSource["webhook"]; present {
 		t.Error("request event_source carries webhook for a github_app trigger, want it omitted")
 	}
@@ -250,8 +250,7 @@ func TestCreateTriggerScheduleRequest(t *testing.T) {
 	t.Parallel()
 
 	// AttributionActor on create is the bare alias string; the API resolves it
-	// to an object carrying the concrete actor id on read, per
-	// openapi_definitions/v2_endpoints/trigger examples.
+	// to an object carrying the concrete actor id on read.
 	srv, rec := recordedBodyServer(t, `{"id":"t3","event_name":"nightly",
 		"event_source":{"provider":"schedule","schedule":{"cron_expression":"0 0 * * *",
 		"attribution_actor":{"id":"a1b2c3"}}},"parameters":{"env":"prod"}}`)
@@ -295,8 +294,7 @@ func TestGetTriggerRequest(t *testing.T) {
 	t.Parallel()
 
 	// Get addresses the trigger directly under the project, NOT nested under
-	// its pipeline definition — confirmed against the API's
-	// the CircleCI API route registration.
+	// its pipeline definition.
 	srv, rec := recordedBodyServer(t, `{"id":"t1","event_source":{"provider":"github_app"}}`)
 	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
@@ -332,9 +330,8 @@ func TestGetTriggerNotFound(t *testing.T) {
 func TestUpdateTriggerRequest(t *testing.T) {
 	t.Parallel()
 
-	// The update body's event_source has no repo field at all — verified
-	// against handler_update.go's updateRequestEventSource — so this pins that
-	// a repo is never sent even for a github_app trigger's update.
+	// The update body's event_source has no repo field at all, so this pins
+	// that a repo is never sent even for a github_app trigger's update.
 	srv, rec := recordedBodyServer(t, `{"id":"t1","disabled":true,
 		"event_source":{"provider":"github_app","repo":{"full_name":"acme/api","external_id":"123456"}}}`)
 	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
@@ -400,5 +397,74 @@ func TestDeleteTriggerNotFound(t *testing.T) {
 	err := client.DeleteTrigger(context.Background(), testTriggerProjectID, "nope")
 	if !circleci.IsNotFound(err) {
 		t.Errorf("DeleteTrigger error = %v, want a not found error", err)
+	}
+}
+
+// TestGitHubOAuthTriggerEventPresetsAreRealPresets keeps the narrow github_oauth
+// list a subset of the full one.
+//
+// The two lists are separate exports because the narrowing is per provider, and a
+// preset that appeared only in the narrow list would be one the schema validator
+// rejects and the github_oauth check demands — a configuration that cannot be
+// written at all.
+func TestGitHubOAuthTriggerEventPresetsAreRealPresets(t *testing.T) {
+	t.Parallel()
+
+	all := map[string]bool{}
+	for _, preset := range circleci.TriggerEventPresets() {
+		all[preset] = true
+	}
+
+	for _, preset := range circleci.GitHubOAuthTriggerEventPresets() {
+		if !all[preset] {
+			t.Errorf("GitHubOAuthTriggerEventPresets includes %q, which TriggerEventPresets does not: "+
+				"the schema validator would reject a value the github_oauth check requires", preset)
+		}
+	}
+}
+
+// TestTriggerEventPresetsAreTheEnforcedSet pins the preset list to the keys the
+// API can actually map to trigger rules.
+//
+// A preset is not validated against a documented enum anywhere in the request
+// path: it is passed through as an event key and looked up by the API in an
+// event-mapping table when the trigger's rules are built. A key with no entry
+// fails the create with "invalid event key provided", so an extra value in this
+// list is not a harmless superset — it is a configuration that plans cleanly and
+// can never be applied.
+//
+// "only-branch-delete" was exactly that. It is in CircleCI's CLI and in one
+// published spec snapshot, and in no mapping table, so it is absent below. The
+// mapping table also holds "pr-comment-starts-with-at-chunk-ai", which is absent
+// from the published v2 enum and therefore deliberately not offered.
+//
+// This test is a change detector on purpose. The list cannot be derived at
+// runtime, so the only way to keep it honest is to make widening it a decision
+// someone has to write down.
+func TestTriggerEventPresetsAreTheEnforcedSet(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"all-pushes",
+		"only-tags",
+		"default-branch-pushes",
+		"only-build-prs",
+		"only-open-prs",
+		"only-labeled-prs",
+		"only-merged-prs",
+		"only-ready-for-review-prs",
+		"only-build-pushes-to-non-draft-prs",
+		"only-merged-or-closed-prs",
+		"pr-comment-equals-run-ci",
+		"non-draft-pr-opened",
+		"pushes-to-merge-queues",
+	}
+
+	got := circleci.TriggerEventPresets()
+
+	if !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want))) {
+		t.Errorf("TriggerEventPresets() = %v,\nwant %v\n"+
+			"An extra value here is an apply-time failure, not a wider contract: the event key is "+
+			"looked up in a mapping table and an unmapped key is rejected.", got, want)
 	}
 }

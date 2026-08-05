@@ -4,8 +4,11 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -13,6 +16,81 @@ import (
 )
 
 const orbTestYAML = "version: 2.1\ndescription: an orb\n"
+
+// TestOrbFakeVersionEntityOmitsTheOrbName asserts the bytes the fake sends for an
+// orb version, not what the provider makes of them.
+//
+// No orb version route sends references.orb_package.attributes: the API renders
+// that object only when it has an orb name, and the version records it renders
+// from never carry one. The fake used to send it anyway, so every orb_name
+// assertion in this file passed while the attribute was permanently empty against
+// the real API. This test is what stops that being reintroduced — with it in
+// place, orb_name can only be satisfied by the client resolving the name from the
+// orb package, which is what TestAccOrbVersionResource now proves it does.
+func TestOrbFakeVersionEntityOmitsTheOrbName(t *testing.T) {
+	api := newOrbFakeAPI(t)
+	ns := api.seedNamespace("acme")
+	orb := api.seedOrb("acme/node", ns.ID)
+	// A source distinct from every other fixture, so that finding it in the entity
+	// can only mean the entity leaked it.
+	const source = "version: 2.1\ndescription: only-in-this-test\n"
+
+	version := api.seedVersion(orb.ID, "1.0.0", source)
+
+	entity, err := json.Marshal(api.versionEntity(version))
+	if err != nil {
+		t.Fatalf("marshalling the version entity: %v", err)
+	}
+
+	want := `"references":{"orb_package":{"id":"` + orb.ID + `"}}`
+	if !strings.Contains(string(entity), want) {
+		t.Errorf("version entity = %s,\nwant it to contain %s and nothing else under orb_package", entity, want)
+	}
+	if strings.Contains(string(entity), "acme/node") {
+		t.Errorf("version entity = %s, want no orb name: the API never sends one here", entity)
+	}
+	// attributes.source is only sent by the by-id route when explicitly asked for
+	// with ?include=source, which the client never does.
+	if strings.Contains(string(entity), "only-in-this-test") {
+		t.Errorf("version entity = %s, want no source outside the dedicated source route", entity)
+	}
+}
+
+// TestAccOrbVersionResourceResolvesTheOrbName proves orb_name is populated by a
+// lookup against the orb package rather than by reading it off the version.
+func TestAccOrbVersionResourceResolvesTheOrbName(t *testing.T) {
+	api := newOrbFakeAPI(t)
+	ns := api.seedNamespace("acme")
+	orb := api.seedOrb("acme/node", ns.ID)
+
+	config := orbProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_orb_version" "test" {
+  orb_id  = %q
+  version = "1.0.0"
+  yaml    = %q
+}
+`, orb.ID, orbTestYAML)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: config,
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr("circleci_orb_version.test", "orb_name", "acme/node"),
+				func(*terraform.State) error {
+					if got := api.requestsFor(http.MethodGet, "/orb/packages/"+orb.ID); len(got) == 0 {
+						return fmt.Errorf(
+							"orb_name was set without reading the orb package; requests were %+v",
+							api.allRequests(),
+						)
+					}
+
+					return nil
+				},
+			),
+		}},
+	})
+}
 
 // TestAccOrbVersionResource publishes a version and then destroys the resource.
 //

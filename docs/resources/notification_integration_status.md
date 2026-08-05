@@ -11,11 +11,13 @@ Manages whether an existing CircleCI notification integration (a Slack workspace
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Integrations are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `POST /api/v3/notification/integrations/{id}/set-status`, read back with `GET /api/v3/notification/integrations/{id}` |
+| **Organization type** | Any. The integration itself is installed through an OAuth flow in the web UI, not through this API. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## This resource adopts an integration; it does not create one
 

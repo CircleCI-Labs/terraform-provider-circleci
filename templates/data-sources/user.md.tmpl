@@ -16,7 +16,7 @@ With no `id`, this reports the user the configured API token authenticates as â€
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | Yes â€” both routes are v2, which CircleCI Server serves. |
+| **CircleCI Server** | Yes. Both routes are served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
 | **API** | `GET /api/v2/me` with no `id`, `GET /api/v2/user/{id}` with one |
 | **Organization type** | Not applicable; a user is not scoped to an organization. |
 | **Token** | A **personal** API token. See below. |
@@ -29,7 +29,9 @@ With no `id`, this reports the user the configured API token authenticates as â€
 
 CircleCI has no API for creating, updating or deleting a user account, and organization membership is managed in the web UI. There is nothing writable to converge on.
 
-To manage *group* membership for an existing user, see `circleci_group_membership`.
+Group membership cannot be managed through this provider either: the routes
+exist but are not exposed by the public API. See `circleci_group`'s documentation
+for what is and is not possible for a group.
 
 ## Example Usage
 

@@ -19,9 +19,9 @@ import (
 // writable counterpart, so there is nothing to create first, and the response
 // bodies below are the only thing under test on the provider side.
 //
-// The bodies are the shapes production sends. They were taken from
-// the API (the CircleCI API), the API
-// (client/machineprovisioner) and the v2 API (the CircleCI API), and
+// The bodies are the shapes production sends. They were taken from three
+// different backends — one for GitHub App repositories, one for the
+// execution catalog, and the general v2 API for the rest — and
 // they are deliberately verbatim rather than convenient: a mock that matched the
 // provider's assumptions instead of the API's would let a wrong field name pass.
 
@@ -248,18 +248,24 @@ func (m *mockDiscoveryAPI) serveUser(w http.ResponseWriter, userID string) {
 // serveCollaborations answers /me/collaborations with a bare JSON array — not the
 // items/next_page_token envelope, and not paginated. The second entry has a null
 // id, which is what an organization CircleCI does not know yet looks like.
+//
+// The VCS key is "vcs-type", hyphenated, because that is the key this route
+// really sends — it is the only one in the v2 surface that does. See
+// circleci.Collaboration.VCSType. Spelling it "vcs_type" here made the fake agree
+// with a wrong struct tag instead of with production, so the resulting empty
+// vcs_type attribute passed every assertion below.
 func (m *mockDiscoveryAPI) serveCollaborations(w http.ResponseWriter) {
 	_, _ = w.Write([]byte(`[
   {
     "id": "11111111-1111-1111-1111-111111111111",
-    "vcs_type": "circleci",
+    "vcs-type": "circleci",
     "name": "acme",
     "slug": "circleci/11111111-1111-1111-1111-111111111111",
     "avatar_url": "https://avatars.example.com/u/2"
   },
   {
     "id": null,
-    "vcs_type": "github",
+    "vcs-type": "github",
     "name": "not-onboarded",
     "slug": "gh/not-onboarded",
     "avatar_url": "https://avatars.example.com/u/3"

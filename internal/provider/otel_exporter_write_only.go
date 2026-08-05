@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"sort"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
@@ -16,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -65,7 +67,7 @@ import (
 // 2. vault#2900 does not apply, and that is a fact about the API rather than a
 // choice.
 //
-// CircleCI has no update route for an exporter: the routes served is
+// CircleCI has no update route for an exporter: the routes are
 // POST/GET/DELETE only, otelExporterResource.Update is an empty method, and
 // every configurable attribute carries RequiresReplace. So there is no
 // "update triggered by an unrelated field" for a version-gated send to omit the
@@ -74,7 +76,8 @@ import (
 // gated on the version anyway, which is the same rule the other two resources
 // follow, and it stays correct if CircleCI ever adds a PATCH.
 //
-// 3. The write-only path gives up the one kind of drift this resource could see.
+// 3. The write-only path used to give up the one kind of drift this resource
+// could see. `headers_wo_names` gets it back.
 //
 // GET returns header *names* in full and every header *value* as the placeholder
 // circleci.OTelRedactedHeaderValue. On the state-backed path otelRefreshHeaders
@@ -82,22 +85,37 @@ import (
 // match, and adopts the remote map when they do not — so a header added or
 // removed outside Terraform is detected even though a changed value is not.
 //
-// That comparison needs a prior key set, and on the write-only path there isn't
-// one. `headers_wo` is null in state by construction, and ReadRequest carries no
-// configuration, so Read has nothing to compare the returned names against.
-// Worse, adopting the remote map would write `{"x-api-key": "xxxx"}` into
-// `headers` — a non-write-only attribute — and since `headers` forces
-// replacement, every subsequent plan would want to recreate the exporter
-// forever.
+// That comparison needs a prior key set, and on the write-only path there wasn't
+// one: `headers_wo` is null in state by construction, and ReadRequest carries no
+// configuration, so Read had nothing to compare the returned names against.
+// Adopting the remote map directly into `headers` unconditionally would have
+// written `{"x-api-key": "xxxx"}` into a non-write-only, replacement-forcing
+// attribute on every single read, drift or not — and since the write-only path's
+// configuration never sets `headers`, that mismatch would never clear and every
+// later plan would want to recreate the exporter forever.
 //
-// So otelHeadersAfterRead leaves `headers` null whenever the exporter is on the
-// write-only path. The consequence is documented rather than worked around: on
-// the write-only path neither a changed value nor an added or removed header is
-// detected. Storing the names in a computed attribute would restore the
-// add/remove half, at the cost of a new persisted attribute and a second thing
-// that can force replacement; it was considered and not done, because the
-// resource is replacement-only and re-applying with a bumped version is already
-// the remedy for any header drift.
+// `headers_wo_names` is the prior key set the write-only path was missing: a
+// computed set of header names, populated by Create from the response and kept
+// current by Read, that plays the same role state.Headers plays for
+// otelRefreshHeaders. otelRefreshWriteOnlyHeaderNames compares it against the
+// names the API just returned. When they match, nothing changed and both
+// `headers_wo_names` and `headers` are left alone (`headers` stays null, as
+// always on this path). When they differ — a header was added or removed
+// outside Terraform — `headers_wo_names` is updated to the new set AND `headers`
+// is populated with the API's redacted map, exactly what otelRefreshHeaders does
+// on the state-backed path for the same reason: `headers` already forces
+// replacement (mapplanmodifier.RequiresReplace on the attribute itself), while
+// `headers_wo`'s own RequiresReplace can never fire (see point 1). Populating
+// `headers` only on a genuine, detected difference — never unconditionally — is
+// what keeps this a one-time replacement rather than the forever-loop above:
+// the replacement's Create starts the new resource with accurate names and a
+// null `headers`, matching reality again.
+//
+// Storing header names discloses nothing a read does not already reveal: the
+// API returns them in full to anyone who can read the exporter. A changed
+// header *value* is still undetectable on both paths — CircleCI never returns
+// values, only names — and that limitation is unchanged and stated in both
+// attributes' descriptions.
 
 // otelHeadersWriteOnlyAttribute returns the `headers_wo` attribute.
 func otelHeadersWriteOnlyAttribute() schema.MapAttribute {
@@ -110,10 +128,11 @@ func otelHeadersWriteOnlyAttribute() schema.MapAttribute {
 			"every time any header changes, or the new headers are never sent — incrementing it " +
 			"replaces the exporter, because CircleCI has no route that updates one in place.\n\n" +
 			"Set at most one of `headers` and `headers_wo`. Setting neither sends no headers.\n\n" +
-			"~> **On this path no header drift is detected at all.** `headers` at least notices a " +
-			"header added or removed outside Terraform, because CircleCI returns header names in " +
-			"full; `headers_wo` stores no names to compare against, so it notices neither that nor " +
-			"a changed value.",
+			"~> **A changed header value is never detected on either path.** CircleCI never " +
+			"discloses a header's value, only its name. A header *added or removed* outside " +
+			"Terraform is detected here too, through the computed `headers_wo_names` attribute, " +
+			"and — because `headers` already forces replacement — detecting one recreates the " +
+			"exporter, the same as it does on the `headers` path.",
 		ElementType: types.StringType,
 		Optional:    true,
 		WriteOnly:   true,
@@ -163,6 +182,69 @@ func otelHeadersWriteOnlyVersionAttribute() schema.Int64Attribute {
 			int64validator.AlsoRequires(path.MatchRoot("headers_wo")),
 		},
 	}
+}
+
+// otelHeadersWriteOnlyNamesAttribute returns the `headers_wo_names` attribute:
+// the computed set of header names CircleCI reports, populated only on the
+// write-only path. See point 3 at the top of this file for why it exists and
+// how it is used.
+//
+// It carries no RequiresReplace of its own. Detecting a header added or
+// removed is done by otelRefreshWriteOnlyHeaderNames adopting CircleCI's map
+// into `headers`, which already forces replacement; a second RequiresReplace
+// here would be redundant, and — because a Computed attribute with no
+// UseStateForUnknown is unknown on every plan regardless of whether anything
+// changed — it would misfire as "changed" on every apply rather than only on
+// genuine drift.
+func otelHeadersWriteOnlyNamesAttribute() schema.SetAttribute {
+	return schema.SetAttribute{
+		MarkdownDescription: "The header names CircleCI reports for this exporter, populated only " +
+			"when headers are managed through `headers_wo`. CircleCI discloses every header name in " +
+			"full — only the values are masked — so recording the names here reveals nothing that " +
+			"reading the exporter does not already reveal, and it is what lets a read detect a " +
+			"header added or removed outside Terraform on this path, the way `headers` already does " +
+			"on its own.\n\n" +
+			"~> **An added or removed header recreates the exporter.** Detecting one adopts " +
+			"CircleCI's header map into `headers`, and `headers` already forces replacement — the " +
+			"same behavior the `headers` path has always had for this kind of drift, not something " +
+			"new here. A changed header *value* is still undetectable on both paths: CircleCI never " +
+			"discloses values, only names.",
+		ElementType: types.StringType,
+		Computed:    true,
+		PlanModifiers: []planmodifier.Set{
+			setplanmodifier.UseStateForUnknown(),
+		},
+	}
+}
+
+// otelHeaderNames returns remote's keys, sorted so the resulting attribute
+// value is deterministic regardless of map iteration order.
+func otelHeaderNames(remote map[string]string) []string {
+	names := make([]string, 0, len(remote))
+	for name := range remote {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+// otelHeadersWriteOnlyNamesAfterCreate returns the value `headers_wo_names`
+// should hold right after Create: the names CircleCI just echoed back, or null
+// when the exporter is on the state-backed path (version identifies that, the
+// same signal otelHeadersAfterRead uses). This is what gives Read a prior key
+// set to compare against on every later refresh.
+func otelHeadersWriteOnlyNamesAfterCreate(
+	ctx context.Context,
+	version types.Int64,
+	remote map[string]string,
+) (types.Set, diag.Diagnostics) {
+	if version.IsNull() {
+		return types.SetNull(types.StringType), nil
+	}
+
+	return types.SetValueFrom(ctx, types.StringType, otelHeaderNames(remote))
 }
 
 // otelHeadersConfigValidator refuses `headers` and `headers_wo` together.
@@ -243,24 +325,82 @@ func resolveOTelHeaders(
 	return resolved, !diagnostics.HasError()
 }
 
-// otelHeadersAfterRead returns the value `headers` should hold after a read.
+// otelHeadersAfterRead returns the values `headers` and `headers_wo_names`
+// should hold after a read.
 //
-// On the state-backed path this is otelRefreshHeaders, which compares key sets to
-// surface a header added or removed outside Terraform. On the write-only path
-// there is no prior key set to compare against — `headers_wo` is null in state
-// and ReadRequest carries no configuration — and adopting the API's map would put
-// the placeholder value into a non-write-only attribute that forces replacement,
-// producing a plan that never converges. So `headers` stays null there. See the
-// top of this file.
+// On the state-backed path (version null) `headers` is otelRefreshHeaders'
+// result, which compares key sets to surface a header added or removed outside
+// Terraform, and `headers_wo_names` stays null — it belongs to the other path.
+// On the write-only path it is the reverse: `headers_wo_names` is
+// otelRefreshWriteOnlyHeaderNames' result, and `headers` stays null unless that
+// comparison found a difference, in which case it briefly holds CircleCI's
+// redacted map so that `headers`'s existing RequiresReplace fires. See point 3
+// at the top of this file.
 func otelHeadersAfterRead(
 	ctx context.Context,
-	prior types.Map,
+	priorHeaders types.Map,
+	priorNames types.Set,
 	version types.Int64,
 	remote map[string]string,
-) (types.Map, diag.Diagnostics) {
-	if !version.IsNull() {
-		return types.MapNull(types.StringType), nil
+) (types.Map, types.Set, diag.Diagnostics) {
+	if version.IsNull() {
+		headers, diags := otelRefreshHeaders(ctx, priorHeaders, remote)
+
+		return headers, types.SetNull(types.StringType), diags
 	}
 
-	return otelRefreshHeaders(ctx, prior, remote)
+	return otelRefreshWriteOnlyHeaderNames(ctx, priorNames, remote)
+}
+
+// otelRefreshWriteOnlyHeaderNames is otelRefreshHeaders' counterpart for the
+// write-only path, comparing header *names* — the only thing CircleCI ever
+// discloses in full — instead of a key-and-value map.
+//
+// When priorNames and remote's keys are the same set, nothing changed:
+// `headers_wo_names` is left exactly as it was and `headers` stays null, same
+// as always on this path. When they differ, `headers_wo_names` is updated to
+// the new set and `headers` is populated with CircleCI's redacted map, which
+// is what makes the drift visible: `headers` already forces replacement, and
+// on this path it is otherwise always null in configuration, so populating it
+// here is a mismatch that trips the same modifier. See point 3 at the top of
+// this file for why that is a one-time replacement rather than a forever-loop.
+func otelRefreshWriteOnlyHeaderNames(
+	ctx context.Context,
+	priorNames types.Set,
+	remote map[string]string,
+) (types.Map, types.Set, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	priorElements := priorNames.Elements()
+
+	if len(priorElements) == len(remote) {
+		sameKeys := true
+
+		for _, element := range priorElements {
+			name, ok := element.(types.String)
+			if !ok {
+				sameKeys = false
+
+				break
+			}
+
+			if _, ok := remote[name.ValueString()]; !ok {
+				sameKeys = false
+
+				break
+			}
+		}
+
+		if sameKeys {
+			return types.MapNull(types.StringType), priorNames, diags
+		}
+	}
+
+	names, nameDiags := types.SetValueFrom(ctx, types.StringType, otelHeaderNames(remote))
+	diags.Append(nameDiags...)
+
+	headers, headerDiags := types.MapValueFrom(ctx, types.StringType, remote)
+	diags.Append(headerDiags...)
+
+	return headers, names, diags
 }

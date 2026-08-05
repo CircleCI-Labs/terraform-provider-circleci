@@ -16,7 +16,18 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
+// build_fork_prs is not uniform across VCS integrations (README.md's
+// compatibility matrix): GitHub App, GitHub Enterprise Server and GitLab
+// self-managed all report "no", and GitLab is an open contradiction in
+// CircleCI's own documentation ([^forkprs]). This test asserts
+// build_fork_prs = true on create, which only GitHub OAuth and Bitbucket Cloud
+// are confirmed to honor, and organizationID/organizationSlug below are the
+// fixtures set in every context — so without this gate the assertion would
+// fail against a real GitHub App, GHES or GitLab self-managed organization
+// rather than skip.
 func TestAccCircleCiProjectResource(t *testing.T) {
+	testRequireVCSType(t, "github_oauth", "bitbucket")
+
 	organizationID := testOrgID(t)
 	organizationSlug := testOrgSlug(t)
 	projectName := rand.Text()

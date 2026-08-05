@@ -20,7 +20,7 @@ import (
 // attr.Value.String(), which renders a value the way Terraform displays it. A
 // branch therefore arrived at the API as `"main"` — including the quote
 // characters — so the setting never matched a real branch. This is the likely
-// cause of issue #59.
+// cause of CircleCI-Public/terraform-provider-circleci#59.
 func TestBranchOverrides(t *testing.T) {
 	t.Parallel()
 

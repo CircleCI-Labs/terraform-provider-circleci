@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
@@ -81,6 +82,132 @@ resource "circleci_ios_signing_certificate" "test" {
 	if got := api.certs; len(got) != 0 {
 		t.Errorf("certs remaining after destroy = %d, want 0", len(got))
 	}
+}
+
+// TestAccIOSSigningCertificateResource_ImportForcesReplacement proves, against
+// a real plan rather than by reading the plan modifier's source, the
+// consequence documented on ImportState and on the resource's documentation
+// page: importing a certificate and then supplying its content via
+// certificate_blob/certificate_password (the state-backed path) plans a
+// replacement on the very first apply after import, not a quiet no-op.
+//
+// The certificate is seeded directly into the fake, bypassing Terraform
+// entirely, to stand in for one that already exists in the organization and
+// was never created by this Terraform run -- exactly the case import is for.
+// ImportStatePersist is required to observe this: a bare ImportState step
+// imports into a throwaway working directory and discards it, so a Config
+// step afterwards would still be planning against whatever state the
+// *previous* step left behind rather than against the imported state.
+func TestAccIOSSigningCertificateResource_ImportForcesReplacement(t *testing.T) {
+	api := newIOSSigningFakeAPI(t)
+
+	const (
+		blob     = "cDEyLWJhc2U2NC1jb250ZW50LWRpc3RyaWJ1dGlvbg=="
+		password = "s3cret-password"
+		id       = "00000001-1111-2222-3333-444444444444"
+	)
+
+	api.certs[id] = &iosSigningFakeCert{
+		ID:        id,
+		OrgID:     iosSigningTestOrgID,
+		FileName:  "distribution.p12",
+		Blob:      blob,
+		Password:  password,
+		CertType:  "distribution",
+		CreatedAt: iosSigningFakeCreatedAt,
+		ExpiresAt: iosSigningFakeExpiresAt,
+	}
+
+	config := iosSigningProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_ios_signing_certificate" "test" {
+  organization_id      = %q
+  file_name            = "distribution.p12"
+  certificate_blob     = %q
+  certificate_password = %q
+}
+`, iosSigningTestOrgID, blob, password)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				ResourceName:       "circleci_ios_signing_certificate.test",
+				ImportState:        true,
+				ImportStateId:      id,
+				ImportStatePersist: true,
+				Config:             config,
+			},
+			{
+				Config: config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_ios_signing_certificate.test", plancheck.ResourceActionReplace,
+						),
+					},
+				},
+			},
+		},
+	})
+}
+
+// TestAccIOSSigningCertificateResource_ImportWriteOnlyForcesReplacement is the
+// write-only counterpart: certificate_wo_version, not certificate_blob_wo (which
+// is null in state whether imported or created, so no modifier on it can ever
+// fire), is what carries the RequiresReplace here, and it is just as null after
+// import as certificate_blob is on the state-backed path.
+func TestAccIOSSigningCertificateResource_ImportWriteOnlyForcesReplacement(t *testing.T) {
+	api := newIOSSigningFakeAPI(t)
+
+	const (
+		blob     = "cDEyLWJhc2U2NC1jb250ZW50LWRpc3RyaWJ1dGlvbg=="
+		password = "s3cret-password"
+		id       = "00000001-1111-2222-3333-444444444444"
+	)
+
+	api.certs[id] = &iosSigningFakeCert{
+		ID:        id,
+		OrgID:     iosSigningTestOrgID,
+		FileName:  "distribution.p12",
+		Blob:      blob,
+		Password:  password,
+		CertType:  "distribution",
+		CreatedAt: iosSigningFakeCreatedAt,
+		ExpiresAt: iosSigningFakeExpiresAt,
+	}
+
+	config := iosSigningProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_ios_signing_certificate" "test" {
+  organization_id         = %q
+  file_name               = "distribution.p12"
+  certificate_blob_wo     = %q
+  certificate_password_wo = %q
+  certificate_wo_version  = 1
+}
+`, iosSigningTestOrgID, blob, password)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				ResourceName:       "circleci_ios_signing_certificate.test",
+				ImportState:        true,
+				ImportStateId:      id,
+				ImportStatePersist: true,
+				Config:             config,
+			},
+			{
+				Config: config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_ios_signing_certificate.test", plancheck.ResourceActionReplace,
+						),
+					},
+				},
+			},
+		},
+	})
 }
 
 // TestAccIOSSigningCertificateResource_DevelopmentCertType covers the other

@@ -66,7 +66,6 @@ flowchart TD
     ctxvar["Context env var<br/>circleci_context_environment_variable"]
     ctxres["Context restriction<br/>circleci_context_restriction"]
     grp["Group<br/>circleci_group"]
-    mem["Group membership<br/>circleci_group_membership"]
     pgrp["Project role grant<br/>circleci_project_group"]
     ckey["Checkout key<br/>circleci_checkout_key"]
     ns["Namespace<br/>circleci_orb_namespace"]
@@ -91,7 +90,6 @@ flowchart TD
   def --> trig
   ctx --> ctxvar
   ctx --> ctxres
-  grp --> mem
   grp --> pgrp
   ns --> rc
   rc --> tok
@@ -259,21 +257,32 @@ variable for anything that belongs to exactly one project.
 
 ### Groups and project access
 
-**Organization → group → members, and group → project role grant.**
+**Organization → group, and group → project role grant.**
 
 CircleCI's RBAC. `circleci_group` is a named set of users;
-`circleci_group_membership` holds its `user_ids`; `circleci_project_group` grants
-that group a `role` on one project — `project-admin`, `project-contributor` or
-`project-viewer`. The organization-level roles (`org-admin`, `org-contributor`,
-`org-viewer`) are not valid for a project grant.
+`circleci_project_group` grants that group a `role` on one project —
+`project-admin`, `project-contributor` or `project-viewer`. The organization-level
+roles (`org-admin`, `org-contributor`, `org-viewer`) are not valid for a project
+grant.
 
 ~> These require a **standalone** (`circleci/<uuid>`) organization. `github` and
 `bitbucket` organizations cannot use them even on CircleCI Cloud, and CircleCI
 Server cannot use them at all.
 
-Adding a *user* to the organization is not modelled here. The routes exist but
-are served on a host reserved for internal use rather than through the public
-API, so invitations remain a web-application step.
+Populating a group's membership is `circleci_group_membership`, and it takes
+**exclusive ownership** of the member list — a user added to the group outside
+Terraform is removed on the next apply.
+
+~> **This resource depends on routes CircleCI does not publish.** The v2 routes
+that look like they should serve group membership answer 404 even for a group that
+demonstrably exists; the working routes are private ones on a separate origin.
+They are verified working, but they carry no compatibility guarantee and could
+change without notice. The provider records the dependency and the public-API
+request that would let the provider drop it.
+
+Adding a *user* to the organization is not modelled here either. Those routes
+exist but are served on a host reserved for internal use rather than through the
+public API, so invitations remain a web-application step.
 
 ### Checkout keys
 

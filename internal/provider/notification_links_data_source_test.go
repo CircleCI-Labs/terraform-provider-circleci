@@ -18,10 +18,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
-// The fixture shape comes from the notifications service's own
-// the CircleCI API handler: a v3 collection whose entities carry
-// their fields under "attributes" and the owning user under
-// "references.user.id", with NO id of their own.
+// The fixture shape mirrors what the API actually returns: a v3 collection
+// whose entities carry their fields under "attributes" and the owning user
+// under "references.user.id", with NO id of their own.
 func newNotificationLinksAPI(t *testing.T, body string, status int) (string, func() []url.Values) {
 	t.Helper()
 

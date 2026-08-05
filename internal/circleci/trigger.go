@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 )
 
@@ -19,12 +20,169 @@ const triggersRoute = "/projects/%s/pipeline-definitions/%s/triggers"
 
 // triggerRoute addresses a single trigger by id, directly under the project —
 // unlike triggersRoute above (create and list), which is nested under the
-// pipeline definition. Confirmed against the API's
-// the CircleCI API route registration:
+// pipeline definition:
 //
 //	GET|POST /api/v2/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers
 //	GET|PATCH|DELETE /api/v2/projects/{project_id}/triggers/{trigger_id}
 const triggerRoute = "/projects/%s/triggers/%s"
+
+// The event source providers the trigger endpoints accept. One endpoint covers
+// several contracts, and which of a trigger's fields are required — even which
+// are permitted — depends on which of these was chosen, so the provider validates
+// per provider rather than per attribute.
+const (
+	// TriggerProviderGitHubApp is CircleCI's GitHub App integration. Its event
+	// source is keyed by GitHub's own numeric repository id.
+	TriggerProviderGitHubApp = "github_app"
+	// TriggerProviderGitHubServer is a GitHub Enterprise Server installation. Same
+	// contract as TriggerProviderGitHubApp, but the repository ids are allocated by
+	// that installation rather than by github.com.
+	TriggerProviderGitHubServer = "github_server"
+	// TriggerProviderGitHubOAuth is the older GitHub OAuth integration. Narrower
+	// contract than the GitHub App one: it requires an event preset, accepts only
+	// two of them, and does not support being disabled.
+	TriggerProviderGitHubOAuth = "github_oauth"
+	// TriggerProviderWebhook mints an inbound URL that starts the pipeline when
+	// posted to.
+	TriggerProviderWebhook = "webhook"
+	// TriggerProviderSchedule fires on a cron expression, and is the only provider
+	// that accepts default pipeline parameters.
+	TriggerProviderSchedule = "schedule"
+)
+
+// TriggerEventSourceProviders returns every event source provider the trigger
+// endpoints accept.
+//
+// It exists so that the resource's schema validator, its attribute description
+// and this client cannot drift from one another — the same reason WebhookEvents
+// exists. GitLab is absent because these endpoints do not serve it at all, so a
+// trigger cannot be created for a GitLab project through this API however the
+// attribute is spelled.
+//
+// bitbucket_dc (Bitbucket Data Center) is deliberately absent, and that is a
+// judgement rather than a fact: the create handler implements it and the
+// published descriptions of GET/PATCH/DELETE name it, but the documented set of
+// accepted values on *create* does not. A bitbucket_dc trigger can therefore be
+// read — and imported — but not written from a configuration. See DESIGN.md.
+func TriggerEventSourceProviders() []string {
+	return []string{
+		TriggerProviderGitHubApp,
+		TriggerProviderGitHubServer,
+		TriggerProviderGitHubOAuth,
+		TriggerProviderWebhook,
+		TriggerProviderSchedule,
+	}
+}
+
+// TriggerRepoEventSourceProviders returns the providers whose event source is a
+// repository, so that a create body must carry event_source.repo.external_id.
+//
+// github_oauth belongs here and was missing for a long time: the create path
+// populated a repo only for github_app and github_server, so every github_oauth
+// trigger was rejected with an opaque HTTP 400. The API decides this per
+// provider in one switch — its github_oauth arm is the same one as github_app's
+// — so the provider keeps one list rather than repeating the set at each place
+// that needs it.
+//
+// The external id is a *numeric* repository id for every provider in this list:
+// the API parses it as a 64-bit integer and answers 400 with no field reference
+// when it does not parse. See TriggerRepoExternalIDIsValid.
+func TriggerRepoEventSourceProviders() []string {
+	return []string{
+		TriggerProviderGitHubApp,
+		TriggerProviderGitHubServer,
+		TriggerProviderGitHubOAuth,
+	}
+}
+
+// TriggerProviderNeedsRepo reports whether an event source provider requires a
+// repository external id.
+func TriggerProviderNeedsRepo(provider string) bool {
+	return slices.Contains(TriggerRepoEventSourceProviders(), provider)
+}
+
+// TriggerRepoExternalIDIsValid reports whether an event source repository
+// external id is in the form the API accepts: the VCS provider's own numeric
+// repository id.
+//
+// Anything else is rejected outright, and the rejection carries no field
+// reference — the handler collapses a repository-id parse failure into a bare
+// "bad request" — so checking it before the request is the difference between a
+// plan-time diagnostic naming the attribute and an apply-time error naming
+// nothing.
+func TriggerRepoExternalIDIsValid(externalID string) bool {
+	_, err := strconv.ParseInt(externalID, 10, 64)
+
+	return err == nil
+}
+
+// TriggerProviderRequiresRefs reports whether an event source provider requires
+// both checkout_ref and config_ref.
+//
+// webhook and schedule both do: neither has a VCS event to take a ref from, so
+// there is nothing to fall back to and the API rejects a create that
+// omits either. The GitHub providers are the opposite case and cannot be
+// answered here — a ref is required exactly when the event source repository
+// differs from the pipeline definition's, and forbidden when it does not, which
+// this provider cannot know without reading the definition.
+func TriggerProviderRequiresRefs(provider string) bool {
+	return provider == TriggerProviderWebhook || provider == TriggerProviderSchedule
+}
+
+// The two event presets the github_oauth contract accepts. They are named
+// because GitHubOAuthTriggerEventPresets and TriggerEventPresets must agree on
+// them: a preset in the narrow list but not the full one could never be set.
+const (
+	TriggerEventPresetAllPushes    = "all-pushes"
+	TriggerEventPresetOnlyBuildPRs = "only-build-prs"
+)
+
+// TriggerEventPresets returns every event preset the trigger endpoints accept.
+//
+// The single source for the schema validator and the attribute description, as
+// WebhookEvents is for webhook event names. Without it an unrecognized preset
+// costs a round-trip and comes back as an opaque HTTP 400.
+//
+// This list is the *enforced* set, not a documented one. A preset is turned into
+// trigger rules by a lookup in the API's own event mapping table, and a
+// key that is not in that table fails the create with "invalid event key
+// provided". Two consequences:
+//
+//   - "only-branch-delete" used to be in this list and is not a real key. It
+//     appears in CircleCI's CLI and in one published spec snapshot, but the
+//     mapping table has no entry for it, so every trigger configured with it
+//     failed at apply time. It is removed rather than fixed: there is nothing to
+//     map it to.
+//   - the mapping table also holds one key this list omits on purpose,
+//     "pr-comment-starts-with-at-chunk-ai". It is absent from the published v2
+//     enum, so offering it would take the provider past the documented contract
+//     for a preset nobody can be expected to want.
+func TriggerEventPresets() []string {
+	return []string{
+		TriggerEventPresetAllPushes,
+		"only-tags",
+		"default-branch-pushes",
+		TriggerEventPresetOnlyBuildPRs,
+		"only-open-prs",
+		"only-labeled-prs",
+		"only-merged-prs",
+		"only-ready-for-review-prs",
+		"only-build-pushes-to-non-draft-prs",
+		"only-merged-or-closed-prs",
+		"pr-comment-equals-run-ci",
+		"non-draft-pr-opened",
+		"pushes-to-merge-queues",
+	}
+}
+
+// GitHubOAuthTriggerEventPresets returns the only two presets a github_oauth
+// event source accepts, out of the full TriggerEventPresets set.
+//
+// The narrowing is per provider rather than per attribute, so it cannot be
+// expressed as a schema validator; the resource applies it in ValidateConfig.
+func GitHubOAuthTriggerEventPresets() []string {
+	return []string{TriggerEventPresetAllPushes, TriggerEventPresetOnlyBuildPRs}
+}
 
 // TriggerAttributionActor is the actor a scheduled trigger's pipelines are
 // attributed to. A read reports the actor as an object carrying its id, even
@@ -151,9 +309,8 @@ func (c *Client) ListTriggers(ctx context.Context, projectID, pipelineDefinition
 }
 
 // TriggerWebhookInput is the create/update body's event_source.webhook: only
-// Sender is ever accepted, matching the API's
-// the CircleCI API's createRequestWebhook and
-// handler_update.go's updateRequestWebhook.
+// Sender is ever accepted, matching what the create and update routes
+// themselves accept for event_source.webhook.
 type TriggerWebhookInput struct {
 	Sender string `json:"sender"`
 }
@@ -162,8 +319,7 @@ type TriggerWebhookInput struct {
 // AttributionActor is sent as the bare alias string ("current" or "system")
 // the caller configured — unlike the read shape (TriggerSchedule), where the
 // API resolves it to an object carrying the concrete actor id. Confirmed
-// against the API's openapi_definitions/v2_endpoints/trigger
-// schemas and examples.
+// against the API's own OpenAPI schemas and examples.
 type TriggerScheduleInput struct {
 	CronExpression   string `json:"cron_expression"`
 	AttributionActor string `json:"attribution_actor,omitempty"`
@@ -171,8 +327,7 @@ type TriggerScheduleInput struct {
 
 // TriggerEventSourceInput is the create body's event_source. Repo, Webhook and
 // Schedule are pointers so that only the one matching Provider is serialized:
-// the API's createRequest.Validate rejects a repo on a webhook trigger and a
-// webhook on anything else.
+// the API rejects a repo on a webhook trigger and a webhook on anything else.
 type TriggerEventSourceInput struct {
 	Provider string                `json:"provider"`
 	Repo     *RepoInput            `json:"repo,omitempty"`
@@ -224,9 +379,8 @@ func (c *Client) GetTrigger(ctx context.Context, projectID, id string) (*Trigger
 }
 
 // UpdateTriggerEventSourceInput is the update body's event_source. There is no
-// Repo field at all — matching handler_update.go's updateRequestEventSource
-// exactly — so a trigger's event source repository is immutable after
-// creation; only the webhook sender and the schedule are.
+// Repo field at all, so a trigger's event source repository is immutable
+// after creation; only the webhook sender and the schedule are.
 type UpdateTriggerEventSourceInput struct {
 	Provider string                `json:"provider"`
 	Webhook  *TriggerWebhookInput  `json:"webhook,omitempty"`

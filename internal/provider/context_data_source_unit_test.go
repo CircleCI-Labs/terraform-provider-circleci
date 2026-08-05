@@ -19,7 +19,7 @@ import (
 //
 // context_data_source.go reads a context by id or name and its restrictions
 // both through internal/circleci.Client, against the same /api/v2/context
-// routes, so contextFakeAPI (context_legacy_fake_test.go) serves both calls.
+// routes, so contextFakeAPI (context_fake_test.go) serves both calls.
 
 const contextDataSourceUnitContextID = "ctx-fixed-3"
 

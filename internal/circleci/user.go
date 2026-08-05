@@ -47,9 +47,18 @@ type Collaboration struct {
 	// VCSType is the VCS backing the organization, for example "github",
 	// "bitbucket" or "circleci".
 	//
-	// The field is vcs_type, not vcs-type: the v2 API declares this key in
-	// kebab-case internally and converts it to snake_case on the way out.
-	VCSType string `json:"vcs_type"`
+	// The wire key is vcs-type, hyphenated — not vcs_type. This is the one place
+	// in the v2 surface that spells it that way, and it is not a typo in the
+	// spec: the published schema for GET /api/v2/me/collaborations lists a
+	// required "vcs-type" property while its four siblings (id, name, avatar_url,
+	// slug) are unchanged.
+	//
+	// Every other organization-shaped response really is vcs_type, including
+	// GET /api/v2/organization/{org-slug-or-id}. Copying the tag across from
+	// Organization is exactly how this field came to be permanently empty, which
+	// is why the fixture in user_test.go is written in the hyphenated production
+	// shape.
+	VCSType string `json:"vcs-type"`
 	// Name is the organization name.
 	Name string `json:"name"`
 	// Slug is the organization slug, for example "gh/acme" or
@@ -114,8 +123,8 @@ func (s *UserService) Get(ctx context.Context, userID string) (*User, error) {
 // member of or can collaborate on.
 //
 // The response is a bare JSON array, not the v2 items/next_page_token envelope,
-// and the route does not paginate: the v2 API builds the whole set per request
-// by fanning out to each connected VCS. So there is no DrainV2 here, and none is
+// and the route does not paginate: the API builds the whole set per request by
+// fanning out to each connected VCS. So there is no DrainV2 here, and none is
 // needed.
 //
 // The set is broader than "organizations I am a member of". It also includes the

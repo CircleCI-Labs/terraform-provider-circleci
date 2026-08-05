@@ -9,9 +9,15 @@ description: |-
 
 Fetches information about a CircleCI pipeline trigger.
 
-~> **Not available on CircleCI Server** This data source uses the
-`/api/v2/projects/{project_id}/triggers` endpoints, which a CircleCI Server
-installation does not expose.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — for the same reason as `circleci_pipeline_definition`, and **not** the v3 reason. `triggers` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. `deployment = "server"` is refused explicitly rather than left to answer HTTP 404. |
+| **API** | `GET /api/v2/projects/{project_id}/triggers/{trigger_id}` |
+| **Organization type** | Any, but triggers only exist on GitHub App, GitHub OAuth and GitHub Enterprise Server projects. See the compatibility table in the README. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 

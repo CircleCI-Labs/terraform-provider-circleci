@@ -9,11 +9,19 @@ description: |-
 
 Manages a CircleCI audit log streaming config: where an organization's audit log events are delivered, as JSON objects written to a customer-owned S3 (or S3-compatible) bucket.
 
-!> **CircleCI Cloud only, and only on a Scale plan.** This is a v2 API, but the API gates it on a Cloud billing plan tier that CircleCI Server installations do not have — see [Audit log streaming](https://circleci.com/changelog/audit-log-streaming). The provider could not confirm from CircleCI Server's routes served whether the underlying route even exists there, so this is gated the same way the v3-only resources in this provider are, out of caution.
-
 !> **Creating a config verifies connectivity to the bucket, even when `is_disabled = true`.** CircleCI assumes `arn` via OIDC and writes a probe object; a role that cannot be assumed, or a bucket that cannot be written to, fails the create. Updating an existing config to `is_disabled = true` does **not** re-verify connectivity, so a config can be disabled even once its destination has become unreachable.
 
 An organization may have at most one config per `target_type`: a second `S3` (or `S3_COMPATIBLE`) config for the same organization is rejected.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes, on a Scale plan. |
+| **CircleCI Server** | No, for two independent reasons. First, audit log streaming is gated behind a CircleCI Cloud billing plan tier (Scale) that a Server installation has no concept of; this is the one `requireCloud` gate in the provider that is not about the v3 API, and it fails with a clear error rather than an ambiguous 404. Second, these routes are not implemented on CircleCI Server at all — they belong to a backend CircleCI Server does not deploy — so even without the billing-tier gate, `/api/v2/audit-log/...` and `/api/v2/organizations/{org_id}/audit-log/...` would not work there. |
+| **API** | `POST /api/v2/organizations/{org_id}/audit-log/configs`, `GET` and `DELETE /api/v2/audit-log/configs/{id}`, `PUT /api/v2/audit-log/configs` |
+| **Organization type** | Any. Entitlement is a billing-plan property, not an organization-type one. Check it first with [`circleci_audit_log_access`](../data-sources/audit_log_access). |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 

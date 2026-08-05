@@ -11,33 +11,23 @@ import (
 // Job route.
 //
 // GET /api/v2/jobs/{id} — the route the CircleCI v2 API reference documents
-// for looking a job up by its UUID — is served by the API through
-// the API (the CircleCI API,
-// the CircleCI API the API: a bare reverse-proxy pass-through with
-// no CircleCI Server equivalent; the API does not exist there, and the
-// route is absent from CircleCI Server's gateway inventory
-// (the CircleCI Server deployment configuration lists no
-// /api/v2/jobs/* route at all). That makes it Cloud-only with no fallback.
+// for looking a job up by its UUID — is a pass-through to a backend that only
+// exists on CircleCI Cloud, and CircleCI Server's gateway has no
+// /api/v2/jobs/* route at all. That makes it Cloud-only with no fallback.
 //
-// GET /api/v2/project/{slug}/job/{job-number} is used here instead: it is
-// implemented by the API (the CircleCI API,
-// the CircleCI API the API), which *is* deployed on CircleCI Server
-// (the CircleCI Server deployment configuration) and routed
-// there by gateway (the CircleCI Server deployment configuration, the the API-public
-// service, path `/api/v2/project/[^/]+(?:%2F|/)[^/]+(?:%2F|/)[^/]+/job/\d+`).
-// Addressing a job by project slug and number rather than by UUID is a real
-// difference from the documented route, and is called out in this data
-// source's documentation.
+// GET /api/v2/project/{slug}/job/{job-number} is used here instead, because it
+// is served on both CircleCI Cloud and CircleCI Server. Addressing a job by
+// project slug and number rather than by UUID is a real difference from the
+// documented route, and is called out in this data source's documentation.
 //
 // This is a read of mutable runtime state: Status changes as the job runs. Do
 // not use this data source to derive a resource attribute, only for
 // inspection and `check` blocks.
 
 // JobExecutor describes the compute the job ran on. Both fields are pointers
-// because the API only populates them once the job has been
-// dispatched (see the ",omitempty" on the executor field itself and the
-// the API struct in the API), so an unscheduled job reports a nil
-// executor and a dispatched-but-not-yet-allocated job may still have either
+// because the API only populates them once the job has been dispatched, so an
+// unscheduled job reports a nil executor and a dispatched-but-not-yet-allocated
+// job may still have either
 // field unset.
 type JobExecutor struct {
 	ResourceClass *string `json:"resource_class"`
@@ -94,12 +84,10 @@ type JobOrganization struct {
 // Job is a single job execution, looked up by project slug and job number.
 //
 // Number, Name, Contexts, LatestWorkflow, Organization, Parallelism,
-// Pipeline, Project and WebURL are computed by the CircleCI v2 API v2 API
-// and merged into the API's response verbatim (the API
-// the API), so their shape is defined by
-// the CircleCI API rather than by
-// the API itself; the other fields reflect the job's current
-// runtime state directly.
+// Pipeline, Project and WebURL are computed elsewhere in the v2 API and merged
+// into this response verbatim, so their shape is defined by the older v2 job
+// representation rather than by this route; the other fields reflect the job's
+// current runtime state directly.
 type Job struct {
 	CreatedAt      string             `json:"created_at,omitempty"`
 	Duration       *int64             `json:"duration"`

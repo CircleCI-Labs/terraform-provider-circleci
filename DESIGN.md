@@ -42,7 +42,7 @@ distinct class of bug:
 The last row is the one worth remembering: a wrapper cannot fix a field the wrapped type
 does not have. That is why this was a removal rather than an adapter.
 
-**Wire shapes were re-derived from the API, not ported from the SDK.** Porting
+**Wire shapes were re-derived from the real API, not ported from the SDK.** Porting
 would have carried the tag bugs across intact. `CircleCI-Public/circleci-cli`'s
 `internal/apiclient` was the primary reference — MIT, actively maintained, and covering
 the same entities — cribbed with attribution since it lives under `internal/` and cannot
@@ -124,24 +124,21 @@ stay removable.
 
 Every other use of `requireCloud` exists because the route is v3, which CircleCI
 Server simply does not route. `circleci_audit_log_config` is v2 — reachable from
-Server's router in principle — but the API gates the feature behind a
-CircleCI Cloud billing plan tier (the API, requiring a "Scale" plan),
-which is a SaaS-billing concept Server installations do not have. CircleCI's own
-changelog describes audit log streaming as Scale-plan-only. The provider could
-not inspect CircleCI Server's gateway routes served to confirm the route is absent
-there too, so this is gated the same way as the v3-only resources, out of
-caution rather than confirmed routing. If that turns out to be wrong for some
+Server's router in principle — but the API gates the feature behind a CircleCI
+Cloud billing plan tier, requiring a "Scale" plan, which is a SaaS-billing
+concept Server installations do not have. CircleCI's own changelog describes
+audit log streaming as Scale-plan-only. There was no way to confirm whether a
+Server installation routes the path at all, so this is gated the same way as the
+v3-only resources, out of caution rather than confirmed routing. If that turns out to be wrong for some
 Server installation, the fix is to drop the gate, not to loosen it further.
 
-### Contexts answer 403 for absence too, and the middleware decides before the handler
+### Contexts answer 403 for absence too, and that is decided before the handler runs
 
 Every `/api/v2/context/{id}/...` route — get, delete, both restriction routes, both
-env-var mutating routes, both list routes — sits behind the API's `the context-resolution step`
-middleware (`the CircleCI API`, wired in `api.go`). That middleware resolves
-the id through a separate domain-service lookup and maps **every** failure to **HTTP
-403**: genuinely deleted, belongs to another organization, or the token lacks permission.
-It runs *before* the route's own handler, so handlers that would have answered 404 never
-get the chance.
+env-var mutating routes, both list routes — resolves the context id in a preliminary step
+that maps **every** failure to **HTTP 403**: genuinely deleted, belongs to another
+organization, or the token lacks permission. That step runs *before* the route's own
+logic, so a route that would otherwise have answered 404 never gets the chance.
 
 This was not previously modelled anywhere here. Worse, `context_fake_test.go`
 asserted 404 for missing reads and **400** for missing deletes, restrictions and env
@@ -177,11 +174,12 @@ holding `"****"` looks exactly like a credential a configuration could pass to a
 receiver and never is one. Same reasoning excludes `token` from
 `circleci_runner_tokens`.
 
-### Mocks are derived from production service source, not from the OpenAPI spec
+### Mocks are derived from what the API actually returns, not from the OpenAPI spec
 
-The highest-leverage decision in the project. An audit against the API
-found **six bugs where the client and the mock were wrong in the same way**, so
-every test passed (two more were found later, below, bringing the total to eight):
+The highest-leverage decision in the project. An audit of what the API really
+accepts and returns found **six bugs where the client and the mock were wrong in
+the same way**, so every test passed (two more were found later, below, bringing
+the total to eight):
 
 - checkout key tags were `public-key`/`created-at`; production sends
   `public_key`/`created_at`, so `public_key` was permanently empty
@@ -195,9 +193,9 @@ every test passed (two more were found later, below, bringing the total to eight
 - `filter[ref]` needs a qualified `namespace/orb@version`, not a bare version
 
 **Rule for new work:** confirm every field name, status code and envelope against
-the API and its own test fixtures. Write the fixture in the
-production shape so a struct-tag regression fails even if a mock is changed to
-match it.
+what the API actually sends and accepts — not against the spec, and not against
+what the client already assumes. Write the fixture in the real wire shape so a
+struct-tag regression fails even if a mock is changed to match it.
 
 **Eighth bug, and the third of exactly the same kind.** `circleci-sdk-go`'s
 `envproject.EnvVariable` tagged the creation timestamp `json:"created-at"` against the
@@ -213,7 +211,7 @@ removal: it is not a bug to be fixed but a habit encoded in a codebase nobody ma
 `json:"signing-secret"`; the service reads `verify_tls` and `signing_secret`. Since
 the API ignores unrecognized keys, **every webhook `circleci_webhook` created had no
 signing secret at all**, whatever was configured, and TLS verification fell back to
-the server default. Shipped in v0.4.0 (issue #25).
+the server default. Shipped in v0.4.0.
 
 This one was security-relevant rather than cosmetic: the signing secret is the only
 thing that lets a receiver tell a genuine delivery from a forged POST. It is also the
@@ -231,7 +229,7 @@ written back as a literal secret.
 Where a bug is found in a resource that cannot be fixed in the same change — because
 the fix needs the `circleci-sdk-go` migration — the test asserts **current**
 behaviour with a comment saying so and what to change when it is fixed. Four such
-tests exist today, covering issue #26: `circleci_project` sending every settings
+tests exist today: `circleci_project` sending every settings
 toggle as `false` on create, and `circleci_pipeline_definition`'s missing `RequiresReplace`,
 absent drift handling, and ungateable deployment check.
 
@@ -243,23 +241,18 @@ cleanly.
 The trap to avoid is a characterization test that reads like an endorsement. Each one
 has to say, in the assertion message, that the value being asserted is wrong.
 
-### A pass-through proxy's own tests are not the schema either
+### A pass-through route's wire shape belongs to whatever is behind it
 
-`circleci_audit_log_config` is served by the API, reached through
-the API's the API — a config-driven reverse proxy that only
-rewrites the URL path (`/api/v2/audit-log/configs/*` → `/file-configs/*`) and
-otherwise forwards the request byte-for-byte. the API also carries
-its own tests for that route
-(`the CircleCI API`), and they use a completely
-fabricated body shape: `{"name": "test-config", "s3": {"bucket": ..., "region":
-...}}` and a list keyed `"configs"`, both invented purely to exercise the proxy
-mechanics (path rewrite, method, status passthrough) and nothing like the real
-`target_type`/`config`/`items` shape the API actually sends and
-expects. Trusting those tests would have reintroduced exactly the class of bug
-the rule above exists to prevent, one layer further from the client than usual.
-**Corollary:** when a route is fronted by a generic proxy, its tests confirm the
-proxy works, not the wire shape — go to the backend service's own handler and
-fixtures regardless of how convincing the gateway-level test looks.
+`circleci_audit_log_config`'s routes are a thin proxy: the path is rewritten and
+the request is otherwise forwarded byte-for-byte to a backend, which is what
+actually defines the request and response bodies. The shape the provider sends is
+`target_type`/`config`/`items`, established from what the API accepts and returns
+rather than from anything the proxy layer suggests.
+
+**The general rule:** where a route is a pass-through, the wire shape is the
+backend's, and a plausible-looking body that the proxy happily forwards is not
+evidence the backend accepts it. This is the same trap as the rule above, one
+layer further from the client.
 
 ### Not every v2 route family is scoped by organization the same way
 
@@ -283,8 +276,8 @@ to the destination even when `is_disabled = true`, while *updating* one to
 unreachable bucket but paused in place once that bucket becomes unreachable
 later.
 
-The family is seven routes in total, all rewritten by the same the API
-proxy config: the five above, plus `GET .../organizations/{org_id}/audit-log/access`
+The family is seven routes in total, all rewritten by the same proxy
+configuration: the five above, plus `GET .../organizations/{org_id}/audit-log/access`
 (entitlement only — see `circleci_audit_log_access`) and
 `POST /api/v2/audit-log/configs/connection/check` (a stateless validate-only
 call, deliberately not wired up — see "Deliberate omissions").
@@ -292,9 +285,9 @@ call, deliberately not wired up — see "Deliberate omissions").
 ### A `Required` attribute the server ignores is still worth sending
 
 `circleci_runner_resource_class.organization_id` is `Required`, and the provider sends
-`org_id` in the create body — but the API's the API **never reads
-it**. It derives the owning organization from the resource class's namespace and the
-caller's admin permissions on that namespace.
+`org_id` in the create body — but the API **never reads it**. It derives the owning
+organization from the resource class's namespace and the caller's admin permissions on
+that namespace.
 
 It is still sent, for two reasons: the schema requires it, so removing it from the body
 while leaving it `Required` would be more confusing than the redundancy; and the server
@@ -566,22 +559,22 @@ would be misleading.
 
 ## Deliberate omissions
 
-`API-COVERAGE.md` is the full route-by-route inventory, taken from the API'
-own registration tables rather than from the published OpenAPI spec — the spec both
-omits routes that exist and describes routes that are never wired up. This table is
+`API-COVERAGE.md` is the full route-by-route inventory, built from the routes CircleCI
+actually serves rather than from the published OpenAPI spec — the spec both omits
+routes that exist and describes routes that are never wired up. This table is
 the *reasoning*; that file is the *checklist*.
 
 | Not built | Why |
 |---|---|
 | `circleci_schedule` (legacy scheduled pipelines) | Superseded by a trigger with `event_source_provider = "schedule"`; works only on GitHub OAuth and Bitbucket organizations. A migration guide exists instead. |
 | Orb promotion as a resource | Promotion creates a *new* version rather than mutating one, so it has no idempotent Terraform shape. The client method exists and is tested. |
-| 7 of 10 insights endpoints | They answer "what happened in this run" with unbounded row counts that would churn state on every refresh. Two are deprecated in the v2 API routes served. |
+| 7 of 10 insights endpoints | They answer "what happened in this run" with unbounded row counts that would churn state on every refresh. Two are deprecated. |
 | VCS connection setup, account creation, API token creation, SSO/SAML, audit log retrieval | No API. Account and VCS steps are browser consent flows; `POST /user/token` is session-only auth, which is a deliberate privilege boundary. |
-| ~~User invitations~~ | **Corrected — this was wrong.** Routes to list organization members, invite them with a role, change a role and remove a member are fully specified. The capability was recorded as absent because those routes are not registered in the service that fronts most of v2 — the gateway sends them straight to their API — so searching there found nothing. **Deliberately not implemented:** they are served on a host reserved for internal use rather than through the public API. This is the largest remaining capability gap; see `NEEDS-FROM-MAINTAINER.md`. |
+| ~~User invitations~~ | **Corrected — this was wrong.** Routes to list organization members, invite them with a role, change a role and remove a member are fully specified. The capability was recorded as absent because those routes are not reached the same way as most of v2, so looking where the bulk of v2 lives found nothing. **Deliberately not implemented:** they answer only on a host reserved for internal use, not through the public API. This is the largest remaining capability gap. |
 | Cloud resource classes | A config-level flag, not an API object. |
 | Docker layer caching | ~~No API object.~~ **Corrected:** `DELETE /api/v3/projects/{id}/dlc` does exist — it purges the cache. But it is a one-shot side effect with nothing to read back, so it cannot be modelled as a resource; Terraform has no primitive for "run this once". Enabling DLC remains a config-level flag. |
 | `POST /api/v2/audit-log/configs/connection/check` as its own primitive | It is a stateless validate-only call with nothing to read back or manage, the same shape problem as DLC above. It is also redundant with what `create`/`update` already do: `CreateAuditLogConfig` verifies connectivity unconditionally, and `UpdateAuditLogConfig` does whenever `is_disabled = false` — so calling it as a pre-flight step before create/update would duplicate a check the API is about to perform anyway, for the same failure mode and message. |
-| Raw project SSH keys | v1.1 only and absent from the gateway inventory. Checkout keys are the supported mechanism. |
+| Raw project SSH keys | v1.1 only, and not served on CircleCI Server. Checkout keys are the supported mechanism. |
 | Workflow/job cancel, rerun, approve | Runtime actions, not desired state. |
 
 ## Known compromises
@@ -610,13 +603,13 @@ on the record.
 The number was never one number. It measured 12% locally and 60% under CI, and the
 whole difference was **tests skipping rather than code being untested** — see "A
 fake-backed test uses `resource.UnitTest`" above. Unskipping the fake-backed suite and
-adding fakes for the resources that had only credential-gated tests took it to **78.4%**
-with the same measurement everywhere. `internal/circleci` is at **90.5%**.
+adding fakes for the resources that had only credential-gated tests took it to **81.2%**
+with the same measurement everywhere. `internal/circleci` is at **90.6%**, and `internal/httpcl` — vendored, deliberately not padded — at 65.1%.
 
 So credentials were never the blocker for *coverage*. What they are still needed for
 is the class of bug mocks cannot find, which is a different thing and remains the top
-item in `NEEDS-FROM-MAINTAINER.md`. Note that the seven wire-shape bugs found so far
-were all caught by reading production the real wire format, not by running against a live
+outstanding ask. Note that the seven wire-shape bugs found so far
+were all caught by checking the real wire format rather than by running against a live
 API — real organizations are for the behaviours nobody thought to mock, not for
 re-finding these.
 

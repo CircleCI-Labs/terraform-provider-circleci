@@ -74,7 +74,7 @@ func pageListServer(t *testing.T, pages ...string) (*circleci.Client, *[]listReq
 func TestListContexts(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the API's the CircleCI API: items of
+	// The shape matches what the API actually returns: items of
 	// {name, id, created_at} with a *string next_page_token, so the last page
 	// carries the key with an explicit null.
 	client, seen := pageListServer(t,
@@ -195,8 +195,7 @@ func TestCreateContext(t *testing.T) {
 			t.Fatalf("decoding request body: %v", err)
 		}
 
-		// the API's postOrgContext (the API) response is
-		// deliberately narrow: id, name, created_at only.
+		// The create response is deliberately narrow: id, name, created_at only.
 		writeListJSON(w, `{"id":"ctx-1","name":"build","created_at":"2024-01-02T03:04:05.000Z"}`)
 	})
 
@@ -216,7 +215,7 @@ func TestCreateContext(t *testing.T) {
 	}
 
 	// The body nests owner.id/owner.type rather than sending a bare
-	// organization_id, matching postOrgContext's request struct.
+	// organization_id.
 	owner, ok := gotBody["owner"].(map[string]any)
 	if !ok {
 		t.Fatalf("request body owner = %v, want an object", gotBody["owner"])
@@ -235,8 +234,8 @@ func TestCreateContext(t *testing.T) {
 func TestCreateContextAPIError(t *testing.T) {
 	t.Parallel()
 
-	// This matches the original v2 API implementation: the "account" owner
-	// type is documented but rejected outright.
+	// This matches the original implementation: the "account" owner type is
+	// documented but rejected outright.
 	client, _ := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeListError(w, http.StatusBadRequest, "Invalid owner type - only organization is supported at present")
 	})
@@ -272,13 +271,12 @@ func TestDeleteContext(t *testing.T) {
 	}
 }
 
-// TestDeleteContextMissingAnswers403 documents the API's anti-enumeration
-// behavior: every route addressing a context by id sits behind the
-// context-resolution step (the CircleCI API), which maps a
-// context that no longer exists to 403, not 404. circleci.IsNotFound must NOT
-// match this — see context_resource.go's Delete for why 403 is instead treated
-// as an already-absent context, not folded into IsNotFound at the client
-// layer where it would also swallow a token that merely lost permission.
+// TestDeleteContextMissingAnswers403 documents an anti-enumeration behavior:
+// every route addressing a context by id maps a context that no longer exists
+// to 403, not 404. circleci.IsNotFound must NOT match this — see
+// context_resource.go's Delete for why 403 is instead treated as an
+// already-absent context, not folded into IsNotFound at the client layer
+// where it would also swallow a token that merely lost permission.
 func TestDeleteContextMissingAnswers403(t *testing.T) {
 	t.Parallel()
 
@@ -301,7 +299,7 @@ func TestDeleteContextMissingAnswers403(t *testing.T) {
 func TestGetContextNotFound(t *testing.T) {
 	t.Parallel()
 
-	// A genuine 404 (the rare race where the context-resolution step's lookup succeeds but
+	// A genuine 404 (the rare race where the existence check succeeds but
 	// the read itself then fails) must still satisfy IsNotFound.
 	client, _ := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeListError(w, http.StatusNotFound, "context not found")

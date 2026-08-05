@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -192,11 +193,41 @@ func deployEnvironmentToModel(ctx context.Context, env circleci.DeployEnvironmen
 // string to string that both the deploy environment and deploy component data
 // sources expose. A nil slice becomes an empty (non-null) map, so `lookup()`
 // and `keys()` keep working for a resource with no labels.
+//
+// Labels are a *list* of key/value pairs on the wire, and CircleCI does not
+// require the key to be unique within one entity: pairs are keyed by
+// (key, value, entity), so "env=prod" and "env=staging" can both be
+// attached to the same component or environment.
+// Collapsing that list into a Terraform map therefore loses information. The
+// first value in the order the API returned wins — picking the last would make
+// the surviving value depend on row ordering — and every dropped pair is
+// reported as a warning rather than discarded in silence, because a label the
+// practitioner can see in the CircleCI UI but not in Terraform state is the
+// kind of gap that is otherwise found only by accident.
 func entityLabelsToMap(ctx context.Context, labels []circleci.EntityLabel) (types.Map, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
 	values := make(map[string]string, len(labels))
 	for _, label := range labels {
+		if kept, seen := values[label.Key]; seen {
+			diags.AddWarning(
+				"Duplicate CircleCI label key "+label.Key,
+				fmt.Sprintf(
+					"CircleCI reported more than one label with the key %q on this entity. Terraform "+
+						"exposes labels as a map keyed by label key, so only %q is readable through "+
+						"the `labels` attribute and %q was dropped. Use distinct label keys if both "+
+						"values need to be visible to Terraform.",
+					label.Key, kept, label.Value,
+				),
+			)
+
+			continue
+		}
 		values[label.Key] = label.Value
 	}
 
-	return types.MapValueFrom(ctx, types.StringType, values)
+	mapValue, mapDiags := types.MapValueFrom(ctx, types.StringType, values)
+	diags.Append(mapDiags...)
+
+	return mapValue, diags
 }

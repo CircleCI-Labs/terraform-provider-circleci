@@ -58,9 +58,9 @@ func TestContextRestrictionResourceUnit_ProjectType(t *testing.T) {
 					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("project_id"), knownvalue.StringExact(projectID)),
 					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("context_id"), knownvalue.StringExact(contextRestrictionUnitContextID)),
 					// BUG (context_restriction_resource.go ~line 137-139): the create
-					// response never carries a restriction's name (the API's
-					// context_restriction_post.go response struct has no "name" field),
-					// so immediately after create the state always has name = "".
+					// response never carries a restriction's name (the API's create
+					// response has no "name" field at all), so immediately after
+					// create the state always has name = "".
 					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("name"), knownvalue.StringExact("")),
 				},
 			},
@@ -269,9 +269,9 @@ func TestContextRestrictionResourceUnit_RemovedOutsideTerraform(t *testing.T) {
 }
 
 // TestContextRestrictionResourceUnit_ForbiddenIsNotSilentlyRemoved mirrors
-// context_resource_unit_test.go's test of the same name: a context this token
-// cannot resolve answers 403 through the same context-resolution step, so
-// Read must surface a diagnostic naming the ambiguity rather than silently
+// context_resource_unit_test.go's test of the same name: a context this
+// token cannot resolve answers 403 through the same middleware, so Read must
+// surface a diagnostic naming the ambiguity rather than silently
 // dropping the restriction (and recreating a possibly-live one) the way a
 // genuine 404 does.
 func TestContextRestrictionResourceUnit_ForbiddenIsNotSilentlyRemoved(t *testing.T) {

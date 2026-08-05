@@ -6,6 +6,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -44,6 +45,18 @@ type mockGroupAPI struct {
 	// pageSize splits list responses into pages when positive, so that the
 	// client's pagination handling is exercised.
 	pageSize int
+
+	// requests records "METHOD path" for every request received, so a test can
+	// assert that a configuration rejected at plan time never reached the API.
+	requests []string
+}
+
+// recordedRequests returns every request received so far.
+func (m *mockGroupAPI) recordedRequests() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return append([]string(nil), m.requests...)
 }
 
 // newMockGroupAPI starts a mock groups API and returns it alongside its origin.
@@ -105,6 +118,8 @@ func (m *mockGroupAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.requests = append(m.requests, r.Method+" "+r.URL.Path)
+
 	// /api/v2/organizations/{org_id}/groups[/{group_id}]
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 5 || parts[0] != "api" || parts[1] != "v2" || parts[2] != "organizations" || parts[4] != "groups" {
@@ -134,12 +149,29 @@ func (m *mockGroupAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// createGroupFields is the exact set of keys the create-group body may carry.
+//
+// The group write routes are validated against the published OpenAPI document
+// before the handler runs, and every one of those request schemas is declared
+// `additionalProperties: false`. An unrecognised key is therefore a 400, not a
+// silently dropped field — so a fake that decodes straight into a struct cannot
+// tell a correct field name from a wrong one, which is the whole mechanism behind
+// the client/fake pairs that were wrong in the same way and still passed.
+var createGroupFields = map[string][]string{
+	"": {"name", "description"},
+}
+
 func (m *mockGroupAPI) create(w http.ResponseWriter, r *http.Request, orgID string) {
+	raw, ok := m.decodeStrict(w, r, createGroupFields)
+	if !ok {
+		return
+	}
+
 	var body struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
 		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
 
 		return
@@ -150,7 +182,37 @@ func (m *mockGroupAPI) create(w http.ResponseWriter, r *http.Request, orgID stri
 		return
 	}
 
+	// 201, not 200: the create handler answers Created even though its siblings
+	// answer OK.
 	m.write(w, http.StatusCreated, m.add(orgID, body.Name, body.Description))
+}
+
+// decodeStrict reads the request body, rejects any key the real routes would not
+// accept, and returns the raw bytes for a second decode.
+//
+// It answers the 400 itself and reports false when it does.
+func (m *mockGroupAPI) decodeStrict(
+	w http.ResponseWriter, r *http.Request, allowed map[string][]string,
+) ([]byte, bool) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
+
+		return nil, false
+	}
+
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil {
+		m.write(w, http.StatusBadRequest, map[string]string{"message": "invalid body"})
+
+		return nil, false
+	}
+
+	if rejectUnexpectedFields(w, object, allowed) {
+		return nil, false
+	}
+
+	return raw, true
 }
 
 func (m *mockGroupAPI) list(w http.ResponseWriter, r *http.Request, orgID string) {
@@ -288,6 +350,100 @@ func TestGroupResourceSchema(t *testing.T) {
 			t.Errorf("attribute %q has no plan modifier forcing replacement, but the API cannot update groups", name)
 		}
 	}
+}
+
+// TestAccGroupResource_rejectsInvalidName and its description counterpart below
+// are live-confirmed: creating a group with a description containing a
+// semicolon 400s with "The description can contain only underscores, dashes and
+// alphanumeric characters. It must be between 0-200 characters in length."
+// group_resource.go's groupNameAndDescriptionPattern mirrors the character
+// class the API actually enforces, confirmed directly against the API rather
+// than guessed from that message — the message is identical for both
+// attributes, but the length bound is not (100 for name, 200 for description)
+// and name additionally must not be empty.
+//
+// Every case must be rejected before any request reaches the API: the schema
+// validator runs at plan time.
+func TestAccGroupResource_rejectsInvalidName(t *testing.T) {
+	api, host := newMockGroupAPI(t)
+
+	for _, tt := range []struct {
+		name string
+		want string
+	}{
+		{"", "Attribute name string length must be between 1 and 99"},
+		{strings.Repeat("a", 100), "Attribute name string length must be between 1 and 99"},
+		{"platform;team", "must contain only letters, numbers, spaces"},
+		{"platform team!", "must contain only letters, numbers, spaces"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resource.UnitTest(t, resource.TestCase{
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				Steps: []resource.TestStep{{
+					Config:      testAccGroupResourceConfig(host, "cloud", tt.name, "a description"),
+					ExpectError: regexp.MustCompile(regexp.QuoteMeta(tt.want)),
+				}},
+			})
+		})
+	}
+
+	if requests := api.recordedRequests(); len(requests) != 0 {
+		t.Errorf("got requests %v, want none: no configuration above passed validation", requests)
+	}
+}
+
+// TestAccGroupResource_rejectsInvalidDescription is the live-confirmed case: a
+// semicolon in the description 400s against the real API. See the comment on
+// TestAccGroupResource_rejectsInvalidName for where the character class and
+// length bound come from.
+func TestAccGroupResource_rejectsInvalidDescription(t *testing.T) {
+	api, host := newMockGroupAPI(t)
+
+	for _, tt := range []struct {
+		name string
+		want string
+	}{
+		{strings.Repeat("a", 200), "Attribute description string length must be at most 199"},
+		{"internal use only; do not delete", "must contain only letters, numbers, spaces"},
+		{"team@circleci", "must contain only letters, numbers, spaces"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resource.UnitTest(t, resource.TestCase{
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				Steps: []resource.TestStep{{
+					Config:      testAccGroupResourceConfig(host, "cloud", "platform", tt.name),
+					ExpectError: regexp.MustCompile(regexp.QuoteMeta(tt.want)),
+				}},
+			})
+		})
+	}
+
+	if requests := api.recordedRequests(); len(requests) != 0 {
+		t.Errorf("got requests %v, want none: no configuration above passed validation", requests)
+	}
+}
+
+// TestAccGroupResource_acceptsCharactersTheServiceAllows guards the other
+// direction: the service's regex allows spaces, periods and commas alongside
+// letters, digits, hyphens and underscores (verified in source, not merely
+// implied by its own error message), so a name or description using them must
+// not be rejected by this provider before ever reaching the API.
+func TestAccGroupResource_acceptsCharactersTheServiceAllows(t *testing.T) {
+	_, host := newMockGroupAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: testAccGroupResourceConfig(host, "cloud", "Platform Team 2.0", "Owns CI, CD, and releases."),
+			ConfigStateChecks: []statecheck.StateCheck{
+				statecheck.ExpectKnownValue(
+					"circleci_group.test",
+					tfjsonpath.New("name"),
+					knownvalue.StringExact("Platform Team 2.0"),
+				),
+			},
+		}},
+	})
 }
 
 func TestGroupResourceImportStateRejectsMalformedID(t *testing.T) {
@@ -452,4 +608,88 @@ func TestAccGroupResource_importRejectsMalformedID(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestGroupFakesRejectUnexpectedFields guards the guard.
+//
+// The three group fakes now answer 400 for any key the real routes would not
+// accept, which is what makes a mistyped struct tag in internal/circleci fail a
+// test instead of passing one. That protection is invisible while every field name
+// is right, so this asserts it directly: a fake that goes back to decoding
+// straight into a struct — silently dropping unknown keys, the way the API does
+// *not* — fails here rather than quietly resuming the bug class it exists to
+// catch.
+//
+// Every request schema behind these routes is declared `additionalProperties:
+// false` and validated before the handler runs, so the rejection is real rather
+// than a convenience.
+func TestGroupFakesRejectUnexpectedFields(t *testing.T) {
+	t.Parallel()
+
+	_, groupHost := newMockGroupAPI(t)
+	_, projectGroupHost := newMockProjectGroupAPI(t)
+
+	cases := []struct {
+		name string
+		url  string
+		body string
+		// field is the key expected to be named in the rejection, so a fake that
+		// rejects for some unrelated reason does not count as passing.
+		field string
+	}{
+		{
+			name:  "create group",
+			url:   groupHost + "/api/v2/organizations/" + testGroupOrgID + "/groups",
+			body:  `{"name":"platform","descriptions":"typo"}`,
+			field: "descriptions",
+		},
+		{
+			name: "assign project groups",
+			url: projectGroupHost + "/api/v2/organizations/" + testPGOrgID +
+				"/projects/" + testPGProjectID + "/groups",
+			body:  `{"role":"project-admin","groupIds":["x"]}`,
+			field: "groupIds",
+		},
+		{
+			name: "update project group role",
+			url: projectGroupHost + "/api/v2/organizations/" + testPGOrgID +
+				"/projects/" + testPGProjectID + "/groups/x/update-role",
+			body:  `{"roles":"project-admin"}`,
+			field: "roles",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req, err := http.NewRequestWithContext(
+				t.Context(), http.MethodPost, tc.url, strings.NewReader(tc.body),
+			)
+			if err != nil {
+				t.Fatalf("building request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("posting to the fake: %v", err)
+			}
+			defer resp.Body.Close()
+
+			payload, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("reading response: %v", err)
+			}
+
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: the fake accepted an unrecognised field, so a "+
+					"client sending it would pass this suite and fail in production",
+					resp.StatusCode, http.StatusBadRequest)
+			}
+			if !strings.Contains(string(payload), tc.field) {
+				t.Errorf("body = %s, want it to name the unexpected field %q", payload, tc.field)
+			}
+		})
+	}
 }

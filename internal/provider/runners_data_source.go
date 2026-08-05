@@ -78,23 +78,32 @@ func (d *runnersDataSource) Metadata(_ context.Context, req datasource.MetadataR
 	resp.TypeName = req.ProviderTypeName + "_runners"
 }
 
-// ConfigValidators requires at least one filter. The runner API rejects an
-// unfiltered list, so refusing it at plan time is clearer than a 400.
+// ConfigValidators requires exactly one filter, because the API supports exactly
+// one and quietly discards the rest.
 //
-// The organization filter counts under either of its two names, so this is not
-// orgIDDataSourceConfigValidator: the organization is optional here, and
-// requiring exactly one of the pair would break a namespace-only listing, which
-// is a supported configuration today. What the pair still must not be is both at
-// once, which the Conflicting validator covers. See org_id_deprecation.go.
+// The API switches over the three query parameters in priority order: an
+// org-id listing wins outright; failing that it takes
+// resource-class only when namespace is absent, and namespace only when
+// resource-class is absent; anything else — notably resource-class and namespace
+// together with no organization — is HTTP 400 "must specify exactly one of
+// resource-class or namespace". So of the eight possible combinations, one is a
+// 400 and three more return a scope wider than the configuration asked for, with
+// no error at all: `org_id` plus `resource_class` lists every runner in the
+// organization, not that resource class's runners.
+//
+// AtLeastOneOf would catch only the unfiltered case. ExactlyOneOf turns the 400
+// and the three silent widenings into one plan-time error, and costs nothing: no
+// filter combination the API honours is expressible as more than one of these
+// attributes anyway.
+//
+// The organization counts under either of its two names, and the pair is mutually
+// exclusive, so listing all four here still means "exactly one scope". See
+// org_id_deprecation.go.
 func (d *runnersDataSource) ConfigValidators(_ context.Context) []datasource.ConfigValidator {
 	return []datasource.ConfigValidator{
-		datasourcevalidator.AtLeastOneOf(
+		datasourcevalidator.ExactlyOneOf(
 			path.MatchRoot("resource_class"),
 			path.MatchRoot("namespace"),
-			path.MatchRoot("organization_id"),
-			path.MatchRoot("org_id"),
-		),
-		datasourcevalidator.Conflicting(
 			path.MatchRoot("organization_id"),
 			path.MatchRoot("org_id"),
 		),
@@ -105,8 +114,9 @@ func (d *runnersDataSource) ConfigValidators(_ context.Context) []datasource.Con
 func (d *runnersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Lists the self-hosted runner agents registered with CircleCI. " +
-			"At least one of `resource_class`, `namespace` or `org_id` (or the deprecated " +
-			"`organization_id`) must be set.\n\n" +
+			"Exactly one of `resource_class`, `namespace` or `org_id` (or the deprecated " +
+			"`organization_id`) must be set: the API honours one scope per request and " +
+			"discards the others.\n\n" +
 			"Available on CircleCI Cloud and CircleCI Server. On Server the runner API is served by " +
 			"your own installation, so the provider's `runner_host` attribute must be set to your " +
 			"Server hostname.\n\n" +
@@ -119,12 +129,16 @@ func (d *runnersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 					"format (e.g. `myorg/myrunner`).",
 				Optional: true,
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(runnerResourceClassPattern, "must be in the format 'namespace/name'"),
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
 				},
 			},
 			"namespace": schema.StringAttribute{
-				MarkdownDescription: "Only return runners in this runner namespace.",
-				Optional:            true,
+				MarkdownDescription: "Only return runners in this runner namespace. Cannot be combined " +
+					"with `resource_class` — the API takes exactly one of the two.",
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(runnerNamespacePattern, runnerNamespaceFormatMessage),
+				},
 			},
 			// Only return runners owned by this organization. See
 			// org_id_deprecation.go for why it is accepted under two names.
@@ -155,9 +169,21 @@ func (d *runnersDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 							MarkdownDescription: "Version of the runner agent.",
 							Computed:            true,
 						},
+						// The two values are only assigned for the org-id-scoped branch
+						// of the list handler. The other branches never set the field,
+						// and the field is `json:"status,omitempty"` — so a
+						// resource_class- or namespace-scoped listing omits the key
+						// entirely and this attribute is the empty string. That is why
+						// the caveat is here rather than in the data source description:
+						// it is a property of this one attribute, not of the listing.
 						"status": schema.StringAttribute{
-							MarkdownDescription: "The agent's status as reported by the API, for example `running` or `idle`.",
-							Computed:            true,
+							MarkdownDescription: "Whether the agent is currently executing a task: `busy` or " +
+								"`idle`.\n\n" +
+								"~> **Only populated when listing by `org_id`.** The API computes this by " +
+								"cross-referencing the organization's in-flight tasks, which it only does for " +
+								"an organization-scoped listing. Listing by `resource_class` or `namespace` " +
+								"leaves this empty.",
+							Computed: true,
 						},
 						"resource_class": schema.StringAttribute{
 							MarkdownDescription: "The resource class the runner is registered to, in `namespace/name` format.",

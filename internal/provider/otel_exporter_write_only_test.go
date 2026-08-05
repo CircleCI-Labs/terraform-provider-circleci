@@ -223,16 +223,88 @@ func TestOTelExporterWriteOnly_RefreshLeavesHeadersNull(t *testing.T) {
 	})
 }
 
-// TestOTelExporterWriteOnly_HeaderAddedOutsideTerraformIsInvisible pins the cost
-// of the write-only path, which is documented rather than worked around.
+// TestOTelExporterWriteOnly_HeaderAddedOutsideTerraformRecreates is the
+// write-only mirror of TestAccOTelExporterHeaderAddedOutsideTerraform.
 //
-// TestAccOTelExporterHeaderAddedOutsideTerraform shows the state-backed path
-// detecting a header added elsewhere, because CircleCI returns header names in
-// full and the provider can compare key sets. On the write-only path there is no
-// key set in state to compare against, and ReadRequest carries no configuration,
-// so the same change produces an empty plan. That is a real limitation; this test
-// exists so nobody documents otherwise by accident.
-func TestOTelExporterWriteOnly_HeaderAddedOutsideTerraformIsInvisible(t *testing.T) {
+// This used to be invisible: on the write-only path there was no key set in
+// state to compare CircleCI's returned names against. headers_wo_names is that
+// key set now — populated by Create, refreshed by
+// otelRefreshWriteOnlyHeaderNames — so a header added elsewhere is detected the
+// same way it already was on the `headers` path, and for the same underlying
+// reason: `headers` already forces replacement, and detecting the drift adopts
+// CircleCI's map into it.
+//
+// The assertion is a PlanOnly step with plancheck.ExpectResourceAction, not
+// ExpectNonEmptyPlan on the RefreshState step. The latter was tried first and
+// found to pass unconditionally — with or without api.addHeader actually
+// called — because a bare RefreshState step has no config to plan against, so
+// "non-empty" there asserts nothing. TestAccOTelExporterHeaderAddedOutsideTerraform
+// has the same shape and the same blind spot; it is not this test's to fix.
+func TestOTelExporterWriteOnly_HeaderAddedOutsideTerraformRecreates(t *testing.T) {
+	api := newOTelAPI()
+	srv := newOTelServer(t, api)
+
+	config := otelWriteOnlyConfig(srv.URL, "super-secret", 1)
+
+	resource.UnitTest(t, resource.TestCase{
+		TerraformVersionChecks:   writeOnlySupported(),
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_otel_exporter.test",
+						tfjsonpath.New("headers_wo_names"),
+						knownvalue.SetExact([]knownvalue.Check{
+							knownvalue.StringExact("x-api-key"),
+						}),
+					),
+				},
+			},
+			{
+				// Not RefreshState followed by a separate plan step: a normal apply step
+				// refreshes before planning on its own, and — unlike a bare RefreshState
+				// step — ConfigPlanChecks.PreApply can inspect what that refresh produced.
+				// (ExpectNonEmptyPlan on a RefreshState step was tried first and found to
+				// pass unconditionally, drift or not, because a bare RefreshState step has
+				// no config to plan against.)
+				PreConfig: func() { api.addHeader("x-tenant") },
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_otel_exporter.test",
+							plancheck.ResourceActionDestroyBeforeCreate,
+						),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_otel_exporter.test",
+						tfjsonpath.New("id"),
+						knownvalue.StringExact("00000000-0000-0000-0000-000000000002"),
+					),
+					// The replacement's own Create starts clean: the new exporter's
+					// headers_wo_names matches what was just configured, with no drift of
+					// its own.
+					statecheck.ExpectKnownValue(
+						"circleci_otel_exporter.test",
+						tfjsonpath.New("headers_wo_names"),
+						knownvalue.SetExact([]knownvalue.Check{
+							knownvalue.StringExact("x-api-key"),
+						}),
+					),
+				},
+			},
+		},
+	})
+}
+
+// TestOTelExporterWriteOnly_NoDriftIsAnEmptyPlan is the control for the test
+// above: refreshing with nothing changed outside Terraform must not itself
+// start reporting drift just because headers_wo_names now exists.
+func TestOTelExporterWriteOnly_NoDriftIsAnEmptyPlan(t *testing.T) {
 	api := newOTelAPI()
 	srv := newOTelServer(t, api)
 
@@ -243,11 +315,7 @@ func TestOTelExporterWriteOnly_HeaderAddedOutsideTerraformIsInvisible(t *testing
 		ProtoV6ProviderFactories: governanceProviderFactories,
 		Steps: []resource.TestStep{
 			{Config: config},
-			{
-				PreConfig:    func() { api.addHeader("x-tenant") },
-				RefreshState: true,
-				// No ExpectNonEmptyPlan: the drift is genuinely invisible here.
-			},
+			{RefreshState: true},
 			{
 				Config:   config,
 				PlanOnly: true,
@@ -455,6 +523,7 @@ func TestOTelExporterWriteOnly_GuardsAgainstMissingHeaders(t *testing.T) {
 		Headers:          types.MapNull(types.StringType),
 		HeadersWO:        types.MapNull(types.StringType),
 		HeadersWOVersion: types.Int64Value(1),
+		HeadersWONames:   types.SetNull(types.StringType),
 		Issues:           types.ListNull(types.StringType),
 	}
 

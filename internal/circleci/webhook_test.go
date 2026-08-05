@@ -19,10 +19,9 @@ const testWebhookScopeID = "2ddfa678-e24e-4417-b4be-404bab46dc51"
 func TestListWebhooks(t *testing.T) {
 	t.Parallel()
 
-	// The shape mirrors the v2 API's list-webhooks-handler
-	// (the CircleCI API): a nested scope object, snake_case
-	// keys, hyphenated *event names*, and next_page_token explicitly null because
-	// webhook-service does not paginate yet.
+	// The shape matches what the API actually returns: a nested scope object,
+	// snake_case keys, hyphenated *event names*, and next_page_token explicitly
+	// null because the route does not paginate yet.
 	client, seen := pageListServer(t, `{"items":[
 		{"id":"8c6dfb88-d24d-408c-9775-140e8abb88d5","name":"webhook1","url":"https://www.url.com",
 		 "events":["workflow-completed","job-completed"],"verify_tls":true,"signing_secret":"****",
@@ -84,7 +83,7 @@ func TestListWebhooks(t *testing.T) {
 func TestListWebhooksDrainsPages(t *testing.T) {
 	t.Parallel()
 
-	// webhook-service does not paginate today, but the field exists and the API
+	// The route does not paginate today, but the field exists and the API
 	// reserves the right to fill it, so a non-null token must be followed.
 	client, seen := pageListServer(t,
 		`{"items":[{"id":"w1","scope":{"id":"`+testWebhookScopeID+`","type":"project"}}],"next_page_token":"tok-2"}`,

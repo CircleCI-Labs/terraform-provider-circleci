@@ -45,4 +45,7 @@ resource "circleci_trigger" "github_app" {
 }
 
 # `pipeline_id` is the deprecated spelling of `pipeline_definition_id` — it always
-# took a pipeline *definition* id. Set exactly one of the two.
+# took a pipeline *definition* id. Set exactly one of the two. Renaming the attribute
+# is not a change and replaces nothing; changing the definition *id* it holds
+# replaces the trigger, because a trigger is created under a definition and CircleCI
+# has no route that moves it to another one.

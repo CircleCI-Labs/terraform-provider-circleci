@@ -13,15 +13,13 @@ trigger by id, and [`circleci_trigger`](../resources/trigger) to manage one.
 
 ## Availability
 
-| CircleCI Cloud | CircleCI Server |
-|---|---|
-| yes | **no** |
-
-Triggers live under `/api/v2` but are served by the public API service rather than
-the v2 API, and CircleCI Server does not route them there. A Server
-installation answers HTTP 404, which is indistinguishable from a pipeline
-definition that does not exist, so this data source rejects
-`deployment = "server"` outright with an explanatory error.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — and **not** for the v3 reason. `triggers` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. `deployment = "server"` is refused outright rather than left to answer HTTP 404. |
+| **API** | `GET /api/v2/projects/{project_id}/pipeline-definitions/{pipeline_definition_id}/triggers` |
+| **Organization type** | Any, but triggers only exist on GitHub App, GitHub OAuth and GitHub Enterprise Server projects. See the compatibility table in the README. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 
@@ -82,12 +80,27 @@ Read-Only:
 - `event_name` (String) Human-readable name of the event that fires the trigger.
 - `event_preset` (String) Event preset the trigger's rules share, such as `github_app.push`. Empty when the rules cover more than one event.
 - `event_source_provider` (String) Event source provider: `github_app`, `github_server`, `bitbucket_dc`, `webhook` or `schedule`.
-- `event_source_repository_external_id` (String) Provider-side identifier of the repository the events come from.
-- `event_source_repository_name` (String) Full name (`owner/repo`) of the repository the events come from. Empty for webhook and schedule triggers.
+- `event_source_repo_external_id` (String) Provider-side identifier of the repository the events come from.
+
+Same field as the deprecated `event_source_repository_external_id`, spelled the way `circleci_trigger` (the resource) spells it.
+- `event_source_repo_full_name` (String) Full name (`owner/repo`) of the repository the events come from. Empty for webhook and schedule triggers.
+
+Same field as the deprecated `event_source_repository_name`, spelled the way `circleci_trigger` (the resource) spells it.
+- `event_source_repository_external_id` (String, Deprecated) Provider-side identifier of the repository the events come from.
+
+~> **Deprecated in favour of `event_source_repo_external_id`**, which matches `circleci_trigger`'s (the resource's) spelling. Both are reported; prefer `event_source_repo_external_id` in new configurations.
+- `event_source_repository_name` (String, Deprecated) Full name (`owner/repo`) of the repository the events come from. Empty for webhook and schedule triggers.
+
+~> **Deprecated in favour of `event_source_repo_full_name`**, which matches `circleci_trigger`'s (the resource's) spelling. Both are reported; prefer `event_source_repo_full_name` in new configurations.
 - `event_source_schedule_attribution_actor` (String) Unique identifier of the actor a scheduled trigger's pipelines are attributed to. Empty for other providers.
 - `event_source_schedule_cron_expression` (String) Cron expression of a scheduled trigger. Empty for other providers.
+- `event_source_web_hook_url` (String, Sensitive) Inbound URL for a webhook trigger. Empty for other providers. The API redacts the embedded secret unless the token is allowed to see it.
+
+Same field as the deprecated `event_source_webhook_url`, spelled the way `circleci_trigger` (the resource) spells it.
 - `event_source_webhook_sender` (String) Expected sender of a webhook trigger. Empty for other providers.
-- `event_source_webhook_url` (String, Sensitive) Inbound URL for a webhook trigger. Empty for other providers. The API redacts the embedded secret unless the token is allowed to see it.
+- `event_source_webhook_url` (String, Sensitive, Deprecated) Inbound URL for a webhook trigger. Empty for other providers. The API redacts the embedded secret unless the token is allowed to see it.
+
+~> **Deprecated in favour of `event_source_web_hook_url`**, which matches `circleci_trigger`'s (the resource's) spelling. Both are reported; prefer `event_source_web_hook_url` in new configurations.
 - `id` (String) Unique identifier (UUID) of the trigger.
 - `name` (String) Name of the trigger. For webhook triggers this is the expected sender, also reported as `event_source_webhook_sender`.
 - `parameters` (Map of String) Default pipeline parameters the trigger supplies, rendered as strings. Null when the trigger sets none; non-string JSON values are rendered as they were written, and composite values as JSON.

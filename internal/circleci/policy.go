@@ -15,6 +15,18 @@ import (
 // The {context} segment is the *policy* context, a namespace for a bundle of
 // Rego policies. It has nothing to do with a CircleCI context (the resource that
 // holds shared environment variables), despite the shared path segment name.
+//
+// These routes are owned by a dedicated backend, not by the core v2 API
+// backend, and unlike the OTel exporter routes they ARE reachable on CircleCI
+// Server: Server does deploy that backend, and its gateway forwards
+// /api/v2/owner/<id>/context/<ctx>/policy-bundle and .../decision to it — and
+// the decision prefix covers .../decision/settings. Nothing here is gated.
+//
+// {ownerID} must be a UUID: every handler validates it with an is-UUID rule, so
+// an organization slug is a 400 rather than a lookup.
+//
+// Errors are the {"error": "<message>"} shape, which circleci.Detail already
+// prefers over the raw body.
 const (
 	policyBundleRoute           = "/owner/%s/context/%s/policy-bundle"
 	policyDocumentRoute         = "/owner/%s/context/%s/policy-bundle/%s"
@@ -28,10 +40,15 @@ const PolicyContextConfig = "config"
 
 // PolicyContextCustom is documented by CircleCI but NOT accepted by the API.
 //
-// Every the API route validates its context with
-// validation.In(internal.Config), so a request naming "custom" is rejected with a
-// 400. It is retained as a named constant so the rejection is discoverable rather
-// than mysterious, but it is deliberately not offered in the resource validators.
+// Confirmed against every route that takes a {context} path segment: create
+// bundle, get bundle and get document each validate it against the single
+// value "config", and both decision-settings routes validate it the same way
+// and then re-check it a second time. A request naming "custom" is rejected
+// with HTTP 400 on all five. There is no route anywhere in the API for which
+// "custom" is valid.
+//
+// It is retained as a named constant so the rejection is discoverable rather than
+// mysterious, and it is deliberately not offered in the resource validators.
 //
 // PolicyContextCustom is the policy context for decisions made against
 // arbitrary data rather than a pipeline's configuration.
@@ -61,14 +78,27 @@ type Policy struct {
 // modelled on the bundle rather than on the individual policy.
 type PolicyBundle map[string]Policy
 
-// UnmarshalJSON decodes a bundle response, tolerating each of the shapes the
-// endpoint's OpenAPI schema permits for a bundle entry.
+// UnmarshalJSON decodes a bundle response.
 //
 // The published schema declares the bundle as an object whose additional
 // properties carry an "items" keyword but no "type", which is not valid JSON
 // Schema and so does not pin the entry down to either a Policy object or an
-// array of them. Rather than guess, decode all three plausible shapes: a bare
-// Rego string, a Policy object, and a one-element array of Policy objects.
+// array of them. This decoder was therefore written to tolerate all three
+// plausible shapes: a bare Rego string, a Policy object, and a one-element array
+// of Policy objects.
+//
+// This has since been confirmed against the API directly: **every entry is
+// in practice a flat object**, and the other two branches below are
+// unreachable in production. The tolerance is kept deliberately rather than
+// tightened — the branches are cheap, they are covered by tests, and an
+// experimental-adjacent endpoint whose own schema is malformed is not one to
+// hard-code an assumption against. What must not happen is code elsewhere
+// *relying* on a shape this decoder merely tolerates, so:
+//
+//   - created_at is always present and is an RFC 3339 timestamp (the service
+//     marshals a time.Time, never null);
+//   - name is always present and always equals the map key, so the
+//     key-is-authoritative fallback below is belt and braces.
 func (b *PolicyBundle) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -161,8 +191,14 @@ type policyBundlePayload struct {
 }
 
 // PolicyDecisionSettings controls whether policy decisions are evaluated for a
-// policy context. Enabled is a pointer so that a partial update can leave it
-// alone, matching the PATCH semantics of the route.
+// policy context.
+//
+// Enabled is a pointer, and omitempty, so that an unset value can never reach the
+// wire as false and switch enforcement off by accident. That is the only reason:
+// despite the route being a PATCH, it does **not** support a partial update. The
+// handler validates the decoded body with a NotNil rule on enabled, so a request
+// body of {} is rejected with HTTP 400 rather than leaving the current value
+// alone. Every caller must set Enabled.
 type PolicyDecisionSettings struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
@@ -221,7 +257,14 @@ func (c *Client) GetPolicyDocument(ctx context.Context, ownerID, policyContext, 
 // managed independently.
 //
 // When dryRun is true the API reports the diff the upload would produce without
-// applying it.
+// applying it. A real upload answers 201 and a dry run answers 200; both carry
+// the same body, whose three arrays are each omitted when empty, so an upload
+// that changed nothing decodes as a zero-valued PolicyBundleDiff.
+//
+// Rego that does not parse is a 400 ("invalid rego content: ..."), and a bundle
+// over the service's size budget is a 413 — the size limit is enforced by a
+// max-body-size middleware ahead of the handler, so it applies to the encoded
+// request rather than to the sum of the policy strings.
 func (c *Client) SetPolicyBundle(
 	ctx context.Context, ownerID, policyContext string, policies map[string]string, dryRun bool,
 ) (*PolicyBundleDiff, error) {
@@ -246,6 +289,14 @@ func (c *Client) SetPolicyBundle(
 
 // GetPolicyDecisionSettings reads whether policy decisions are enabled for a
 // policy context.
+//
+// The response always carries enabled: the handler answers with a pointer to a
+// concrete bool, so the field is present even when evaluation is off. An absent
+// field would therefore mean the body was not this endpoint's.
+//
+// Note that this READ is guarded by the same "edit-org-policies" permission as the
+// write, not by the "view" permission the bundle routes use, so a read-only token
+// that can list policies cannot tell whether they are being enforced.
 func (c *Client) GetPolicyDecisionSettings(
 	ctx context.Context, ownerID, policyContext string,
 ) (*PolicyDecisionSettings, error) {
@@ -259,8 +310,11 @@ func (c *Client) GetPolicyDecisionSettings(
 	return &settings, nil
 }
 
-// SetPolicyDecisionSettings applies a partial update to a policy context's
-// decision settings and returns them as the API reports them afterwards.
+// SetPolicyDecisionSettings writes a policy context's decision settings and
+// returns them as the API reports them afterwards.
+//
+// Despite being a PATCH this is not a partial update: settings.Enabled must be
+// non-nil or the request is a 400. See PolicyDecisionSettings.
 func (c *Client) SetPolicyDecisionSettings(
 	ctx context.Context, ownerID, policyContext string, settings PolicyDecisionSettings,
 ) (*PolicyDecisionSettings, error) {

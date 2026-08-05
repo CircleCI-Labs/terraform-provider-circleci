@@ -5,6 +5,7 @@ package circleci
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 )
 
@@ -12,9 +13,12 @@ import (
 // returned by GET /api/v2/project/{project-slug}/envvar.
 //
 // Value is always masked: the API answers with four "x" characters followed by
-// the last four characters of the real value, matching what the CircleCI web UI
-// displays. The configured value can never be read back, so this is only useful
-// for confirming which variable is set, not what it is set to.
+// *up to* the last four characters of the real value, matching what the CircleCI
+// web UI displays. The tail is shortened for a short value — the API
+// reveals min(4, len/2) characters, rounded down — so a five-character value
+// reveals two and a one-character value reveals none, leaving a bare "xxxx".
+// The configured value can never be read back, so this is only useful for
+// confirming which variable is set, not what it is set to.
 //
 // CreatedAt is kept as the string the API sent (an RFC 3339 timestamp) so that
 // it round-trips into Terraform state exactly as received. It is null for
@@ -98,10 +102,9 @@ type ProjectEnvironmentVariableInput struct {
 // CreateProjectEnvironmentVariable creates a project environment variable and
 // returns it as stored.
 //
-// This mirrors circle.http.api.v2.project's create-env-var-response (the
-// v2 API behind the v2 API): even the create response's Value comes back
-// through env-var-read-api, i.e. already masked. The literal value configured
-// is never echoed back by any route, not even the one that just set it.
+// Even the create response's Value comes back already masked, the same way
+// a read does. The literal value configured is never echoed back by any
+// route, not even the one that just set it.
 func (c *Client) CreateProjectEnvironmentVariable(
 	ctx context.Context,
 	projectSlug string,
@@ -150,9 +153,8 @@ func (c *Client) DeleteProjectEnvironmentVariable(ctx context.Context, projectSl
 
 // Context environment variable routes.
 //
-// Shapes and semantics here follow the API's the CircleCI API
-// (context_env_vars_get.go, context_env_var_put.go, context_env_var_delete.go)
-// and github.com/CircleCI-Public/circleci-cli's internal/apiclient/context.go
+// Shapes and semantics here follow the API's own handlers and
+// github.com/CircleCI-Public/circleci-cli's internal/apiclient/context.go
 // (MIT), which agree on routes and field names.
 //
 // The write route is a PUT to a named item, not a POST to the collection: it is
@@ -167,12 +169,19 @@ const (
 // ContextEnvironmentVariable is an environment variable set on a context, as
 // GET .../environment-variable returns it.
 //
-// TruncatedValue is the only trace of the value the API ever discloses: four
-// "x" characters followed by the value's last four characters, the same
-// convention as ProjectEnvironmentVariable.Value. It is empty on the value
-// returned by UpsertContextEnvironmentVariable, because the PUT route's own
-// response struct (the API's EnvVarResponse) carries no such field at
-// all — only the list route does.
+// TruncatedValue is the only trace of the value the API ever discloses, and it
+// is NOT the same shape as ProjectEnvironmentVariable.Value. It carries the tail
+// of the value on its own, with no mask prefix: the API takes the last four
+// characters, or the last floor(len/2) when the value is
+// eight characters or shorter. So "FOOBARBAZ" reports "RBAZ", "FOOBAR" reports
+// "BAR", "FOO" reports "O", and an empty value reports "". A project
+// environment variable's masked value, by contrast, prefixes the same tail with
+// "xxxx" — the two conventions look alike and are not, so do not reuse one
+// helper for both.
+//
+// It is empty on the value returned by UpsertContextEnvironmentVariable, because
+// the PUT route's own response struct carries no such field at all — only
+// the list route does.
 //
 // It must not be used to detect that a value changed. Rotating a secret while
 // keeping its last four characters leaves TruncatedValue identical, so any
@@ -194,19 +203,55 @@ type ContextEnvironmentVariableInput struct {
 	Value string `json:"value"`
 }
 
+// contextEnvVarPageSize is the page size the API asks its own backend for. It
+// is fixed there, not a parameter this client can influence, and it is only
+// recorded here to explain the guard below.
+const contextEnvVarPageSize = 100
+
 // ListContextEnvironmentVariables returns every environment variable set on a
 // context, following pagination to the last page. Values are truncated; see
 // ContextEnvironmentVariable. The result is nil when the context has none.
 //
-// Like GetContext, this route sits behind the API's the context-resolution step
-// middleware, so a context that no longer exists answers 403 rather than 404 —
-// see context.go's GetContext comment.
+// Like GetContext, this route sits behind the same middleware, so a context
+// that no longer exists answers 403 rather than 404 — see context.go's
+// GetContext comment.
+//
+// This route's pagination is broken server-side and the loop below is guarded
+// against it. The handler reads the page token from the request's *path*
+// parameters rather than its query string, and the route has no such path
+// parameter, so the `page-token` this client sends is never seen: every request
+// is answered with the first page and with the same next_page_token. Draining
+// naively would re-request page one for ever, accumulating duplicates until the
+// provider ran out of memory — the one failure mode worse than a wrong answer.
+//
+// So a repeated token is treated as a hard error rather than as a quiet stop. A
+// context with more than contextEnvVarPageSize variables cannot be listed
+// completely through this route at all, and silently returning the first page
+// would make a data source under-report and could make a resource conclude one
+// of its variables had been deleted.
 func (c *Client) ListContextEnvironmentVariables(ctx context.Context, contextID string) ([]ContextEnvironmentVariable, error) {
 	return DrainV2(ctx, func(ctx context.Context, pageToken string) (PaginatedResponse[ContextEnvironmentVariable], error) {
 		var page PaginatedResponse[ContextEnvironmentVariable]
-		err := c.GetV2(ctx, contextEnvVarsRoute, &page, RouteParams(contextID), PageToken(pageToken))
 
-		return page, err
+		err := c.GetV2(ctx, contextEnvVarsRoute, &page, RouteParams(contextID), PageToken(pageToken))
+		if err != nil {
+			return page, err
+		}
+
+		// The token just sent came back unchanged, so the next request would
+		// repeat this one.
+		if pageToken != "" && page.NextPageToken == pageToken {
+			return PaginatedResponse[ContextEnvironmentVariable]{}, fmt.Errorf(
+				"listing environment variables of context %s: CircleCI answered with the same page token it "+
+					"was given, so the collection cannot be paged through and this list is incomplete. A "+
+					"context holding more than %d environment variables hits this, because the route ignores "+
+					"the page token it advertises. Split the variables across more than one context, or read "+
+					"them individually by name",
+				contextID, contextEnvVarPageSize,
+			)
+		}
+
+		return page, nil
 	})
 }
 
@@ -231,7 +276,7 @@ func (c *Client) UpsertContextEnvironmentVariable(
 // DeleteContextEnvironmentVariable removes an environment variable from a
 // context.
 //
-// This route sits behind the same context-resolution step as GetContext (see
+// This route sits behind the same middleware as GetContext (see
 // context.go), so a context that no longer exists answers 403 rather than 404.
 func (c *Client) DeleteContextEnvironmentVariable(ctx context.Context, contextID, name string) error {
 	return c.DeleteV2(ctx, contextEnvVarRoute, RouteParams(contextID, name))

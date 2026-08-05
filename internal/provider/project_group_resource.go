@@ -28,6 +28,16 @@ var (
 	_ resource.ResourceWithConfigValidators = &projectGroupResource{}
 )
 
+// projectGroupTypeName is used in the standalone-only diagnostic.
+//
+// This resource is gated because the project-nested groups path is not forwarded
+// to the public API on a Server installation — only the organization-level one is.
+// So the request is accepted and then fails inside CircleCI, which is a worse
+// failure than a 404. Delete is deliberately left ungated: a resource stranded by
+// a deployment change must stay removable, and Delete already drops state with a
+// warning because the revoke route does not exist.
+const projectGroupTypeName = "circleci_project_group"
+
 // projectGroupResourceModel maps the resource schema.
 type projectGroupResourceModel struct {
 	Id             types.String `tfsdk:"id"`
@@ -129,6 +139,10 @@ func (r *projectGroupResource) ConfigValidators(_ context.Context) []resource.Co
 // The assign call answers with an acknowledgement rather than the stored grant,
 // so the grant is read back to pick up the group's name and to confirm it landed.
 func (r *projectGroupResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	if !requireStandaloneCapable(r.client, projectGroupTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var plan projectGroupResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
@@ -170,6 +184,10 @@ func (r *projectGroupResource) Create(ctx context.Context, req resource.CreateRe
 
 // Read refreshes the Terraform state with the grant's current role.
 func (r *projectGroupResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	if !requireStandaloneCapable(r.client, projectGroupTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var state projectGroupResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
@@ -208,6 +226,10 @@ func (r *projectGroupResource) Read(ctx context.Context, req resource.ReadReques
 
 // Update changes the role the group holds on the project.
 func (r *projectGroupResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	if !requireStandaloneCapable(r.client, projectGroupTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var plan projectGroupResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {

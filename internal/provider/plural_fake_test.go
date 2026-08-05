@@ -21,7 +21,7 @@ import (
 // The stand-in stores and serves raw JSON objects rather than the provider's own
 // client structs, deliberately: a mock built from the structs under test cannot
 // catch a field name that disagrees with production. The shapes here are copied
-// from the production handlers named on each seeder.
+// from production, as noted on each seeder.
 
 // Scope identifiers the fake serves collections for.
 const (
@@ -107,8 +107,7 @@ func (a *pluralAPI) fail(status int, message string) {
 
 // --- seeders ---
 
-// seedContext adds a context to an organization, shaped as the API's
-// the CircleCI API returns it.
+// seedContext adds a context to an organization, shaped as the API returns it.
 func (a *pluralAPI) seedContext(orgID, id, name, createdAt string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -120,9 +119,8 @@ func (a *pluralAPI) seedContext(orgID, id, name, createdAt string) {
 	})
 }
 
-// seedRestriction adds a restriction to a context, shaped as the API's
-// the CircleCI API returns it: project_id is only
-// present for project restrictions.
+// seedRestriction adds a restriction to a context, shaped as the API returns
+// it: project_id is only present for project restrictions.
 func (a *pluralAPI) seedRestriction(contextID, id, name, restrictionType, value string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -141,9 +139,8 @@ func (a *pluralAPI) seedRestriction(contextID, id, name, restrictionType, value 
 	a.restrictions[contextID] = append(a.restrictions[contextID], restriction)
 }
 
-// seedWebhook adds a webhook to a project scope, shaped as the v2 API's
-// list-webhooks-handler (the CircleCI API) returns it: the
-// scope is nested and the signing secret is masked to "****" when set.
+// seedWebhook adds a webhook to a project scope, shaped as the API returns it:
+// the scope is nested and the signing secret is masked to "****" when set.
 func (a *pluralAPI) seedWebhook(scopeID, id, name, url string, events []string, verifyTLS, hasSecret bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -166,9 +163,8 @@ func (a *pluralAPI) seedWebhook(scopeID, id, name, url string, events []string, 
 	})
 }
 
-// seedEnvVar adds an environment variable to a project, shaped as the v2
-// API's env-var-public-view (the CircleCI API) returns it: the
-// value is masked and created_at may be null.
+// seedEnvVar adds an environment variable to a project, shaped as the API
+// returns it: the value is masked and created_at may be null.
 func (a *pluralAPI) seedEnvVar(projectSlug, name, maskedValue string, createdAt *string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -181,9 +177,9 @@ func (a *pluralAPI) seedEnvVar(projectSlug, name, maskedValue string, createdAt 
 	a.envVars[projectSlug] = append(a.envVars[projectSlug], variable)
 }
 
-// seedDefinition adds a pipeline definition to a project, shaped as
-// the API's the CircleCI API returns
-// it. An empty repoFullName omits the repo object entirely, as the API does.
+// seedDefinition adds a pipeline definition to a project, shaped as the API
+// returns it. An empty repoFullName omits the repo object entirely, as the API
+// does.
 func (a *pluralAPI) seedDefinition(projectID, id, name, description, provider, filePath, repoFullName, repoExternalID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -211,9 +207,9 @@ func (a *pluralAPI) seedDefinition(projectID, id, name, description, provider, f
 	a.definitions[projectID] = append(a.definitions[projectID], definition)
 }
 
-// seedRepoTrigger adds a repository-event trigger, shaped as the API's
-// the CircleCI API returns it. disabled is omitted rather
-// than sent as false, as the API does for an enabled trigger.
+// seedRepoTrigger adds a repository-event trigger, shaped as the API returns
+// it. disabled is omitted rather than sent as false, as the API does for an
+// enabled trigger.
 func (a *pluralAPI) seedRepoTrigger(projectID, pipelineID, id, name, eventName, preset, repoFullName, repoExternalID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -275,7 +271,7 @@ func (a *pluralAPI) listContexts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// the API requires an owner and only serves organizations, so a client
+	// The API requires an owner and only serves organizations, so a client
 	// that omits either parameter must fail here rather than reading a collection.
 	ownerID := r.URL.Query().Get("owner-id")
 	if ownerID == "" {
@@ -313,7 +309,7 @@ func (a *pluralAPI) listWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The v2 API rejects a request that does not name a project scope.
+	// The API rejects a request that does not name a project scope.
 	scopeID := r.URL.Query().Get("scope-id")
 	if scopeID == "" || r.URL.Query().Get("scope-type") != "project" {
 		a.write(w, http.StatusBadRequest, map[string]any{"message": "Invalid scope parameters"})

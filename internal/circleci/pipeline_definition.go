@@ -8,7 +8,7 @@ import "context"
 // Pipeline definition routes.
 //
 // These live under /api/v2 but are served by the public API service rather than
-// the v2 API, and CircleCI Server does not route pipeline-definitions
+// the core v2 API backend, and CircleCI Server does not route pipeline-definitions
 // there. Callers must gate on Client.IsCloud before using them; a Server
 // installation answers HTTP 404, which is indistinguishable from a project that
 // does not exist.
@@ -19,9 +19,8 @@ const pipelineDefinitionRoute = "/projects/%s/pipeline-definitions/%s"
 
 // RepoInput is the create/update body for a repository reference: only the
 // caller-supplied external id. FullName is never accepted on write — it is
-// resolved by the server from ExternalID, matching the API's
-// createRequestRepo (pipeline definitions) and createRequestRepo (triggers),
-// both of which carry only external_id.
+// resolved by the server from ExternalID; both the pipeline-definition and
+// trigger create bodies carry only external_id.
 type RepoInput struct {
 	ExternalID string `json:"external_id"`
 }
@@ -40,6 +39,65 @@ type PipelineConfigSource struct {
 	Provider string `json:"provider"`
 	Repo     Repo   `json:"repo"`
 	FilePath string `json:"file_path"`
+}
+
+// The config_source providers the pipeline-definition endpoints accept.
+//
+// Confirmed against the API's own OpenAPI schema, whose config_source is a
+// two-branch oneOf.
+const (
+	// PipelineConfigSourceProviderGitHubApp is CircleCI's GitHub App integration.
+	PipelineConfigSourceProviderGitHubApp = "github_app"
+	// PipelineConfigSourceProviderGitHubServer is a GitHub Enterprise Server
+	// installation.
+	PipelineConfigSourceProviderGitHubServer = "github_server"
+	// PipelineConfigSourceProviderCircleCI is a CircleCI-hosted configuration: the
+	// pipeline's configuration is not read from a VCS repository at all, so this is
+	// the one config_source provider with no repo.
+	//
+	// The schema's "circleci" branch is `additionalProperties: false` and lists only
+	// `provider` and `file_path` (both `required`) — no `repo` property at all — so a
+	// repo on this branch fails the oneOf outright; it is not merely ignored.
+	PipelineConfigSourceProviderCircleCI = "circleci"
+)
+
+// PipelineConfigSourceProviders returns every provider config_source_provider
+// accepts.
+//
+// It exists so that the resource's schema validator, its attribute description and
+// this client cannot drift from one another — the same reason
+// TriggerEventSourceProviders exists.
+func PipelineConfigSourceProviders() []string {
+	return []string{
+		PipelineConfigSourceProviderGitHubApp,
+		PipelineConfigSourceProviderGitHubServer,
+		PipelineConfigSourceProviderCircleCI,
+	}
+}
+
+// PipelineConfigSourceProviderNeedsRepo reports whether a config_source provider
+// takes a repository. Every provider does except circleci, whose configuration is
+// hosted by CircleCI itself rather than checked out from anywhere.
+func PipelineConfigSourceProviderNeedsRepo(provider string) bool {
+	return provider != PipelineConfigSourceProviderCircleCI
+}
+
+// PipelineCheckoutSourceProviders returns every provider checkout_source_provider
+// accepts.
+//
+// Unlike config_source, checkout_source has no CircleCI-hosted branch: the schema
+// declares it as a single object (not a oneOf), with `provider` restricted to
+// `[github_app, github_server]` and `repo` unconditionally `required`. A pipeline
+// definition therefore always needs a real repository to check code out from, even
+// when its configuration is hosted by CircleCI itself — confirmed by a test case
+// that pairs config_source.provider "circleci" with checkout_source.provider
+// "circleci" and gets back a 400 naming "/checkout_source/provider" as not one
+// of the allowed values.
+func PipelineCheckoutSourceProviders() []string {
+	return []string{
+		PipelineConfigSourceProviderGitHubApp,
+		PipelineConfigSourceProviderGitHubServer,
+	}
 }
 
 // PipelineCheckoutSource says which repository a pipeline checks out. It is
@@ -81,29 +139,34 @@ func (c *Client) ListPipelineDefinitions(ctx context.Context, projectID string) 
 	return response.Items, nil
 }
 
-// PipelineConfigSourceInput is the create body's config_source. Every field is
-// sent unconditionally (no omitempty), matching the API's
-// the CircleCI API createRequestConfigSource
-// exactly: Provider, Repo and FilePath are all plain, always-present fields
-// there.
+// PipelineConfigSourceInput is the create body's config_source.
+//
+// Repo is a pointer so it can be omitted entirely. The API's config_source oneOf
+// has two branches: one for github_app/github_server, which requires
+// provider+repo+file_path, and one for the "circleci" provider (a CircleCI-hosted
+// configuration with no repository at all), whose schema is
+// `additionalProperties: false` over only provider and file_path. Sending a repo
+// object on the "circleci" branch therefore fails the oneOf outright — this is not
+// a case of an extra field being harmlessly ignored — so PipelineConfigSourceProviderNeedsRepo
+// must gate whether Repo is populated. Provider and FilePath are sent
+// unconditionally on both branches.
 type PipelineConfigSourceInput struct {
-	Provider string    `json:"provider"`
-	Repo     RepoInput `json:"repo"`
-	FilePath string    `json:"file_path"`
+	Provider string     `json:"provider"`
+	Repo     *RepoInput `json:"repo,omitempty"`
+	FilePath string     `json:"file_path"`
 }
 
 // PipelineCheckoutSourceInput is the create body's checkout_source, and —
 // unlike PipelineConfigSourceInput on update — also the update body's
-// checkout_source: handler_update.go's updateRequest embeds
-// createRequestCheckoutSource verbatim, so provider and repo remain updatable
-// for the checkout source even though they are not for the config source.
+// checkout_source: the update route reuses the same checkout_source shape as
+// create, so provider and repo remain updatable for the checkout source even
+// though they are not for the config source.
 type PipelineCheckoutSourceInput struct {
 	Provider string    `json:"provider"`
 	Repo     RepoInput `json:"repo"`
 }
 
-// CreatePipelineDefinitionInput is the create body for a pipeline definition,
-// matching handler_create.go's createRequest field-for-field.
+// CreatePipelineDefinitionInput is the create body for a pipeline definition.
 type CreatePipelineDefinitionInput struct {
 	Name           string                      `json:"name"`
 	Description    string                      `json:"description"`
@@ -145,9 +208,8 @@ func (c *Client) GetPipelineDefinition(ctx context.Context, projectID, id string
 }
 
 // PipelineConfigSourceUpdateInput is the update body's config_source: file_path
-// ONLY. Provider and repo are immutable after creation — verified against
-// handler_update.go's updateRequestConfigSource, which has no provider or repo
-// field at all, unlike the create shape.
+// ONLY. Provider and repo are immutable after creation — the update route's
+// config_source has no provider or repo field at all, unlike the create shape.
 type PipelineConfigSourceUpdateInput struct {
 	FilePath string `json:"file_path"`
 }

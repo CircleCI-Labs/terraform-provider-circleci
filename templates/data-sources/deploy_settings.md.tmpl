@@ -15,12 +15,12 @@ deploys and rollbacks.
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | No — deploy/release tracking (the API) is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
+| **CircleCI Server** | No — deploy/release tracking is not deployed on CircleCI Server. Using this data source with `deployment = "server"` reports an explicit error. |
 | **API** | `GET /api/v2/deploy/projects/{id}/settings` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token. |
 
--> **This route also accepts writes.** the API also exposes `PATCH .../settings`, but this
+-> **This route also accepts writes.** The API also exposes `PATCH .../settings`, but this
 provider exposes the route read-only here: both settings are pipeline-definition ids, and pipeline
 definitions are a separate, not-yet-built area of this provider's scope (distinct from the pipeline
 *run* data sources — [`circleci_pipeline_run`](pipeline_run) and friends — which this workstream does

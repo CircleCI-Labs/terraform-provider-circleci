@@ -14,9 +14,7 @@ import (
 // scoped by owner-id and owner-type *query* parameters rather than a path
 // segment, which is why there is no owner in the route.
 //
-// Shapes and semantics here follow the API's the CircleCI API
-// (the API, the API, the API, the API), which
-// is the service that actually owns these routes, and
+// Shapes and semantics here follow the API's own handlers, and
 // github.com/CircleCI-Public/circleci-cli's internal/apiclient/context.go (MIT),
 // which independently arrives at the same field names and routes.
 const (
@@ -48,6 +46,13 @@ type Context struct {
 // ListContexts returns every context owned by an organization, following
 // pagination to the last page. The result is nil when the organization has no
 // contexts.
+//
+// The order is the API's, not this client's: contexts come back sorted
+// by name, compared lower-cased. Nothing here depends on that, but a caller that
+// wants a different order has to impose it rather than assume insertion order.
+//
+// owner-type is sent explicitly even though the route defaults it to
+// "organization", because the default is the route's and not a promise.
 func (c *Client) ListContexts(ctx context.Context, organizationID string) ([]Context, error) {
 	return DrainV2(ctx, func(ctx context.Context, pageToken string) (PaginatedResponse[Context], error) {
 		var page PaginatedResponse[Context]
@@ -64,16 +69,15 @@ func (c *Client) ListContexts(ctx context.Context, organizationID string) ([]Con
 // GetContext returns one context by id.
 //
 // A context that does not exist, belongs to another organization, or is
-// inaccessible to the configured token all answer HTTP 403, not 404: the route
-// sits behind the API's context-resolution step
-// (the CircleCI API), which resolves the id to its owning
-// organization through a separate lookup and maps every failure of that lookup
-// to StatusForbidden before the handler that would otherwise 404 ever runs.
-// the API.ErrNotFound (mapped to a real 404 by api.go's
-// the API) only fires on the rare race where that lookup succeeds and
-// the read then fails, so callers must treat 403 as "possibly gone, possibly
-// just unauthorized" rather than as IsNotFound. See context_resource.go's Read
-// for how the ambiguity is surfaced rather than guessed at.
+// inaccessible to the configured token all answer HTTP 403, not 404: the
+// route sits behind middleware that resolves the id to its owning
+// organization through a separate lookup first, and maps every failure of
+// that lookup to StatusForbidden before the handler that would otherwise 404
+// ever runs. A real 404 only fires on the rare race where that lookup
+// succeeds and the read then fails, so callers must treat 403 as "possibly
+// gone, possibly just unauthorized" rather than as IsNotFound. See
+// context_resource.go's Read for how the ambiguity is surfaced rather than
+// guessed at.
 func (c *Client) GetContext(ctx context.Context, contextID string) (*Context, error) {
 	var found Context
 	if err := c.GetV2(ctx, contextRoute, &found, RouteParams(contextID)); err != nil {
@@ -100,10 +104,9 @@ type createContextRequest struct {
 // CreateContext creates a context owned by an organization and returns it as
 // stored.
 //
-// The response is deliberately narrow: the API's postOrgContext
-// (the API) builds an explicit anonymous response struct with only
-// id/name/created_at, dropping the owner it was just given. There is nothing
-// else to map back onto Context.
+// The response is deliberately narrow: the create route's response carries
+// only id/name/created_at, dropping the owner it was just given. There is
+// nothing else to map back onto Context.
 func (c *Client) CreateContext(ctx context.Context, organizationID, name string) (*Context, error) {
 	var created Context
 	body := createContextRequest{
@@ -122,8 +125,8 @@ func (c *Client) CreateContext(ctx context.Context, organizationID, name string)
 
 // DeleteContext deletes a context by id.
 //
-// Like GetContext, this route sits behind the context-resolution step, so a context that no
-// longer exists answers 403 rather than 404 — see GetContext's comment. That
+// Like GetContext, this route sits behind the same middleware, so a context
+// that no longer exists answers 403 rather than 404 — see GetContext's comment. That
 // makes 403 the practical "already gone" signal for Delete: callers should
 // treat it as success, mirroring how a missing CircleCI group answers 403 (see
 // group.go).
@@ -137,7 +140,22 @@ func (c *Client) DeleteContext(ctx context.Context, contextID string) error {
 // within an organization, which is what makes the search unambiguous — on CircleCI
 // Server they are unique across every organization in the account.
 //
-// Matching is exact and case-sensitive, because the API treats names that way.
+// Matching here is exact and case-sensitive, which is deliberately STRICTER than
+// the server-side filter and is not the same thing.
+//
+// The list route does accept a `name` query parameter, and it is not an exact
+// match: the API lower-cases both sides and tests for a substring, so
+// `name=ep` matches "deploy". The route also validates it before that — at most 50
+// characters, and only letters, digits, whitespace, hyphen, underscore and full
+// stop — so a name outside that character set could not be filtered on at all,
+// while this method finds it happily. Passing the filter would therefore trade a
+// full listing for a narrower one that still needs the exact comparison below,
+// and it would introduce a second failure mode for names the filter rejects.
+//
+// Not confirmed either way: whether the service enforces name uniqueness
+// case-insensitively. If it does not, two contexts differing only in case can
+// coexist, and an exact comparison is the only one that picks the right one — which
+// is the other reason not to lean on the filter.
 func (c *Client) FindContextByName(ctx context.Context, organizationID, name string) (*Context, error) {
 	contexts, err := c.ListContexts(ctx, organizationID)
 	if err != nil {

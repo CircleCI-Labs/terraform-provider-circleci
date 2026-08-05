@@ -6,6 +6,9 @@ package circleci
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 )
 
 // projectSettingsRoute is the v2 route for a project's advanced settings. The
@@ -73,19 +76,41 @@ type ProjectSettings struct {
 	// to change these settings.
 	WriteSettingsRequiresAdmin *bool `json:"write_settings_requires_admin,omitempty"`
 	// PROnlyBranchOverrides lists branches that always build, even when
-	// BuildPrsOnly is enabled. The value sent replaces the existing list.
+	// BuildPrsOnly is enabled. A non-empty value sent replaces the existing list.
 	//
-	// It is a pointer to a slice, not a plain slice, so that the three states the
-	// API distinguishes stay distinguishable: nil omits the field and leaves the
-	// list alone, a pointer to an empty slice sends [] and clears every override,
-	// and a pointer to a populated slice replaces the list. A plain slice with
-	// omitempty could not express the middle case.
+	// It is a pointer to a slice, not a plain slice, so that nil (omit the field,
+	// leave the list alone) stays distinguishable from a pointer to an empty
+	// slice (send []). A plain slice with omitempty could not express the
+	// difference.
+	//
+	// CLEARING THE LIST IS NOT POSSIBLE ON THIS ROUTE. Sending [] is accepted
+	// with HTTP 200 and changes nothing. The service fronting this route decodes
+	// the v2 body into a plain []string and copies it into the v1.1 body it
+	// forwards, where the field carries `omitempty` — so a zero-length slice is
+	// dropped before the request that would have written it is made, and the
+	// underlying setting is left exactly as it was. There is no other value that
+	// means "no overrides": the field is a comma-joined string by the time it
+	// reaches v1.1.
+	//
+	// The response to the PATCH is a fresh read, so the old list comes straight
+	// back. UpdateProjectSettings turns that into an explicit error rather than
+	// letting a caller store a value CircleCI did not accept — see the comment
+	// there. This is a missing API capability, not something the client can work
+	// around; the [] is still sent so that the guard stops firing by itself if
+	// the route is ever fixed.
 	PROnlyBranchOverrides *[]string `json:"pr_only_branch_overrides,omitempty"`
 }
 
 // IsEmpty reports whether no setting is set, meaning an update would carry an
 // empty advanced object and change nothing. Callers skip the request in that
-// case: the API rejects a body with no fields ("No JSON fields found.").
+// case, because a request that cannot change anything is not worth making.
+//
+// Note that `{"advanced":{}}` is *not* rejected by the API — it answers 200 with
+// the project's current settings, and the service's own handler tests assert
+// exactly that. The 400 "No JSON fields found." belongs to a body that is empty
+// at the top level (`{}`), which this client never sends because the envelope
+// always carries an "advanced" key. Skipping the request is therefore an
+// optimisation, not a workaround for a rejection.
 func (s ProjectSettings) IsEmpty() bool {
 	for _, field := range []*bool{
 		s.AutocancelBuilds,
@@ -175,5 +200,50 @@ func (c *Client) UpdateProjectSettings(ctx context.Context, vcsType, orgName, pr
 
 	updated := envelope.Advanced
 
+	if err := checkBranchOverridesCleared(settings, updated); err != nil {
+		return nil, err
+	}
+
 	return &updated, nil
+}
+
+// ErrCannotClearBranchOverrides reports that an attempt to remove every
+// pr_only_branch_overrides entry was accepted and ignored.
+//
+// It exists as a sentinel so a caller can recognise this one case without
+// matching on message text. See ProjectSettings.PROnlyBranchOverrides for why
+// the API behaves this way.
+var ErrCannotClearBranchOverrides = errors.New(
+	"CircleCI's project settings API cannot clear pr_only_branch_overrides: an empty list is " +
+		"accepted with HTTP 200 and silently ignored, so the previous branches are still in force",
+)
+
+// checkBranchOverridesCleared reports an error when a write asked for every
+// branch override to be removed and the API kept them.
+//
+// The API answers a settings PATCH with a fresh read, so this compares what was
+// asked for against what CircleCI actually holds afterwards. Returning an error
+// is deliberate: the alternative is to hand back a value that contradicts the
+// request, which a Terraform resource would either store as state that lies or
+// fail on with "Provider produced inconsistent result after apply" — a message
+// that says nothing about which attribute or why.
+//
+// A project that had no overrides to begin with is not an error: the request was
+// a no-op and the end state is the one that was asked for.
+func checkBranchOverridesCleared(sent, got ProjectSettings) error {
+	if sent.PROnlyBranchOverrides == nil || len(*sent.PROnlyBranchOverrides) > 0 {
+		return nil
+	}
+
+	if got.PROnlyBranchOverrides == nil || len(*got.PROnlyBranchOverrides) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w (it still reports %d: %s). Remove pr_only_branch_overrides from the configuration to stop "+
+			"managing it, or set it to the branches that should always build",
+		ErrCannotClearBranchOverrides,
+		len(*got.PROnlyBranchOverrides),
+		strings.Join(*got.PROnlyBranchOverrides, ", "),
+	)
 }

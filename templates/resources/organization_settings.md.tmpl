@@ -11,7 +11,13 @@ Manages organization-wide CircleCI settings.
 
 ## Availability
 
-**CircleCI Cloud only.** These settings are served by the CircleCI v3 API, which CircleCI Server does not route to its public API service. Configuring the provider with `deployment = "server"` and using this resource reports an explicit error rather than a confusing HTTP 404.
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/orgs/{org_id}/settings` and `POST /api/v3/orgs/{org_id}/update-settings` |
+| **Organization type** | Any. Individual toggles may additionally require a plan that includes the feature. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## A settings resource, not a thing that gets created
 

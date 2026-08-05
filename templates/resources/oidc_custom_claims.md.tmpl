@@ -9,7 +9,15 @@ description: |-
 
 Customizes the claims of the OIDC identity tokens CircleCI issues to jobs, so that a cloud provider or secrets manager will accept them.
 
-Works against both **CircleCI Cloud and CircleCI Server** — OIDC custom claims are served by the v2 API, which both provide.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes on CircleCI Server 4.4 and later. Not available in air-gapped installations. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET`, `PATCH` and `DELETE /api/v2/org/{org_id}/oidc-custom-claims`, and the same three on `/api/v2/org/{org_id}/project/{project_id}/oidc-custom-claims` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage
 

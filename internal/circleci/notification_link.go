@@ -6,14 +6,11 @@ package circleci
 import "context"
 
 // notificationLinksRoute lists the authenticated caller's external identity
-// links (e.g. a linked Slack user), proxied to the notifications service's
-// internal API exactly like the other /api/v3/notification/* routes in
-// notification_integration.go.
+// links (e.g. a linked Slack user), exactly like the other
+// /api/v3/notification/* routes in notification_integration.go.
 //
-// There is a DELETE for this same route (see the CircleCI API
-// in the notifications service), but no create: a link is established as a
-// side effect of the Slack user-linking OAuth flow
-// (SlackUserLinkCallback/"/connect" in that service), a browser consent step
+// There is a DELETE for this route, but no create: a link is established as
+// a side effect of the Slack user-linking OAuth flow, a browser consent step
 // Terraform cannot drive. That is also why there is no resource here — see
 // DESIGN.md's "Notification links have no resource" entry — and this file
 // implements only List.
@@ -22,11 +19,10 @@ const notificationLinksRoute = "/notification/links"
 // NotificationLink is one external identity linked to a CircleCI user on a
 // third-party connection (Slack, today).
 //
-// Field names and the "not UUID-addressable" shape are taken from
-// notifications' the CircleCI API: Link carries no
-// id, because response.DataEntity.ID uses `json:"id,omitzero"` and the
-// handler never sets it. The real identity of a link is the triple
-// (user, ConnectionType, ExternalScopeID).
+// The "not UUID-addressable" shape is real: Link carries no id, because the
+// entity ID field uses `json:"id,omitzero"` and the API never sets it. The
+// real identity of a link is the triple (user, ConnectionType,
+// ExternalScopeID).
 //
 // EXPERIMENTAL upstream: ListLinks' own doc comment says "Field names,
 // request and response shapes, and pagination semantics are not yet stable.

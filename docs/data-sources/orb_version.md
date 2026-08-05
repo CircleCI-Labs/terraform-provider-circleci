@@ -15,7 +15,15 @@ The version reference may be an exact version such as `1.2.3`, a `dev:<label>` v
 
 Use this to read the published YAML source, or to resolve the UUID needed to import a `circleci_orb_version`.
 
-~> **CircleCI Cloud only.** Orb versions are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/orb/versions/{id}`, or `GET /api/v3/orb/versions` filtered by orb and version |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. |
 
 ## Example Usage
 
@@ -59,4 +67,6 @@ output "published_source" {
 
 - `created_at` (String) When the version was published, as an RFC 3339 timestamp.
 - `orb_name` (String) Fully qualified name of the orb, `<namespace>/<orb>`.
+
+No orb version route reports this, so it is resolved from the orb itself. Looking a version up by `orb_id` and `version` gets it for free, because the orb has to be read anyway to build the reference the API needs; looking one up by `id` costs one extra request.
 - `source` (String) The YAML source CircleCI stored for this version.

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 )
 
 const notificationTestOrgID = "44444444-4444-4444-4444-444444444444"
@@ -117,6 +118,67 @@ resource "circleci_notification_channel_config" "test" {
 			Config:      config,
 			ExpectError: regexp.MustCompile(`project_id must be omitted`),
 		}},
+	})
+}
+
+// TestAccNotificationChannelConfigResource_ImportRoundTrips proves import
+// round-trips cleanly, unlike the ios-signing and otel-exporter resources:
+// every attribute here comes back from a read (see applyNotificationChannelConfig),
+// there is no unreadable secret and no RequiresReplace attribute whose value
+// import cannot recover, so the plan right after import is genuinely empty
+// once the configuration matches what CircleCI reports -- not a one-time
+// update or replacement.
+//
+// The channel config is seeded directly into the fake, bypassing Terraform
+// Create entirely, to stand in for one that already exists and was never
+// created by this Terraform run. ImportStatePersist makes the second step
+// plan against the imported state rather than against whatever a previous
+// step left behind.
+func TestAccNotificationChannelConfigResource_ImportRoundTrips(t *testing.T) {
+	api := newNotificationFakeAPI(t)
+
+	const id = "66666666-6666-6666-6666-666666666666"
+	api.channelCfgs[id] = &notificationFakeChannelConfig{
+		ID:          id,
+		Scope:       "user",
+		ChannelType: "email",
+		Target:      "me@example.com",
+		IsEnabled:   true,
+		OrgID:       notificationTestOrgID,
+		UserID:      "77777777-7777-7777-7777-777777777777",
+	}
+
+	config := orbProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_notification_channel_config" "test" {
+  scope        = "user"
+  channel_type = "email"
+  target       = "me@example.com"
+  is_enabled   = true
+  org_id       = %q
+}
+`, notificationTestOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				ResourceName:       "circleci_notification_channel_config.test",
+				ImportState:        true,
+				ImportStateId:      id,
+				ImportStatePersist: true,
+				Config:             config,
+			},
+			{
+				Config: config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(
+							"circleci_notification_channel_config.test", plancheck.ResourceActionNoop,
+						),
+					},
+				},
+			},
+		},
 	})
 }
 

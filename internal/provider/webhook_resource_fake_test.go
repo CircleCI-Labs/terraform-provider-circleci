@@ -10,9 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -30,17 +34,16 @@ import (
 // rather than being hidden by a fake that was written to match the client
 // instead of the server.
 //
-// The real wire shape is verified against
-// the CircleCI API's
-// openapi_definitions/v2_endpoints/webhook/schemas.yaml, which documents
-// "verify_tls" and "signing_secret" (both snake_case) as the webhook object's
-// field names — matching internal/circleci/webhook.go in this repository.
+// The real wire shape is verified against the API's own OpenAPI schema,
+// which documents "verify_tls" and "signing_secret" (both snake_case) as the
+// webhook object's field names — matching internal/circleci/webhook.go in
+// this repository.
 //
 // github.com/CircleCI-Public/circleci-sdk-go/webhook.Webhook instead tags those
 // two fields `json:"verify-tls"` and `json:"signing-secret"` (hyphenated). Because
 // the API ignores keys it does not recognize, every request the SDK sent silently
 // dropped both: a webhook created through this resource had NO signing secret
-// whatever was configured. That was a shipped security bug (issue #25).
+// whatever was configured. That was a shipped security bug.
 //
 // webhook_resource.go has been migrated to internal/circleci, whose tags match the
 // API, and TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire now asserts both
@@ -53,7 +56,7 @@ import (
 // TestWebhookDataSourceUnit_SigningSecretIsAlwaysNull asserts it comes back null
 // either way rather than exposing "****" as if it were a credential a
 // configuration could pass to a receiver. That attribute is queued for removal in
-// 1.0 in favor of `circleci_webhooks`' `has_signing_secret` (issue #21).
+// 1.0 in favor of `circleci_webhooks`' `has_signing_secret`.
 
 type fakeWebhookAPI struct {
 	t *testing.T
@@ -199,9 +202,32 @@ func (a *fakeWebhookAPI) buildRecord(id string, body map[string]any) map[string]
 	}
 }
 
+// createWebhookRequiredFields are the keys the create route's own request spec
+// marks required: name, events, url, verify_tls, signing_secret and a nested
+// scope. Every one of them is `:req-un`, so a body missing any is a 400 and never
+// reaches the service behind it — a webhook cannot be created "without" a signing
+// secret, only with an empty one.
+//
+// The update route is the opposite: every field is optional there, and the
+// handler select-keys the body, so an absent key leaves the stored value alone.
+// That asymmetry is why validation lives in create rather than in buildRecord,
+// which both routes share.
+var createWebhookRequiredFields = []string{"name", "events", "url", "verify_tls", "signing_secret", "scope"}
+
 func (a *fakeWebhookAPI) create(w http.ResponseWriter, r *http.Request) {
 	body := decodeBody(a.t, r)
 	a.record(r, body)
+
+	w.Header().Set("Content-Type", "application/json")
+
+	for _, field := range createWebhookRequiredFields {
+		if _, present := body[field]; !present {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"message":"Invalid request body: missing `+field+`"}`)
+
+			return
+		}
+	}
 
 	a.mu.Lock()
 	a.nextID++
@@ -210,8 +236,11 @@ func (a *fakeWebhookAPI) create(w http.ResponseWriter, r *http.Request) {
 	a.webhooks[id] = record
 	a.mu.Unlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	// 201, not 200: the create handler answers with response/created, and its
+	// OpenAPI block documents 201. Only the update route answers 200. The client
+	// treats any 2xx as success, so this is fake fidelity rather than a bug it was
+	// hiding.
+	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(record)
 }
 
@@ -285,7 +314,7 @@ func (a *fakeWebhookAPI) delete(w http.ResponseWriter, r *http.Request) {
 
 	delete(a.webhooks, id)
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, `{"message":"ok"}`)
+	_, _ = io.WriteString(w, `{"message":"Webhook deleted."}`)
 }
 
 func webhookFakeProviderConfig(host string) string {
@@ -407,6 +436,63 @@ func TestWebhookResourceUnit_CRUD(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestWebhookResourceUnit_ImportWarnsSigningSecretIsUnset proves ImportState
+// (webhook_resource.go) tells the practitioner what
+// TestWebhookResourceUnit_CRUD's ImportStateVerifyIgnore only documents in a
+// comment: the signing secret cannot be read back, so it must be supplied from
+// the configuration before plan or apply can proceed.
+func TestWebhookResourceUnit_ImportWarnsSigningSecretIsUnset(t *testing.T) {
+	t.Parallel()
+
+	schema := webhookResourceSchemaForTest(t)
+	r := &webhookResource{}
+
+	events, diags := types.SetValueFrom(t.Context(), types.StringType, []string{})
+	if diags.HasError() {
+		t.Fatalf("building an empty events set: %+v", diags)
+	}
+
+	priorState := tfsdk.State{Schema: schema}
+	if diags := priorState.Set(t.Context(), webhookResourceModel{
+		Id:                     types.StringNull(),
+		Name:                   types.StringNull(),
+		Url:                    types.StringNull(),
+		VerifyTls:              types.BoolNull(),
+		SigningSecret:          types.StringNull(),
+		SigningSecretWO:        types.StringNull(),
+		SigningSecretWOVersion: types.Int64Null(),
+		ScopeId:                types.StringNull(),
+		ScopeType:              types.StringNull(),
+		Events:                 events,
+		CreatedAt:              types.StringNull(),
+		UpdatedAt:              types.StringNull(),
+	}); diags.HasError() {
+		t.Fatalf("could not build a prior state value: %+v", diags)
+	}
+
+	resp := &fwresource.ImportStateResponse{State: priorState}
+
+	r.ImportState(t.Context(), fwresource.ImportStateRequest{ID: "scope-1/webhook-1"}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ImportState diagnostics: %+v", resp.Diagnostics)
+	}
+
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Fatal("ImportState produced no warning that the signing secret cannot be read back")
+	}
+
+	var sawSecretWarning bool
+	for _, d := range resp.Diagnostics.Warnings() {
+		if strings.Contains(d.Summary(), "cannot be read") {
+			sawSecretWarning = true
+		}
+	}
+	if !sawSecretWarning {
+		t.Errorf("ImportState warnings = %+v, want one about the signing secret being unreadable", resp.Diagnostics.Warnings())
+	}
 }
 
 // TestFakeAPIsDoNotEchoCollectionOrder guards the guard.
@@ -537,9 +623,8 @@ func TestWebhookResourceUnit_RejectsUnknownEventName(t *testing.T) {
 //
 // It is a regression test for a shipped security bug.
 // github.com/CircleCI-Public/circleci-sdk-go/webhook.Webhook tags these two fields
-// `json:"verify-tls"` and `json:"signing-secret"` — hyphenated — while the webhook
-// service documents and reads `verify_tls` and `signing_secret` (confirmed against
-// the API's openapi_definitions/v2_endpoints/webhook/schemas.yaml). The
+// `json:"verify-tls"` and `json:"signing-secret"` — hyphenated — while the API
+// documents and reads `verify_tls` and `signing_secret`. The
 // API ignores keys it does not recognize, so while the resource was built on the
 // SDK every webhook it created had **no signing secret at all**, no matter what the
 // practitioner configured, and TLS verification silently took the server default.

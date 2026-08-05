@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral/schema"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -36,10 +38,13 @@ import (
 // files by Terraform itself — that guarantee is the entire reason this shape
 // exists, and it is also why there is no Close: see below.
 //
-// Usage export is v2 (the CircleCI API in the API, proxying to
-// the API) and is served on both CircleCI Cloud and CircleCI
-// Server, so unlike the v3-only resources in this provider it is not gated by
-// requireCloud.
+// Usage export is v2, which for a long time was taken here to mean it worked
+// on CircleCI Server too. It does not, and the API version was the wrong
+// thing to reason from: what matters is who owns the route's backend.
+// CircleCI Server's gateway does route both usage export paths, but Server
+// does not deploy the backend that serves them, and is handed a placeholder
+// upstream instead. The routes therefore exist on Server and cannot succeed
+// there. See requireUsageExportCloud.
 const (
 	// usageExportPollInterval is how often Open re-checks a job's status.
 	//
@@ -65,6 +70,51 @@ const (
 // tests shorten it so the poll-loop-terminates test does not have to run for
 // several real minutes.
 var usageExportPollIntervalVar = usageExportPollInterval
+
+// usageExportTypeName is used in diagnostics, including the Cloud-only error.
+const usageExportTypeName = "circleci_usage_export"
+
+// requireUsageExportCloud refuses CircleCI Server.
+//
+// This is not requireCloud from configure.go, for one reason: that function's
+// message says the type "is backed by the CircleCI v3 API, which is not available
+// on CircleCI Server", and here that would be false in a way that matters. Usage
+// export is v2, Server routes it, and a practitioner told otherwise would go
+// looking for a version problem that is not there. The real reason is that Server
+// does not run the service behind the route, so the message says that instead.
+//
+// It takes typeName as its second argument even though it serves exactly one
+// type, so that availability_test.go's AST scan can read the gated type name out
+// of the call site the way it does for the two gates in configure.go and
+// standalone_only.go. That test is what stops this type's `## Availability` table
+// from drifting back to claiming Server support, and a gate it cannot see is a
+// page nothing checks -- which is how the wrong verdict survived here in the
+// first place.
+func requireUsageExportCloud(client *circleci.Client, typeName string, diags *diag.Diagnostics) bool {
+	// An unconfigured client is not a Server client, and it is not this gate's
+	// business either: Open dereferences it a few lines later regardless, so
+	// answering true here leaves that path exactly as it was rather than turning a
+	// provider-wiring bug into a misleading deployment diagnostic.
+	if client == nil || client.IsCloud() {
+		return true
+	}
+
+	diags.AddError(
+		typeName+" requires CircleCI Cloud",
+		fmt.Sprintf(
+			"%s starts a usage export job, which CircleCI Server cannot run: the export is produced "+
+				"by a reporting service that CircleCI Server does not deploy. CircleCI Server does "+
+				"route the usage export API paths, so the request would be accepted and then fail "+
+				"inside CircleCI rather than returning a clean 404 -- which is why this is refused "+
+				"here instead.\n\n"+
+				"The provider is configured with deployment = %q for host %q. Remove this ephemeral "+
+				"resource from configurations that target CircleCI Server.",
+			typeName, string(client.Deployment()), client.Host(),
+		),
+	)
+
+	return false
+}
 
 // Ensure the implementation satisfies the expected interfaces.
 var (
@@ -117,7 +167,11 @@ func (e *usageExportEphemeralResource) Schema(_ context.Context, _ ephemeral.Sch
 			"file, which is what an ephemeral resource guarantees.\n\n" +
 			"`Open` creates the job and polls it to completion; there is no `Close`, because there is " +
 			"nothing to clean up — the job and its export artifacts are retained by CircleCI on their own " +
-			"schedule regardless of what this ephemeral resource does.",
+			"schedule regardless of what this ephemeral resource does.\n\n" +
+			"~> **CircleCI Cloud only.** Unlike this provider's other Cloud-only types this one is not " +
+			"v3, and CircleCI Server does route its paths — but Server does not run the reporting " +
+			"service that produces the export, so a request there is accepted and then fails inside " +
+			"CircleCI. Using this with `deployment = \"server\"` reports an error instead.",
 		Attributes: map[string]schema.Attribute{
 			// An ephemeral resource holds no state, so there is nothing to replace
 			// and no prior value to retain: both names are plain Optional, with
@@ -125,17 +179,27 @@ func (e *usageExportEphemeralResource) Schema(_ context.Context, _ ephemeral.Sch
 			"organization_id": deprecatedOrgIDEphemeralAttribute("the usage data being exported"),
 			"org_id":          orgIDEphemeralAttribute("the usage data being exported"),
 			"start": schema.StringAttribute{
-				Required:            true,
-				MarkdownDescription: "Start of the export window, as an RFC 3339 timestamp (e.g. `\"2024-01-01T00:00:00Z\"`).",
+				Required: true,
+				MarkdownDescription: "Start of the export window, as an RFC 3339 timestamp (e.g. " +
+					"`\"2024-01-01T00:00:00Z\"`). CircleCI refuses a `start` more than 366 days in the " +
+					"past, or in the future.",
 			},
 			"end": schema.StringAttribute{
-				Required:            true,
-				MarkdownDescription: "End of the export window, as an RFC 3339 timestamp.",
+				Required: true,
+				MarkdownDescription: fmt.Sprintf(
+					"End of the export window, as an RFC 3339 timestamp. CircleCI caps a single export at "+
+						"%s and refuses an `end` before `start` or in the future; both of the first two are "+
+						"checked before any request is made. Split a wider range across several exports.",
+					circleci.UsageExportMaxWindow,
+				),
 			},
 			"shared_org_ids": schema.ListAttribute{
-				ElementType:         types.StringType,
-				Optional:            true,
-				MarkdownDescription: "UUIDs of additional organizations that share billing with `org_id`, to include in the export.",
+				ElementType: types.StringType,
+				Optional:    true,
+				MarkdownDescription: "UUIDs of additional organizations that share billing with `org_id`, " +
+					"to include in the export. CircleCI honours this rather than ignoring it, but rejects " +
+					"the whole request if any entry is not a UUID, without saying which — so entries are " +
+					"checked here first.",
 			},
 			"poll_timeout": schema.StringAttribute{
 				Optional: true,
@@ -164,10 +228,15 @@ func (e *usageExportEphemeralResource) Schema(_ context.Context, _ ephemeral.Sch
 				ElementType: types.StringType,
 				Computed:    true,
 				Sensitive:   true,
-				MarkdownDescription: "Signed URLs the export's data can be downloaded from. Marked sensitive " +
-					"because each URL itself grants access to the data — anyone holding the URL can download " +
-					"it, with no further authentication. Because this is ephemeral data, these URLs are never " +
-					"written to a state or plan file.",
+				MarkdownDescription: fmt.Sprintf(
+					"Signed URLs the export's data can be downloaded from. Marked sensitive because each "+
+						"URL itself grants access to the data — anyone holding the URL can download it, with "+
+						"no further authentication. Because this is ephemeral data, these URLs are never "+
+						"written to a state or plan file.\n\n"+
+						"Each URL is minted at the moment the job was observed to be complete and is valid "+
+						"for %s from then, so consume them within the same run rather than passing them on.",
+					circleci.UsageExportURLValidity,
+				),
 			},
 		},
 	}
@@ -198,24 +267,23 @@ func (e *usageExportEphemeralResource) ConfigValidators(_ context.Context) []eph
 // not to whether this ephemeral resource instance is later closed. Once
 // created, the job simply exists; Close would have nothing to do.
 func (e *usageExportEphemeralResource) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {
+	if !requireUsageExportCloud(e.client, usageExportTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var config usageExportEphemeralModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	if _, err := time.Parse(time.RFC3339, config.Start.ValueString()); err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("start"),
-			"Invalid start timestamp",
-			fmt.Sprintf("start %q is not an RFC 3339 timestamp: %s", config.Start.ValueString(), err),
-		)
+	start, ok := parseUsageExportTimestamp(config.Start, "start", &resp.Diagnostics)
+	end, endOK := parseUsageExportTimestamp(config.End, "end", &resp.Diagnostics)
+	if !ok || !endOK {
+		return
 	}
-	if _, err := time.Parse(time.RFC3339, config.End.ValueString()); err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("end"),
-			"Invalid end timestamp",
-			fmt.Sprintf("end %q is not an RFC 3339 timestamp: %s", config.End.ValueString(), err),
-		)
-	}
+
+	validateUsageExportWindow(start, end, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -237,6 +305,11 @@ func (e *usageExportEphemeralResource) Open(ctx context.Context, req ephemeral.O
 	var sharedOrgIDs []string
 	if !config.SharedOrgIDs.IsNull() {
 		resp.Diagnostics.Append(config.SharedOrgIDs.ElementsAs(ctx, &sharedOrgIDs, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		validateUsageExportSharedOrgIDs(sharedOrgIDs, &resp.Diagnostics)
 		if resp.Diagnostics.HasError() {
 			return
 		}
@@ -357,4 +430,83 @@ func (e *usageExportEphemeralResource) awaitTerminal(
 // polling at.
 func isTerminalUsageExportState(state string) bool {
 	return state == circleci.UsageExportJobStateCompleted || state == circleci.UsageExportJobStateFailed
+}
+
+// parseUsageExportTimestamp parses one bound of the export window.
+//
+// The service binds both bounds into a time.Time and reports any failure as one
+// unattributed "malformed request body", so parsing here is what makes it
+// possible to say which of the two was wrong.
+func parseUsageExportTimestamp(value types.String, name string, diagnostics *diag.Diagnostics) (time.Time, bool) {
+	parsed, err := time.Parse(time.RFC3339, value.ValueString())
+	if err != nil {
+		diagnostics.AddAttributeError(path.Root(name),
+			"Invalid "+name+" timestamp",
+			fmt.Sprintf("%s %q is not an RFC 3339 timestamp: %s", name, value.ValueString(), err),
+		)
+
+		return time.Time{}, false
+	}
+
+	return parsed, true
+}
+
+// validateUsageExportWindow rejects the two window shapes the service refuses
+// that can be decided from the configuration alone.
+//
+// The service checks four things, and only these two are wall-clock independent:
+// end before start, and a window wider than UsageExportMaxWindow. The other two
+// -- start further back than UsageExportMaxAge, and either bound in the future --
+// depend on when the apply runs, so they are documented on the attributes rather
+// than enforced here. Enforcing them would mean this provider deciding what "now"
+// is, and disagreeing with CircleCI by a few seconds either way is worse than
+// letting CircleCI answer: a configuration refused here cannot be applied at all,
+// where one refused by CircleCI at least says so with its own message.
+func validateUsageExportWindow(start, end time.Time, diagnostics *diag.Diagnostics) {
+	if end.Before(start) {
+		diagnostics.AddAttributeError(path.Root("end"),
+			"Export window ends before it starts",
+			fmt.Sprintf(
+				"end (%s) is before start (%s). CircleCI refuses this window rather than treating it "+
+					"as an empty export.",
+				end.Format(time.RFC3339), start.Format(time.RFC3339),
+			),
+		)
+
+		return
+	}
+
+	if end.Sub(start) > circleci.UsageExportMaxWindow {
+		diagnostics.AddAttributeError(path.Root("end"),
+			"Export window is too wide",
+			fmt.Sprintf(
+				"start (%s) to end (%s) is %s, and CircleCI caps a single usage export at %s. Split "+
+					"the range across several exports.",
+				start.Format(time.RFC3339), end.Format(time.RFC3339),
+				end.Sub(start), circleci.UsageExportMaxWindow,
+			),
+		)
+	}
+}
+
+// validateUsageExportSharedOrgIDs rejects a shared organization id that is not a
+// UUID.
+//
+// The service binds this field to a slice of UUIDs, so one bad entry fails the
+// whole request body with the same unattributed "malformed request body" a bad
+// timestamp gives -- naming neither the field nor the entry. Checking here is the
+// only way a practitioner learns which id was wrong.
+func validateUsageExportSharedOrgIDs(sharedOrgIDs []string, diagnostics *diag.Diagnostics) {
+	for i, id := range sharedOrgIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			diagnostics.AddAttributeError(path.Root("shared_org_ids").AtListIndex(i),
+				"Invalid shared organization id",
+				fmt.Sprintf(
+					"shared_org_ids[%d] is %q, which is not a UUID. CircleCI rejects the whole request "+
+						"body when any entry is not a UUID, without naming the offending one.",
+					i, id,
+				),
+			)
+		}
+	}
 }

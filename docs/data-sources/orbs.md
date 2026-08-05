@@ -13,7 +13,15 @@ Each entry carries only what the orb collection returns. The collection is genui
 
 Note that omitting `certified` is not the same as setting it to `false`: omitting it leaves the filter off entirely and lets the API choose, while `false` explicitly asks for uncertified orbs. Private orbs are not returned unless `visibility = "private"` is set.
 
-~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI Server does not route to the public API service. Using this data source against a provider configured with `deployment = "server"` fails with an explicit error.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
+| **API** | `GET /api/v3/orb/packages` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token. Listing an organization's private orbs requires membership of it. |
 
 ## Example Usage
 
@@ -44,10 +52,16 @@ output "our_orb_names" {
 
 ### Optional
 
-- `certified` (Boolean) Set to `true` to return only CircleCI-certified orbs, or `false` to exclude them. Omit to let the API decide, which is not the same as `false`.
+- `certified` (Boolean) Set to `true` to return only CircleCI-certified orbs.
+
+The API reads `false` as "no certification filter", exactly as if the attribute were omitted, so it cannot be used to *exclude* certified orbs. It is also ignored when `namespace_id` or `name` is set.
 - `name` (String) Only return orbs matching this fully qualified `<namespace>/<orb>` name.
+
+This is an exact lookup that the API serves on its own, so setting it makes `namespace_id`, `certified` and `visibility` have no effect. It does find a private orb without being asked to.
 - `namespace_id` (String) Only return orbs in this namespace (UUID).
-- `visibility` (String) Restrict the listing to `public` or `private` orbs. Private orbs are not returned unless asked for.
+- `visibility` (String) Restrict the listing to `public` or `private` orbs.
+
+~> This is only honoured together with `namespace_id`, and it *selects* one set rather than widening the other: a namespace listing returns public orbs only, unless `visibility = "private"` makes it return private orbs only. There is no single request that returns both. Set without `namespace_id` it has no effect at all.
 
 ### Read-Only
 

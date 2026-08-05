@@ -9,11 +9,15 @@ description: |-
 
 Manages an OTLP exporter: where CircleCI sends OpenTelemetry traces for an organization's pipelines.
 
-Works on **CircleCI Cloud**. Server availability is **unverified**: the route is v2, which
-Server does serve in general, but that is not sufficient evidence on its own — a Server
-installation only routes a subset of paths to the service behind this endpoint, which is
-why `circleci_pipeline_definition` is v2 and yet unavailable there. No Server installation
-has been available to settle it.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | **No.** The provider gates this and reports an explicit error rather than attempting the request. Settled by route ownership rather than API version: `/api/v2/otel` is proxied to a backend that a CircleCI Server installation does not deploy, and its gateway has no route for this path either. Note that being v2 is not evidence either way on its own: some v2 routes are forwarded by a Server installation's gateway and others are not — `circleci_pipeline_definition` is v2 and unavailable, while the URL orb allow list is v2 and available. |
+| **API** | `GET` and `POST /api/v2/otel/exporters`, `PATCH` and `DELETE /api/v2/otel/exporters/{id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
 
 !> **Experimental.** CircleCI flags the OTLP exporter endpoints as experimental. Their request and response shapes may change, or they may be withdrawn, without the deprecation notice the rest of the v2 API carries. Pin the provider version if that matters to you.
 

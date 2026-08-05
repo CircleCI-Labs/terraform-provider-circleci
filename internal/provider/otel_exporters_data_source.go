@@ -56,7 +56,8 @@ func (d *otelExportersDataSource) Schema(_ context.Context, _ datasource.SchemaR
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every OTLP exporter configured for a CircleCI organization, " +
 			"including exporters created outside Terraform. " +
-			"Available on CircleCI Cloud and CircleCI Server.\n\n" +
+			"**CircleCI Cloud only**, for the reason given on `circleci_otel_exporter`: the route is " +
+			"`/api/v2`, but the service behind it is not part of a CircleCI Server installation.\n\n" +
 			otelExperimentalNote + "\n\n" +
 			"~> **Header values are not returned.** CircleCI encrypts them at rest and reports every " +
 			"value as `" + circleci.OTelRedactedHeaderValue + "`. Only the header names are usable.",
@@ -79,8 +80,9 @@ func (d *otelExportersDataSource) Schema(_ context.Context, _ datasource.SchemaR
 							Computed:            true,
 						},
 						"endpoint": schema.StringAttribute{
-							MarkdownDescription: "The OTLP endpoint spans are sent to, as `host:port`.",
-							Computed:            true,
+							MarkdownDescription: "Where CircleCI sends spans: either a bare `host:port` " +
+								"or an `http://`/`https://` URL.",
+							Computed: true,
 						},
 						"protocol": schema.StringAttribute{
 							MarkdownDescription: "The OTLP transport: `" + circleci.OTelProtocolGRPC +
@@ -121,6 +123,12 @@ func (d *otelExportersDataSource) ConfigValidators(_ context.Context) []datasour
 }
 
 func (d *otelExportersDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
+	// Cloud only: the service that owns /api/v2/otel is not part of a CircleCI
+	// Server installation. See otelExportersRoute in internal/circleci.
+	if d.client == nil || !requireCloud(d.client, "circleci_otel_exporters", &resp.Diagnostics) {
+		return
+	}
+
 	var config otelExportersDataSourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {

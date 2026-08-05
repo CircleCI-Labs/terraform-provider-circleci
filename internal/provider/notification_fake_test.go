@@ -43,6 +43,10 @@ type notificationFakePreference struct {
 	GroupID    string
 	GroupName  string
 	IsEnabled  bool
+	// SectionID and SectionName are empty for a row that belongs to no section,
+	// which the fake renders as the explicit JSON nulls the real API sends.
+	SectionID   string
+	SectionName string
 }
 
 // notificationFakeIntegration is one stored integration row.
@@ -173,9 +177,8 @@ func notificationFakeWriteJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// notificationFakeWriteError answers with the v3 error envelope
-// the API actually sends: {"error":{"id","title"}}, with no
-// "detail" field.
+// notificationFakeWriteError answers with the v3 error envelope the API
+// actually sends: {"error":{"id","title"}}, with no "detail" field.
 func notificationFakeWriteError(w http.ResponseWriter, status int, title string) {
 	notificationFakeWriteJSON(w, status, map[string]any{
 		"error": map[string]any{"id": "fake-trace", "title": title},
@@ -398,6 +401,26 @@ func (a *notificationFakeAPI) seedPreference(entityType, name, channel string, d
 	return id
 }
 
+// seedPreferenceInSection adds a catalog row that belongs to a section.
+//
+// Sections are the one part of a preference row that is optional upstream, and
+// therefore the one part a wrong json tag would leave permanently null without
+// any test noticing: seedPreference's rows have no section, so section_id and
+// section_name decode to nil on those whether the tags are right or not.
+func (a *notificationFakeAPI) seedPreferenceInSection(
+	entityType, name, channel, sectionID, sectionName string, defaultEnabled bool,
+) string {
+	id := a.seedPreference(entityType, name, channel, defaultEnabled)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.preferences[id].SectionID = sectionID
+	a.preferences[id].SectionName = sectionName
+
+	return id
+}
+
 func (a *notificationFakeAPI) preferenceEntity(p *notificationFakePreference, scope, userID, projectID, orgID string) map[string]any {
 	attrs := map[string]any{
 		"preference_name":          p.Name,
@@ -411,6 +434,27 @@ func (a *notificationFakeAPI) preferenceEntity(p *notificationFakePreference, sc
 		"group_experimental":       false,
 		"user_configurable":        true,
 		"is_enabled":               p.IsEnabled,
+	}
+
+	// The section fields carry no omitempty on the API, so they are always
+	// present on the wire and explicitly null for a row with no section — not
+	// omitted, as an earlier version of this fake had it. section_description
+	// and section_docs_ref are sent by the API but not modelled by this
+	// provider's client; they are included so the client is exercised against a
+	// response carrying fields it does not know about.
+	attrs["section_id"] = nil
+	attrs["section_name"] = nil
+	attrs["section_display_order"] = nil
+	attrs["section_experimental"] = nil
+	attrs["section_description"] = nil
+	attrs["section_docs_ref"] = nil
+	if p.SectionID != "" {
+		attrs["section_id"] = p.SectionID
+		attrs["section_name"] = p.SectionName
+		attrs["section_display_order"] = 4
+		attrs["section_experimental"] = true
+		attrs["section_description"] = "Notifications about releases"
+		attrs["section_docs_ref"] = "https://circleci.com/docs/deploy"
 	}
 
 	var refs map[string]any

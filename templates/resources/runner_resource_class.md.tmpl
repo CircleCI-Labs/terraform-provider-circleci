@@ -23,4 +23,4 @@ Import is supported using the resource class name in `namespace/name` format:
 terraform import circleci_runner_resource_class.example "my-namespace/my-runner"
 ```
 
-After import, Terraform will call the API to populate the full state. Note that `organization_id` is resolved from the resource class during the subsequent read.
+After import, Terraform calls the API to populate `id` and `description`. `organization_id`/`org_id` are **not** resolved this way and stay null: the runner API's resource class representation carries no organization field for a read to recover one from (the import ID is the resource class string alone, with no organization in it either). Supplying an organization in your configuration after import is a genuine, real one-time change — an in-place update, not a replacement, since this resource does not force replacement on an organization change — and it settles after the first apply. `force_delete` is also left null; it is delete-only behavior the API never reports, so nothing to resolve exists for it at all.

@@ -7,33 +7,64 @@ import "context"
 
 // Group membership routes.
 //
-// Membership hangs off the group routes, which are among the few paths a
-// CircleCI Server installation forwards to the public API service, so there is
-// no v3 variant and no UseV3 branch here. See group.go.
+// These are NOT the public /api/v2 group routes documented in group.go. Group
+// membership was briefly implemented against
+// "/organizations/{org}/groups/{id}/users" and "/remove_users" and then
+// removed: live-verified, those answer HTTP 404 for a group that demonstrably
+// exists, and the published spec confirms it with a per-route `servers:`
+// override pointing at a host reserved for internal traffic. See
+// API-COVERAGE.md.
 //
-// Note the asymmetry: there is no DELETE verb for a member. Removal is a POST to
-// a distinct /remove_users action, which is why Add and Remove take the same
-// body shape but different routes.
+// The routes that actually work are on the private origin (see private.go),
+// confirmed two ways: the org-migration CLI calls
+// POST /private/ciam/orgs/{orgID}/groups/{groupID}/add-users in production,
+// and the CircleCI web app's own "add members" / "remove members" buttons
+// call the sibling GET .../users (list) and POST .../delete-users (remove) on
+// the same family, pinning the request/response shapes below field for
+// field. This client targets the same paths on Client.PrivateHost(), the
+// origin the migration CLI verified against, rather than the web app's own,
+// separate edge.
+//
+// Every caller must gate on Client.IsCloud(); see requireStandaloneCapable in
+// the provider package, which also covers the narrower "circleci type
+// organization" requirement groups have on top of that.
 const (
-	groupMembersRoute       = "/organizations/%s/groups/%s/users"
-	groupRemoveMembersRoute = "/organizations/%s/groups/%s/remove_users"
+	groupMembersRoute       = "/private/ciam/orgs/%s/groups/%s/users"
+	groupAddMembersRoute    = "/private/ciam/orgs/%s/groups/%s/add-users"
+	groupDeleteMembersRoute = "/private/ciam/orgs/%s/groups/%s/delete-users"
 )
 
 // GroupMember is one user in a CircleCI group.
 //
-// Members are identified by user UUID, not by login or email: both the add and
-// the remove payloads take a "user_ids" array of UUIDs. Username and Email are
-// returned for display only and cannot be used to address a member.
+// Members are identified by user UUID, not by login or email: both the
+// add-users and delete-users payloads take a "user_ids" array of UUIDs.
+// Username, Email, AvatarURL and CreatedAt are returned for display only and
+// cannot be used to address a member. CreatedAt is kept as the string the API
+// sends (an RFC 3339 timestamp with microsecond precision, e.g.
+// "2023-12-13T10:10:37.951356Z") rather than parsed, the same choice
+// checkout_key.go makes and for the same reason: nothing here needs to do
+// arithmetic on it, so parsing would only add a failure mode.
 type GroupMember struct {
 	UserID    string `json:"user_id"`
 	Username  string `json:"username"`
 	AvatarURL string `json:"avatar_url"`
 	Email     string `json:"email"`
 	GroupID   string `json:"group_id"`
+	CreatedAt string `json:"created_at"`
 }
 
-// groupMembersRequest is the body of both the add and the remove call. The two
-// actions differ only in the route they post to.
+// groupMembersResponse mirrors GET .../groups/{groupID}/users. Unlike the
+// public route this replaced, there is no next_page_token in this response at
+// all — it carries only items and count — so there is no pagination trap to
+// guard against here: a single request is not a shortcut, it is the entire
+// contract.
+type groupMembersResponse struct {
+	Items []GroupMember `json:"items"`
+	Count int           `json:"count"`
+}
+
+// groupMembersRequest is the body of both the add-users and the delete-users
+// call. The two actions differ only in the route they post to.
 type groupMembersRequest struct {
 	UserIDs []string `json:"user_ids"`
 }
@@ -54,15 +85,9 @@ func (c *Client) GroupMembership() *GroupMembershipService {
 
 // List fetches the members of a group. The result is nil when the group has no
 // members.
-//
-// This deliberately issues a single request rather than draining pages. The
-// response carries a next_page_token, but the endpoint does not forward a
-// page-token to the service behind it, so requesting a later page returns the
-// first page again. Looping on that token would accumulate duplicates forever
-// rather than terminating, so the first page is all that can be read.
 func (s *GroupMembershipService) List(ctx context.Context, orgID, groupID string) ([]GroupMember, error) {
-	var page PaginatedResponse[GroupMember]
-	if err := s.client.GetV2(ctx, groupMembersRoute, &page, RouteParams(orgID, groupID)); err != nil {
+	var page groupMembersResponse
+	if err := s.client.GetPrivate(ctx, groupMembersRoute, &page, RouteParams(orgID, groupID)); err != nil {
 		return nil, err
 	}
 
@@ -78,9 +103,8 @@ func (s *GroupMembershipService) Add(ctx context.Context, orgID, groupID string,
 		return nil
 	}
 
-	// The response is a {"message": ...} acknowledgement carrying nothing worth
-	// recording, so it is not decoded.
-	return s.client.PostV2(ctx, groupMembersRoute, groupMembersRequest{UserIDs: userIDs}, nil,
+	// The response carries nothing worth recording, so it is not decoded.
+	return s.client.PostPrivate(ctx, groupAddMembersRoute, groupMembersRequest{UserIDs: userIDs}, nil,
 		RouteParams(orgID, groupID),
 	)
 }
@@ -93,7 +117,7 @@ func (s *GroupMembershipService) Remove(ctx context.Context, orgID, groupID stri
 		return nil
 	}
 
-	return s.client.PostV2(ctx, groupRemoveMembersRoute, groupMembersRequest{UserIDs: userIDs}, nil,
+	return s.client.PostPrivate(ctx, groupDeleteMembersRoute, groupMembersRequest{UserIDs: userIDs}, nil,
 		RouteParams(orgID, groupID),
 	)
 }

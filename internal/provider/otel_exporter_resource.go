@@ -5,7 +5,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -15,7 +17,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
@@ -33,16 +34,47 @@ var (
 	_ resource.ResourceWithConfigure        = &otelExporterResource{}
 	_ resource.ResourceWithImportState      = &otelExporterResource{}
 	_ resource.ResourceWithConfigValidators = &otelExporterResource{}
+	_ resource.ResourceWithValidateConfig   = &otelExporterResource{}
+	_ resource.ResourceWithModifyPlan       = &otelExporterResource{}
 )
 
 // otelExporterTypeName is the Terraform type name.
 const otelExporterTypeName = "circleci_otel_exporter"
 
-// otelEndpointPattern matches a bare OTLP endpoint: a host, optionally
-// bracketed for IPv6, optionally followed by a port. It exists to reject a
-// scheme or a path, which the API documents as invalid — turning what would be
-// an opaque HTTP 400 into a plan-time error.
-var otelEndpointPattern = regexp.MustCompile(`^[A-Za-z0-9._\-\[\]:]+$`)
+// otelEndpointPattern matches either form of endpoint the service that validates
+// the request accepts: a bare "host:port", or an http/https URL.
+//
+// It used to be `^[A-Za-z0-9._\-\[\]:]+$`, on the strength of the published
+// OpenAPI description — "Don't include https:// or grpc://. Just the hostname and
+// port are required." Reading the enforcing service shows that description is
+// incomplete in one direction and too loose in another:
+//
+//   - A URL endpoint IS accepted. ValidateEndpoint parses the value with net/url
+//     first and takes that branch whenever the scheme is http or https, and
+//     ValidateProtocol has a dedicated error for combining such an endpoint with
+//     grpc — a rule that could not exist if the form itself were invalid. The old
+//     pattern rejected, at plan time, a configuration the API would have accepted.
+//   - The port is NOT optional in the bare form. That branch is net.SplitHostPort,
+//     which fails outright on a value with no port, so "otel.example.com" was
+//     accepted here and then rejected as malformed by the API.
+//
+// A scheme other than http or https still matches neither branch there, so
+// "grpc://otel.example.com:4317" stays a plan-time error.
+var otelEndpointPattern = regexp.MustCompile(
+	`^(?:` +
+		// http/https URL: host, optional port, optional path.
+		`https?://[^\s/?#]+(?:/[^\s?#]*)?` +
+		`|` +
+		// Bare host and mandatory port, including a bracketed IPv6 literal.
+		`(?:[A-Za-z0-9._\-]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}` +
+		`)$`,
+)
+
+// otelEndpointDescription is the human half of otelEndpointPattern, shared by the
+// validator message and the attribute description so the two cannot disagree.
+const otelEndpointDescription = "must be either a bare host and port such as " +
+	`"otel.example.com:4317" (the port is required), or an http:// or https:// URL such as ` +
+	`"https://otel.example.com/v1/traces", which is only valid with protocol = "http"`
 
 // otelExperimentalNote is the experimental warning shared by the OTLP exporter
 // resource and data source. CircleCI marks these endpoints experimental, so they
@@ -65,7 +97,10 @@ type otelExporterResourceModel struct {
 	// the value is read from configuration by resolveOTelHeaders.
 	HeadersWO        types.Map   `tfsdk:"headers_wo"`
 	HeadersWOVersion types.Int64 `tfsdk:"headers_wo_version"`
-	Issues           types.List  `tfsdk:"issues"`
+	// HeadersWONames is populated only on the write-only path; see
+	// otel_exporter_write_only.go.
+	HeadersWONames types.Set  `tfsdk:"headers_wo_names"`
+	Issues         types.List `tfsdk:"issues"`
 }
 
 // NewOTelExporterResource is a helper function to simplify the provider implementation.
@@ -87,7 +122,10 @@ func (r *otelExporterResource) Metadata(_ context.Context, req resource.Metadata
 func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages an OTLP exporter: where CircleCI sends OpenTelemetry traces for an " +
-			"organization's pipelines. Available on CircleCI Cloud and CircleCI Server.\n\n" +
+			"organization's pipelines. **CircleCI Cloud only.** The route is `/api/v2`, but that is not " +
+			"enough here: CircleCI's public API service forwards it to a separate service, and a " +
+			"CircleCI Server installation neither runs that service nor routes to it, so the endpoint " +
+			"does not exist there. This is refused during `terraform plan` rather than at apply.\n\n" +
 			otelExperimentalNote + "\n\n" +
 			"~> **The API has no update route.** Every configurable attribute forces a new resource, so " +
 			"changing an endpoint, protocol or header destroys the exporter and creates a replacement " +
@@ -114,20 +152,20 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 			"organization_id": deprecatedOrgIDAttribute("this exporter", true),
 			"org_id":          orgIDAttribute("this exporter", true),
 			"endpoint": schema.StringAttribute{
-				MarkdownDescription: "The OTLP endpoint spans are sent to, as `host:port` — for example " +
-					"`otel.example.com:4317`. Do **not** include a scheme: `https://` or `grpc://` is " +
-					"rejected. Changing this value forces a new resource to be created.",
+				MarkdownDescription: "Where CircleCI sends spans. Two forms are accepted:\n\n" +
+					"- a bare host and port, such as `otel.example.com:4317` — the port is required; or\n" +
+					"- an `http://` or `https://` URL, such as `https://otel.example.com/v1/traces`, " +
+					"which is only valid together with `protocol = \"http\"`.\n\n" +
+					"Any other scheme, `grpc://` included, is rejected. The host must resolve publicly: " +
+					"CircleCI refuses an endpoint that resolves to a private, loopback or link-local " +
+					"address. Changing this value forces a new resource to be created.",
 				Required: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
 				Validators: []validator.String{
 					stringvalidator.LengthAtLeast(1),
-					stringvalidator.RegexMatches(
-						otelEndpointPattern,
-						"must be a bare host and port with no scheme and no path, "+
-							"e.g. \"otel.example.com:4317\"",
-					),
+					stringvalidator.RegexMatches(otelEndpointPattern, otelEndpointDescription),
 				},
 			},
 			"protocol": schema.StringAttribute{
@@ -147,14 +185,35 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 			},
 			"insecure": schema.BoolAttribute{
 				MarkdownDescription: "Whether to connect to the endpoint without transport security. " +
-					"Defaults to `false`. Leave it false unless the collector is reachable only over a " +
+					"CircleCI defaults this to `false`. Leave it false unless the collector is reachable only over a " +
 					"private network: headers, including any credentials, travel in the clear otherwise. " +
 					"Changing this value forces a new resource to be created.",
 				Optional: true,
 				Computed: true,
-				Default:  booldefault.StaticBool(false),
 				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.RequiresReplace(),
+					// RequiresReplaceIfConfigured rather than plain RequiresReplace: plain
+					// RequiresReplace fires on any planned-vs-state difference with no
+					// exception for an unknown planned value, so it would plan a spurious
+					// replacement whenever insecure's configured expression is itself
+					// unknown at plan time.
+					boolplanmodifier.RequiresReplaceIfConfigured(),
+
+					// UseStateForUnknown, and deliberately NO Default, because the two
+					// together crashed apply. With a Default, the framework overwrites the
+					// planned value whenever the *config* value is null — it never consults
+					// prior state — so removing `insecure = true` from a configuration
+					// planned insecure as false. RequiresReplaceIfConfigured then declined
+					// to fire (the config value being null is exactly its bail-out
+					// condition), so it planned an in-place update; Update is a no-op
+					// because the API has no update route, leaving true in state against a
+					// plan of false: "Provider produced inconsistent result after apply".
+					//
+					// Without the Default, an omitted insecure plans as unknown and resolves
+					// to the value already in state, which is the ordinary
+					// Optional+Computed meaning of "not configured" — leave it alone. The
+					// API's own default is still false; that is stated in the description
+					// rather than enforced here.
+					boolplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"headers": schema.MapAttribute{
@@ -182,6 +241,7 @@ func (r *otelExporterResource) Schema(_ context.Context, _ resource.SchemaReques
 			// Conflicting with `headers` rather than ExactlyOneOf against it.
 			"headers_wo":         otelHeadersWriteOnlyAttribute(),
 			"headers_wo_version": otelHeadersWriteOnlyVersionAttribute(),
+			"headers_wo_names":   otelHeadersWriteOnlyNamesAttribute(),
 			"issues": schema.ListAttribute{
 				MarkdownDescription: "Validation problems CircleCI has detected with this exporter, such " +
 					"as an endpoint that no longer resolves. Empty when there are none.",
@@ -204,8 +264,79 @@ func (r *otelExporterResource) ConfigValidators(_ context.Context) []resource.Co
 	}
 }
 
+// ValidateConfig refuses a URL-style endpoint combined with `protocol = "grpc"`.
+//
+// The rule belongs to the API — "protocol must be 'http' when endpoint starts with
+// http:// or https://" — and cannot be expressed as an attribute validator,
+// because it depends on two attributes at once. ValidateConfig runs before the
+// plan and needs no client, so this is the earliest place it can be caught; the
+// alternative is an HTTP 400 mid-apply.
+func (r *otelExporterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config otelExporterResourceModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// A value that is null or still unknown (an interpolation of something not yet
+	// created) cannot be checked here; the API rejects it if it turns out wrong.
+	if config.Endpoint.IsNull() || config.Endpoint.IsUnknown() ||
+		config.Protocol.IsNull() || config.Protocol.IsUnknown() {
+		return
+	}
+
+	endpoint := config.Endpoint.ValueString()
+	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		return
+	}
+
+	if config.Protocol.ValueString() == circleci.OTelProtocolHTTP {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		path.Root("protocol"),
+		"Invalid protocol for a URL endpoint",
+		fmt.Sprintf(
+			"protocol must be %q when endpoint is an http:// or https:// URL, but it is %q and "+
+				"endpoint is %q.\n\nUse a bare host and port such as \"otel.example.com:4317\" for "+
+				"%s, or set protocol = %q for this endpoint.",
+			circleci.OTelProtocolHTTP, config.Protocol.ValueString(), endpoint,
+			circleci.OTelProtocolGRPC, circleci.OTelProtocolHTTP,
+		),
+	)
+}
+
+// ModifyPlan gates the resource on CircleCI Cloud at plan time.
+//
+// The route is /api/v2, but v2 is not sufficient here: /api/v2/otel is a
+// pass-through to a backend CircleCI Server neither deploys nor routes to —
+// see otelExportersRoute in internal/circleci. Without this gate
+// `terraform plan` succeeds against a Server host and the create fails with a
+// 404 mid-apply. Destroy is exempt, so a resource stranded in state by a
+// deployment change stays removable.
+//
+// requireCloud's message says "backed by the CircleCI v3 API", which is not the
+// reason in this case; `circleci_audit_log_config` is gated with the same
+// approximation for the same kind of reason.
+func (r *otelExporterResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if r.client == nil || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	requireCloud(r.client, otelExporterTypeName, &resp.Diagnostics)
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	// r.client != nil rather than the usual "r.client == nil || !requireCloud":
+	// returning early on an unconfigured client would make Create a silent no-op,
+	// and the schema-level diagnostics below are more use than that.
+	if r.client != nil && !requireCloud(r.client, otelExporterTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var plan otelExporterResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
@@ -255,6 +386,14 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 	plan.Protocol = types.StringValue(exporter.Protocol)
 	plan.Insecure = types.BoolValue(exporter.Insecure)
 
+	headerNames, diags := otelHeadersWriteOnlyNamesAfterCreate(ctx, plan.HeadersWOVersion, exporter.Headers)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	plan.HeadersWONames = headerNames
+
 	issues, diags := otelIssuesValue(ctx, exporter.Issues)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
@@ -268,6 +407,10 @@ func (r *otelExporterResource) Create(ctx context.Context, req resource.CreateRe
 
 // Read refreshes the Terraform state with the latest data.
 func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	if r.client != nil && !requireCloud(r.client, otelExporterTypeName, &resp.Diagnostics) {
+		return
+	}
+
 	var state otelExporterResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
@@ -278,11 +421,37 @@ func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadReques
 
 	exporter, err := r.client.GetOTelExporter(ctx, orgID, state.ID.ValueString())
 	if err != nil {
-		// The API has no single-exporter route, so a missing exporter surfaces as
-		// an absence from the organization's list rather than a 404. IsNotFound
-		// covers both.
-		if circleci.IsNotFound(err) {
+		// The API has no single-exporter route, so a missing exporter surfaces as an
+		// absence from the organization's list. Only that absence — the ErrNotFound
+		// sentinel — may drop the resource from state.
+		//
+		// A *transport* 404 from the list must not, even though IsNotFound would say
+		// yes to it: the list route answers 404 "Org not found" both for an
+		// organization that does not exist and for a token that cannot manage the one
+		// that does. Dropping state there would have the next apply create a second
+		// exporter alongside the live one, against a limit of
+		// circleci.OTelExporterLimit — so a token losing a permission would silently
+		// duplicate an exporter and then start failing at the limit. Report it
+		// instead and leave state alone.
+		if errors.Is(err, circleci.ErrNotFound) {
 			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
+		if circleci.HasStatus(err, http.StatusNotFound) {
+			resp.Diagnostics.AddError(
+				"Error reading CircleCI OTLP exporter",
+				fmt.Sprintf(
+					"CircleCI answered 404 for organization %s while reading OTLP exporter %s. The "+
+						"exporter itself is read by listing the organization's exporters, so this is "+
+						"about the organization, not the exporter: either organization %s does not "+
+						"exist, or the API token cannot manage it.\n\n"+
+						"%s has been left in Terraform state, because removing it would create a "+
+						"second exporter on the next apply while the first one is still live.",
+					orgID, state.ID.ValueString(), orgID, otelExporterTypeName,
+				),
+			)
 
 			return
 		}
@@ -303,7 +472,9 @@ func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadReques
 	state.Protocol = types.StringValue(exporter.Protocol)
 	state.Insecure = types.BoolValue(exporter.Insecure)
 
-	headers, diags := otelHeadersAfterRead(ctx, state.Headers, state.HeadersWOVersion, exporter.Headers)
+	headers, headerNames, diags := otelHeadersAfterRead(
+		ctx, state.Headers, state.HeadersWONames, state.HeadersWOVersion, exporter.Headers,
+	)
 	resp.Diagnostics.Append(diags...)
 
 	issues, diags := otelIssuesValue(ctx, exporter.Issues)
@@ -313,6 +484,7 @@ func (r *otelExporterResource) Read(ctx context.Context, req resource.ReadReques
 	}
 
 	state.Headers = headers
+	state.HeadersWONames = headerNames
 	state.Issues = issues
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -326,6 +498,10 @@ func (r *otelExporterResource) Update(_ context.Context, _ resource.UpdateReques
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
+//
+// Deliberately not gated on requireCloud, unlike Create and Read: an exporter
+// left in state after `deployment` changed to "server" must stay removable. See
+// DESIGN.md, "Cloud-only gating happens at plan time".
 func (r *otelExporterResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state otelExporterResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)

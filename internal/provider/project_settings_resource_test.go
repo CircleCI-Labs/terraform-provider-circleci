@@ -131,52 +131,32 @@ func (f *fakeProjectSettingsAPI) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 // patch merges the request body into the held settings, the way the real API
 // applies a partial update, and answers with the full settings.
+//
+// Validation and merge semantics both live in project_fake_test.go, shared with
+// the other settings fake so the two cannot drift on what "the API" means: see
+// settingsPatchBody for which bodies are rejected and applySettingsPatch for the
+// two things the real route does to pr_only_branch_overrides.
 func (f *fakeProjectSettingsAPI) patch(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Advanced map[string]any `json:"advanced"`
-	}
+	var raw map[string]any
 
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		f.write(w, http.StatusBadRequest, map[string]string{"message": "Invalid JSON body."})
 
 		return
 	}
 
-	if len(body.Advanced) == 0 {
-		// The real API rejects an update that carries no fields, so a provider
-		// that sends one must fail the test rather than quietly succeed.
-		f.write(w, http.StatusBadRequest, map[string]string{"message": "No JSON fields found."})
+	advanced, message, accepted := settingsPatchBody(raw)
+	if advanced != nil {
+		// Recorded even when rejected, so a test can assert on what was sent.
+		f.patches = append(f.patches, advanced)
+	}
+	if !accepted {
+		f.write(w, http.StatusBadRequest, map[string]string{"message": message})
 
 		return
 	}
 
-	f.patches = append(f.patches, body.Advanced)
-
-	// oss is read-only on v2 and the API rejects the entire request when it is
-	// present, rather than ignoring the one field — verified live:
-	//
-	//	PATCH /api/v2/project/{slug}/settings  {"advanced":{"oss":false}}
-	//	→ 400  {"message":"Unexpected field 'advanced.oss'."}
-	//
-	// This fake previously accepted oss and modelled CircleCI as silently ignoring
-	// it, which let the provider send a field that failed every real request.
-	if _, ok := body.Advanced["oss"]; ok {
-		f.write(w, http.StatusBadRequest, map[string]string{"message": "Unexpected field 'advanced.oss'."})
-
-		return
-	}
-
-	for key, value := range body.Advanced {
-		// pr_only_branch_overrides is unordered on the API and comes back in an
-		// order of its own; see reorderedLikeTheAPI in
-		// webhook_resource_fake_test.go. Reordering it here is what makes an
-		// order-sensitive regression fail rather than pass.
-		if key == "pr_only_branch_overrides" {
-			value = reorderedLikeTheAPI(value)
-		}
-
-		f.current[key] = value
-	}
+	applySettingsPatch(f.current, advanced)
 
 	f.write(w, http.StatusOK, map[string]any{"advanced": f.current})
 }
@@ -421,47 +401,47 @@ func TestProjectSettingsResourceCreateSendsEveryConfiguredSetting(t *testing.T) 
 	}
 }
 
-// TestProjectSettingsResourceCreateWithEmptyBranchOverrides checks that an
-// explicitly empty list is still sent. Sending [] is the only way to clear the
-// overrides a project already has, so it must not be treated as "unset".
-func TestProjectSettingsResourceCreateWithEmptyBranchOverrides(t *testing.T) {
-	t.Parallel()
+// TestProjectSettingsResourceCreateWithEmptyBranchOverrides used to document a
+// defect live-verified against the real API: `pr_only_branch_overrides = []`
+// reached apply, got a 200 back, and silently kept the branches already
+// configured, so Terraform failed with "Provider produced inconsistent result
+// after apply" — a message naming no attribute and no cause.
+//
+// That is now rejected at plan time by noClearingBranchOverridesValidator
+// (project_settings_resource.go), before anything is sent, which is exactly the
+// resolution this test's previous comment asked for. See
+// TestProjectSettingsResourceUnit_RejectsEmptyBranchOverrides for the replacement
+// assertion, and internal/circleci/project_settings.go's
+// ErrCannotClearBranchOverrides for the client-level guard this backs up: that
+// guard still exists as a defence in depth for any caller that reaches
+// UpdateProjectSettings directly, bypassing the schema validator entirely.
+func TestProjectSettingsResourceUnit_RejectsEmptyBranchOverrides(t *testing.T) {
+	api, host := startFakeProjectSettingsAPI(t)
 
-	api, client := newFakeProjectSettingsAPI(t)
-	api.set("pr_only_branch_overrides", []any{"main"})
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProjectSettingsResourceConfig(host, `  pr_only_branch_overrides = []`),
+				ExpectError: regexp.MustCompile(
+					`(?s)Cannot clear pr_only_branch_overrides.*does not support clearing`,
+				),
+			},
+		},
+	})
 
-	overrides, diags := types.SetValueFrom(t.Context(), types.StringType, []string{})
-	if diags.HasError() {
-		t.Fatalf("could not build the branch override list: %+v", diags)
-	}
-
-	plan := projectSettingsModel(testProjectSettingsSlug)
-	plan.PROnlyBranchOverrides = overrides
-
-	state, resp := createProjectSettings(t, client, plan)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Create diagnostics: %+v", resp.Diagnostics)
-	}
-
-	body := api.onlyPatch(t)
-	assertPatchKeys(t, body, "pr_only_branch_overrides")
-
-	branches, ok := body["pr_only_branch_overrides"].([]any)
-	if !ok {
-		t.Fatalf("pr_only_branch_overrides sent as %T, want a list", body["pr_only_branch_overrides"])
-	}
-	if len(branches) != 0 {
-		t.Errorf("pr_only_branch_overrides sent as %v, want an empty list", branches)
-	}
-
-	if elements := state.PROnlyBranchOverrides.Elements(); len(elements) != 0 {
-		t.Errorf("pr_only_branch_overrides in state = %v, want empty", elements)
+	if requests := api.recordedRequests(); len(requests) != 0 {
+		t.Errorf("got requests %v, want none: the configuration never passed validation", requests)
 	}
 }
 
 // TestProjectSettingsResourceCreateWithNoSettings covers a resource that names
-// only a project. There is nothing to write, and the API rejects a body with no
-// fields, so no request must be sent.
+// only a project. There is nothing to write, so no request must be sent.
+//
+// Note that `{"advanced":{}}` is not expected to be *rejected* — the API answers
+// 200 with the current settings. That is expected rather than observed. Skipping the
+// request is an optimisation, and the assertion is on the requests made rather
+// than on a status code, so it holds either way.
 func TestProjectSettingsResourceCreateWithNoSettings(t *testing.T) {
 	t.Parallel()
 
@@ -1012,4 +992,61 @@ func TestAccProjectSettingsResource(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestProjectSettingsResourceUnit_ImportRoundTrips is the genuine round-trip
+// proof that TestAccProjectSettingsResource's own import step disclaims:
+// that step imports into a state built by a config managing three settings, so
+// it can never match (import always leaves every setting null) and disables
+// ImportStateVerify rather than hide that mismatch behind an ignore list.
+//
+// The honest round trip this resource supports is narrower: a configuration
+// that manages *nothing* (only `slug`) is exactly what `terraform
+// plan -generate-config-out` would produce from an import, because every
+// setting attribute is null and Optional-only, so a generated config omits
+// them. Applying that trivial config, importing the same slug into a fresh
+// state, and replanning the same trivial config must all agree — which is
+// what this test proves, with no ImportStateVerifyIgnore at all.
+func TestProjectSettingsResourceUnit_ImportRoundTrips(t *testing.T) {
+	_, host := startFakeProjectSettingsAPI(t)
+
+	trivialConfig := testProjectSettingsResourceConfig(host, "")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// Manages no setting at all: Create only tracks the slug.
+				Config: trivialConfig,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_project_settings.test",
+						tfjsonpath.New("auto_cancel_builds"),
+						knownvalue.Null(),
+					),
+				},
+			},
+			{
+				// A fresh state, imported by slug alone — no ignores, because a
+				// config this trivial is exactly what import itself produces.
+				//
+				// This resource has no "id" attribute (slug is what identifies it,
+				// hence the RequiresReplace on slug rather than on some separate
+				// id), so the identifier attribute must be named explicitly.
+				ResourceName:                         "circleci_project_settings.test",
+				ImportState:                          true,
+				ImportStateId:                        testProjectSettingsSlug,
+				ImportStateVerify:                    true,
+				ImportStateVerifyIdentifierAttribute: "slug",
+			},
+			{
+				// The same trivial config, replanned against the freshly imported
+				// state: the plan must be empty, which is the whole point of a
+				// round trip.
+				Config:             trivialConfig,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
 }

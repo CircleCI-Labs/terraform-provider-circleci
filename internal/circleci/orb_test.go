@@ -45,10 +45,18 @@ const (
 		}
 	}],"page":{"next":null,"prev":null}}`
 
+	// orbVersionEntity is what every orb version route actually answers with.
+	//
+	// references.orb_package has an id and no attributes. That is not an omission
+	// in the fixture: the API renders the orb reference's attributes object only
+	// when it has an orb name to put there, and the version records it renders
+	// from never carry one. attributes.source is absent for the same reason — the
+	// by-id route includes it only when explicitly asked, which the client does
+	// not do.
 	orbVersionEntity = `{"data":{
 		"id":"44444444-4444-4444-4444-444444444444",
 		"attributes":{"version":"1.2.3","created_at":"2026-02-02T00:00:00Z"},
-		"references":{"orb_package":{"id":"33333333-3333-3333-3333-333333333333","attributes":{"name":"acme/node"}}}
+		"references":{"orb_package":{"id":"33333333-3333-3333-3333-333333333333"}}
 	}}`
 
 	orbEmptyList = `{"data":[],"page":{"next":null,"prev":null}}`
@@ -259,17 +267,18 @@ func TestGetOrbPackageByNameEmptyListIsNotFound(t *testing.T) {
 		t.Errorf("err = %v, want it to name the orb", err)
 	}
 
-	// A private orb is invisible to an unfiltered listing, so the miss is retried
-	// asking for private orbs before it is reported as not found.
+	// One request, with no visibility filter. filter[name] is served by a by-name
+	// lookup that runs before the handler reads filter[visibility] at all, and
+	// that lookup is not restricted to public orbs — so retrying with
+	// filter[visibility]=private would repeat the identical request and learn
+	// nothing. The fake used to filter private orbs out of every listing, which
+	// made the retry look load-bearing.
 	all := rec.all()
-	if len(all) != 2 {
-		t.Fatalf("requests = %d, want 2 (public then private)", len(all))
+	if len(all) != 1 {
+		t.Fatalf("requests = %d, want 1: the by-name lookup ignores filter[visibility]", len(all))
 	}
 	if strings.Contains(all[0].query, "visibility") {
-		t.Errorf("first query = %q, want no visibility filter", all[0].query)
-	}
-	if want := "filter%5Bvisibility%5D=private"; !strings.Contains(all[1].query, want) {
-		t.Errorf("second query = %q, want it to contain %q", all[1].query, want)
+		t.Errorf("query = %q, want no visibility filter alongside filter[name]", all[0].query)
 	}
 }
 
@@ -435,7 +444,10 @@ func TestValidateOrbYAMLOmitsEmptyOrganization(t *testing.T) {
 func TestPublishOrbVersionSendsDataEnvelope(t *testing.T) {
 	t.Parallel()
 
-	client, rec := newOrbClient(t, orbJSON(orbVersionEntity))
+	client, rec := newOrbClient(t, orbRoutes(map[string]string{
+		"/api/v3/orb/versions": orbVersionEntity,
+		"/api/v3/orb/packages": orbDetailEntity,
+	}))
 
 	version, err := client.PublishOrbVersion(context.Background(), circleci.PublishOrbVersionRequest{
 		OrbID:   orbID,
@@ -446,7 +458,7 @@ func TestPublishOrbVersionSendsDataEnvelope(t *testing.T) {
 		t.Fatalf("PublishOrbVersion returned error: %v", err)
 	}
 
-	got := rec.last(t)
+	got := rec.all()[0]
 	if got.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", got.method)
 	}
@@ -466,18 +478,112 @@ func TestPublishOrbVersionSendsDataEnvelope(t *testing.T) {
 func TestGetOrbVersion(t *testing.T) {
 	t.Parallel()
 
-	client, rec := newOrbClient(t, orbJSON(orbVersionEntity))
+	client, rec := newOrbClient(t, orbRoutes(map[string]string{
+		"/api/v3/orb/versions": orbVersionEntity,
+		"/api/v3/orb/packages": orbDetailEntity,
+	}))
 
 	version, err := client.GetOrbVersion(context.Background(), orbVerN)
 	if err != nil {
 		t.Fatalf("GetOrbVersion returned error: %v", err)
 	}
 
-	if want := "/api/v3/orb/versions/" + orbVerN; rec.last(t).path != want {
-		t.Errorf("path = %q, want %q", rec.last(t).path, want)
+	all := rec.all()
+	if want := "/api/v3/orb/versions/" + orbVerN; all[0].path != want {
+		t.Errorf("first request path = %q, want %q", all[0].path, want)
 	}
 	if version.OrbID != orbID {
 		t.Errorf("OrbID = %q, want %q from the orb_package reference", version.OrbID, orbID)
+	}
+}
+
+// TestOrbVersionRoutesNeverSendTheOrbName pins the reason the client resolves
+// OrbName with a second request: no orb version route sends it.
+//
+// references.orb_package.attributes is rendered only when the API has an orb name
+// to put in it, and the version records it renders from never carry one, so the
+// reference is an id and nothing else. Both the client tests and the provider's
+// fake used to invent attributes.name here, which is why 1407 tests could pass
+// while orb_name was permanently empty in production.
+func TestOrbVersionRoutesNeverSendTheOrbName(t *testing.T) {
+	t.Parallel()
+
+	if strings.Contains(orbVersionEntity, "attributes") &&
+		strings.Contains(orbVersionEntity, `"orb_package":{"id":"`+orbID+`","attributes"`) {
+		t.Fatal("the orb version fixture sends references.orb_package.attributes, which the API never does")
+	}
+
+	client, rec := newOrbClient(t, orbRoutes(map[string]string{
+		"/api/v3/orb/versions": orbVersionEntity,
+		"/api/v3/orb/packages": orbDetailEntity,
+	}))
+
+	version, err := client.GetOrbVersion(context.Background(), orbVerN)
+	if err != nil {
+		t.Fatalf("GetOrbVersion returned error: %v", err)
+	}
+
+	all := rec.all()
+	if len(all) != 2 {
+		t.Fatalf("requests = %d, want 2 (the version, then the orb it belongs to)", len(all))
+	}
+	if want := "/api/v3/orb/packages/" + orbID; all[1].path != want {
+		t.Errorf("second request path = %q, want %q", all[1].path, want)
+	}
+	if want := "acme/node"; version.OrbName != want {
+		t.Errorf("OrbName = %q, want %q resolved from the orb package", version.OrbName, want)
+	}
+}
+
+// TestGetOrbVersionSurvivesAnUnreadableOrb covers the decision to make the name
+// lookup best effort. The version itself was read successfully; failing the whole
+// call because the decoration failed would, on the publish path, throw away a
+// version that cannot be published again.
+func TestGetOrbVersionSurvivesAnUnreadableOrb(t *testing.T) {
+	t.Parallel()
+
+	client, rec := newOrbClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/api/v3/orb/packages") {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"id":"trace","title":"Forbidden."}}`))
+
+			return
+		}
+		_, _ = w.Write([]byte(orbVersionEntity))
+	})
+
+	version, err := client.GetOrbVersion(context.Background(), orbVerN)
+	if err != nil {
+		t.Fatalf("GetOrbVersion returned error: %v, want the version despite the orb lookup failing", err)
+	}
+	if version.OrbName != "" {
+		t.Errorf("OrbName = %q, want empty when the orb could not be read", version.OrbName)
+	}
+	if len(rec.all()) != 2 {
+		t.Errorf("requests = %d, want 2: the orb lookup is attempted and its failure ignored", len(rec.all()))
+	}
+}
+
+// TestOrbVersionOrbNameIsNotLookedUpForANilReference guards against turning the
+// zero UUID into a request. references.orb_package.id is a UUID field with no
+// omit rule, so a version with no orb reference serializes as the zero UUID
+// rather than as an absent key, and fetching an orb by it can only 404.
+func TestOrbVersionOrbNameIsNotLookedUpForANilReference(t *testing.T) {
+	t.Parallel()
+
+	body := `{"data":{"id":"` + orbVerN + `","attributes":{"version":"1.2.3"},` +
+		`"references":{"orb_package":{"id":"00000000-0000-0000-0000-000000000000"}}}}`
+
+	client, rec := newOrbClient(t, orbJSON(body))
+
+	if _, err := client.GetOrbVersion(context.Background(), orbVerN); err != nil {
+		t.Fatalf("GetOrbVersion returned error: %v", err)
+	}
+
+	all := rec.all()
+	if len(all) != 1 {
+		t.Fatalf("requests = %d, want 1: the zero UUID is not an id worth fetching", len(all))
 	}
 }
 
@@ -496,7 +602,7 @@ func TestGetOrbVersionByRefScopesToTheOrb(t *testing.T) {
 	t.Parallel()
 
 	page := `{"data":[{"id":"` + orbVerN + `","attributes":{"version":"1.2.3"},` +
-		`"references":{"orb_package":{"id":"` + orbID + `","attributes":{"name":"acme/node"}}}}],` +
+		`"references":{"orb_package":{"id":"` + orbID + `"}}}],` +
 		`"page":{"next":null}}`
 
 	client, rec := newOrbClient(t, orbRoutes(map[string]string{
@@ -545,7 +651,7 @@ func TestGetOrbVersionByRefAcceptsAnAlias(t *testing.T) {
 	// "volatile" resolves to whatever the newest version is, so the resolved
 	// version string does not equal the requested ref.
 	page := `{"data":[{"id":"` + orbVerN + `","attributes":{"version":"1.2.3"},` +
-		`"references":{"orb_package":{"id":"` + orbID + `","attributes":{"name":"acme/node"}}}}],` +
+		`"references":{"orb_package":{"id":"` + orbID + `"}}}],` +
 		`"page":{"next":null}}`
 
 	client, _ := newOrbClient(t, orbRoutes(map[string]string{
@@ -565,9 +671,9 @@ func TestGetOrbVersionByRefAcceptsAnAlias(t *testing.T) {
 func TestListOrbVersionsDrainsPages(t *testing.T) {
 	t.Parallel()
 
-	page1 := `{"data":[{"id":"v1","attributes":{"version":"2.0.0"},"references":{"orb_package":{"id":"` + orbID + `","attributes":{"name":"acme/node"}}}}],` +
+	page1 := `{"data":[{"id":"v1","attributes":{"version":"2.0.0"},"references":{"orb_package":{"id":"` + orbID + `"}}}],` +
 		`"page":{"next":"cursor-2"}}`
-	page2 := `{"data":[{"id":"v2","attributes":{"version":"1.0.0"},"references":{"orb_package":{"id":"` + orbID + `","attributes":{"name":"acme/node"}}}}],` +
+	page2 := `{"data":[{"id":"v2","attributes":{"version":"1.0.0"},"references":{"orb_package":{"id":"` + orbID + `"}}}],` +
 		`"page":{"next":null}}`
 
 	client, rec := newOrbClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +705,10 @@ func TestListOrbVersionsDrainsPages(t *testing.T) {
 func TestPromoteOrbVersionOmitsTheUnusedField(t *testing.T) {
 	t.Parallel()
 
-	client, rec := newOrbClient(t, orbJSON(orbVersionEntity))
+	client, rec := newOrbClient(t, orbRoutes(map[string]string{
+		"/api/v3/orb/versions": orbVersionEntity,
+		"/api/v3/orb/packages": orbDetailEntity,
+	}))
 
 	_, err := client.PromoteOrbVersion(context.Background(), orbVerN, circleci.PromoteOrbVersionRequest{
 		Segment: circleci.OrbSegmentMinor,
@@ -608,7 +717,7 @@ func TestPromoteOrbVersionOmitsTheUnusedField(t *testing.T) {
 		t.Fatalf("PromoteOrbVersion returned error: %v", err)
 	}
 
-	got := rec.last(t)
+	got := rec.all()[0]
 	if want := "/api/v3/orb/versions/" + orbVerN + "/promote"; got.path != want {
 		t.Errorf("path = %q, want %q", got.path, want)
 	}

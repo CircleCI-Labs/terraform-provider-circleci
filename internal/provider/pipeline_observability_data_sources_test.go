@@ -20,14 +20,11 @@ import (
 
 // The pipeline observability data sources — pipeline runs, pipeline
 // configuration, workflows, workflow jobs and jobs — are exercised against an
-// in-process stand-in for the CircleCI v2 API v2 API (pipeline runs,
-// pipeline config, workflows, workflow jobs) and the API (jobs)
+// in-process stand-in for the CircleCI v2 API (pipeline runs, pipeline
+// config, workflows, workflow jobs) and a separate backend that serves jobs,
 // rather than a real installation.
 //
-// The response bodies are the shapes production sends: the CircleCI API
-// the CircleCI API and their entity specs for
-// everything but jobs; the CircleCI API
-// the CircleCI API for jobs.
+// The response bodies are the shapes production sends.
 
 // observabilityProvider serves only the pipeline observability data sources.
 //

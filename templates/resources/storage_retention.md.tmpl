@@ -1,0 +1,54 @@
+---
+page_title: "circleci_storage_retention Resource - circleci"
+subcategory: ""
+description: |-
+  Manages how many days CircleCI retains an organization's build cache, workspace data and job artifacts.
+---
+
+# circleci_storage_retention (Resource)
+
+Manages how many days CircleCI retains an organization's build cache, workspace data and job artifacts.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. |
+| **API** | `GET` and `PUT /private/orgs/{org_id}/storage-retention-controls` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
+
+~> **This route carries no published specification and CircleCI may change or remove it without notice.** It is not part of the versioned public API. It was reverse-engineered from CircleCI's own org-migration tooling, which uses it in production against a plain personal token — that is how this provider knows it works — but treat it as best-effort all the same.
+
+## A settings resource, not a thing that gets created
+
+An organization's storage-retention record always exists and always holds a value for cache, workspace and artifact retention. That shapes how this resource behaves, in the same way as `circleci_organization_settings`:
+
+- **All three `*_retention_days` attributes are `Required`, not sparse.** The underlying route is a single `PUT` that replaces all three values together; there is no way to change one and leave the other two alone. This resource therefore owns all three in full.
+- **Destroy removes the resource from Terraform state and makes no API call.** CircleCI has no route that deletes or resets storage-retention controls, so all three values keep whatever Terraform last applied.
+
+## CircleCI clamps out-of-range values instead of rejecting them
+
+Each of the three values has a plan-enforced minimum and maximum, which this resource reports as `cache_retention_days_min`/`_max`, `workspace_retention_days_min`/`_max` and `artifact_retention_days_min`/`_max`. These are `Computed`: CircleCI derives them from the organization's plan, this provider cannot set them, and it cannot even learn them before the first successful read.
+
+That matters because of what CircleCI does with a value outside that range: it does not reject the request. It silently stores the nearest bound instead, and answers success either way. So a configuration asking for more retention than the plan allows does not fail `terraform apply` — it applies, and then behaves oddly:
+
+- This provider always reads the record back immediately after writing it, and adds a warning naming exactly which value(s) were clamped and to what, if any were.
+- Terraform state reflects what CircleCI actually stored, not what was configured. If the two differ, every subsequent `terraform plan` shows a difference, because Terraform cannot reach a value CircleCI will not accept. This is not a bug in the resource; it is that configuration being permanently unsatisfiable until it is changed to fit within the reported bounds, or the organization's plan changes.
+
+Because the bounds are unknowable before a read and unenforced on write, this resource does not validate `*_retention_days` against them at plan time — there is nothing to validate against until after the first apply, and even then the service itself does not enforce the bounds it reports.
+
+## Example Usage
+
+{{ tffile "examples/resources/circleci_storage_retention/resource.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import is supported using the organization ID:
+
+```shell
+terraform import circleci_storage_retention.example "00000000-0000-0000-0000-000000000000"
+```

@@ -34,11 +34,16 @@ var (
 // iosSigningConfigTypeName is used in diagnostics, including the Cloud-only error.
 const iosSigningConfigTypeName = "circleci_ios_signing_config"
 
-// iosSigningConfigNamePattern mirrors the API's own validation (see
-// signingConfigNameRE in circleci/the API's post_signing_config_v3.go):
-// letters, numbers and hyphens only. Rejecting anything else in the schema
-// turns a plan-time error into what would otherwise be a 400 at apply.
+// iosSigningConfigNamePattern mirrors the API's own validation: letters,
+// numbers and hyphens only. Rejecting anything else in the schema turns a
+// plan-time error into what would otherwise be a 400 at apply.
 var iosSigningConfigNamePattern = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+
+// iosSigningConfigMaxProfiles is the API's cap on provisioning_profiles, applied
+// by the create route's request binding (`binding:"max=100"`). Exceeding it is a
+// 400 at apply naming only the field, so both spellings of the list validate it
+// at plan time instead. See ios_signing_config_write_only.go for the other one.
+const iosSigningConfigMaxProfiles = 100
 
 // iosSigningConfigResourceModel maps the resource schema.
 type iosSigningConfigResourceModel struct {
@@ -96,6 +101,20 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 			"configuration -- adding, removing or renewing a provisioning profile, renaming the " +
 			"configuration, or repointing it at a different certificate are all a new resource. " +
 			"Every attribute is therefore `RequiresReplace`.\n\n" +
+			"!> **Not every certificate type can have a signing configuration.** CircleCI decides " +
+			"whether provisioning profiles are required or forbidden from the referenced " +
+			"certificate's `cert_type`, and the rule has two sides: for a `distribution`, " +
+			"`development`, `mac-development` or `mac-app-distribution` certificate at least one " +
+			"profile is required, and for a `developer-id-application`, `developer-id-installer` or " +
+			"`mac-installer-distribution` certificate **any** profile at all is refused, because " +
+			"Apple's workflow has no provisioning profile for those. This resource requires at least " +
+			"one profile, so it can only be used with the first group; a certificate in the second " +
+			"group has nothing to pair with it here. The refusal is a CircleCI error at apply reading " +
+			"`provisioning profiles are not allowed for this certificate type`, and it cannot be " +
+			"caught at plan time -- `cert_type` is derived from the uploaded certificate, so it is " +
+			"unknown while the certificate is itself being created.\n\n" +
+			"-> **`name` must be unique within the organization.** A repeat is refused with a " +
+			"conflict rather than replacing the existing configuration.\n\n" +
 			"## Security\n\n" +
 			"CircleCI never returns a provisioning profile's content, so with " +
 			"`provisioning_profiles` the only copy this provider can compare against on the next " +
@@ -157,21 +176,32 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 				},
 			},
 			"certificate_type": schema.StringAttribute{
-				MarkdownDescription: "The paired certificate's type, `distribution` or " +
-					"`development`, as CircleCI reports it back on this configuration.",
+				MarkdownDescription: "The paired certificate's type, as CircleCI reports it back on " +
+					"this configuration: one of `distribution`, `development`, " +
+					"`developer-id-application`, `developer-id-installer`, `mac-development`, " +
+					"`mac-app-distribution` or `mac-installer-distribution`. See " +
+					"`circleci_ios_signing_certificate`'s `cert_type`, which is the same value.",
 				Computed: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"provisioning_profiles": schema.ListNestedAttribute{
-				MarkdownDescription: "The provisioning profiles paired with the certificate. " +
-					"Changing this list in any way -- adding, removing or reordering a profile -- " +
-					"forces a new resource to be created, since there is no update route.\n\n" +
-					"Each `blob` is recorded in Terraform state in cleartext. Use " +
-					"`provisioning_profiles_wo` instead to keep the list out of state, at " +
-					"the cost of having to bump `provisioning_profiles_wo_version` to " +
-					"change it. Set exactly one of the two.",
+				MarkdownDescription: fmt.Sprintf(
+					"The provisioning profiles paired with the certificate: between 1 and %d of them. "+
+						"Changing this list in any way -- adding, removing or reordering a profile -- "+
+						"forces a new resource to be created, since there is no update route.\n\n"+
+						"Each `blob` is recorded in Terraform state in cleartext. Use "+
+						"`provisioning_profiles_wo` instead to keep the list out of state, at "+
+						"the cost of having to bump `provisioning_profiles_wo_version` to "+
+						"change it. Set exactly one of the two.\n\n"+
+						"~> CircleCI parses every profile and checks it against the certificate. A "+
+						"profile that does not authorize `certificate_id`'s certificate is rejected, as "+
+						"are two profiles sharing a bundle identifier and profile type — the list is a "+
+						"set keyed on parsed contents, not on `file_name`. See the resource "+
+						"documentation for which certificate types accept profiles at all.",
+					iosSigningConfigMaxProfiles,
+				),
 				// Optional, not Required as it once was, so that
 				// `provisioning_profiles_wo` can be used instead. Nothing about an
 				// existing configuration changes: iosSigningProfilesConfigValidator
@@ -182,6 +212,10 @@ func (r *iosSigningConfigResource) Schema(_ context.Context, _ resource.SchemaRe
 				Optional: true,
 				Validators: []validator.List{
 					listvalidator.SizeAtLeast(1),
+					// The API's own cap. Without this a 101st profile is a 400 at apply,
+					// from a request binding rather than from a handler, so the message
+					// names the field and nothing else.
+					listvalidator.SizeAtMost(iosSigningConfigMaxProfiles),
 				},
 				PlanModifiers: []planmodifier.List{
 					listplanmodifier.RequiresReplace(),
@@ -351,9 +385,22 @@ func (r *iosSigningConfigResource) Delete(ctx context.Context, req resource.Dele
 // There is no GET .../signing/configs/{id} route (see
 // internal/circleci/signing_config.go), so resolving a configuration by id
 // alone requires knowing which organization to list. The import id is
-// therefore "<organization_id>/<config_id>", and provisioning_profiles[*].blob
-// is left null for the same reason certificate_blob is on
-// circleci_ios_signing_certificate: the API never returns it.
+// therefore "<organization_id>/<config_id>", and provisioning_profiles is left
+// entirely null (see setIOSSigningConfigState's comment) for the same reason
+// certificate_blob is on circleci_ios_signing_certificate: the API never
+// returns a profile's content, only its name, and the field is Required
+// inside each list element.
+//
+// Every configurable attribute here is RequiresReplace (see the Schema
+// method), including provisioning_profiles and provisioning_profiles_wo_version,
+// and RequiresReplace fires on a null-to-known transition exactly as it does on
+// any other change. So the first plan against an imported configuration whose
+// configuration supplies profiles -- by either spelling, since one of the two
+// is required -- plans a **replacement**, destroying the imported configuration
+// and creating a new one on the very first apply after import. This mirrors
+// circleci_ios_signing_certificate's ImportState exactly, including having been
+// verified against a real plan rather than assumed; see
+// TestAccIOSSigningConfigResource_ImportForcesReplacement.
 func (r *iosSigningConfigResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	organizationID, configID, ok := strings.Cut(req.ID, "/")
 	if !ok || organizationID == "" || configID == "" || strings.Contains(configID, "/") {

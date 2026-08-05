@@ -18,8 +18,8 @@ const (
 	testUsageExportOrgID = "3ddcf1d1-7f5f-4139-8cef-71ad0921a968"
 	testUsageExportJobID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
 	// testUsageExportStart and testUsageExportEnd match the literals used in
-	// the API's handler_post_test.go, so a shape mismatch there
-	// would look the same here.
+	// the API's own test fixtures, so a shape mismatch there would look the
+	// same here.
 	testUsageExportStart = "2023-12-10T00:00:00Z"
 	testUsageExportEnd   = "2023-12-20T00:00:00Z"
 )
@@ -49,10 +49,9 @@ func newUsageExportServer(t *testing.T, handler http.HandlerFunc) (*circleci.Cli
 	return circleci.New(circleci.Config{Host: srv.URL, Token: "tok"}), &seen
 }
 
-// TestUsageExportServiceCreate mirrors the API's
-// "201 response when creating a usage export with a 10-day range" fixture
-// (the CircleCI API): the same request body shape in,
-// the same response shape out.
+// TestUsageExportServiceCreate mirrors the API's own "201 response when
+// creating a usage export with a 10-day range" fixture: the same request body
+// shape in, the same response shape out.
 func TestUsageExportServiceCreate(t *testing.T) {
 	t.Parallel()
 
@@ -159,10 +158,9 @@ func TestUsageExportServiceCreateOmitsSharedOrgIDsWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestUsageExportServiceGet mirrors the API's
-// "200 response when requesting a report" fixture
-// (the CircleCI API). Notably the fixture has no
-// start/end fields at all: UsageExportJobStatus must not assume they exist.
+// TestUsageExportServiceGet mirrors the API's own "200 response when
+// requesting a report" fixture. Notably the fixture has no start/end fields
+// at all: UsageExportJobStatus must not assume they exist.
 func TestUsageExportServiceGet(t *testing.T) {
 	t.Parallel()
 
@@ -230,10 +228,10 @@ func TestUsageExportServiceGetFailed(t *testing.T) {
 	}
 }
 
-// TestUsageExportServiceGetNotFound mirrors the API's
-// "400 response when requesting a non existent report" fixture, which the mock
-// backend answers with a 404 and a plain {"message": ...} body — the v2 error
-// shape circleci.Detail already knows how to render.
+// TestUsageExportServiceGetNotFound mirrors the API's own "400 response when
+// requesting a non existent report" fixture, which the mock backend answers
+// with a 404 and a plain {"message": ...} body — the v2 error shape
+// circleci.Detail already knows how to render.
 func TestUsageExportServiceGetNotFound(t *testing.T) {
 	t.Parallel()
 

@@ -50,18 +50,25 @@ For everything else — arguments, availability, examples — see
 
 ### Required
 
-- `checkout_source_provider` (String) The VCS provider for the pipeline's checkout source. Must be one of `github_app` or `github_server`.
-- `checkout_source_repo_external_id` (String) The external ID of the repository to check out code from.
-- `config_source_file_path` (String) The path to the pipeline configuration file within the repository.
-- `config_source_provider` (String) The VCS provider for the pipeline's configuration source. Must be one of `github_app` or `github_server`.
-- `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration. Changing this value forces a new resource to be created.
+- `checkout_source_provider` (String) The VCS provider for the pipeline's checkout source: `github_app` or `github_server`. Unlike config_source_provider, this has no `circleci` (repo-less) option: the API requires a real repository unconditionally, even when the pipeline's configuration is hosted by CircleCI itself — a definition always checks out code from somewhere.
+- `checkout_source_repo_external_id` (String) The external ID of the repository to check out code from: the VCS provider's own numeric repository id, not its name. Always required — checkout_source has no repo-less provider.
+- `config_source_file_path` (String) The path to the pipeline configuration file. Required for every config_source_provider, including `circleci`, which still requires `file_path` even though it has no repository to be relative to.
+- `config_source_provider` (String) Where the pipeline's configuration is read from: `github_app`, `github_server` or `circleci`. `github_app` and `github_server` read configuration from a VCS repository, named by `config_source_repo_external_id`. `circleci` is a CircleCI-hosted configuration: there is no repository, and `config_source_repo_external_id` must be omitted — the API rejects a repo on this branch outright rather than ignoring it.
+
+~> **Changing this value forces a new resource to be created.** The update endpoint's `config_source` accepts only `file_path`; provider is immutable after creation.
 - `description` (String) A description of the pipeline.
 - `name` (String) The name of the pipeline. Changing this value forces a new resource to be created.
 - `project_id` (String) The ID of the project this pipeline belongs to. Changing this value forces a new resource to be created.
 
+### Optional
+
+- `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration: the VCS provider's own numeric repository id, not its name. Required when config_source_provider is `github_app` or `github_server`; must be omitted when it is `circleci`, which has no repository.
+
+~> **Changing this value forces a new resource to be created.**
+
 ### Read-Only
 
 - `checkout_source_repo_full_name` (String) The full name of the repository used for code checkout.
-- `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration.
+- `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration. Empty when config_source_provider is `circleci`, which has no repository.
 - `created_at` (String) The timestamp when the pipeline was created.
 - `id` (String) The unique identifier of the pipeline.

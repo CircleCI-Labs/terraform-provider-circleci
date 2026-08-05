@@ -1,0 +1,120 @@
+---
+page_title: "circleci_budget Resource - circleci"
+subcategory: ""
+description: |-
+  Manages a CircleCI spend budget for an organization or for one project within it.
+---
+
+# circleci_budget (Resource)
+
+Manages a CircleCI spend budget: a credit limit for an organization, or for one project within it, with an enforcement mode that warns or blocks new workflows once spend crosses it.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. |
+| **API** | `GET` and `PUT /private/orgs/{org_id}/budgets`, `DELETE /private/orgs/{org_id}/budgets/{budget_id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token belonging to an organization admin. |
+
+~> **This route carries no published specification and CircleCI may change or remove it without notice.** It is not part of the versioned public API. It was reverse-engineered from CircleCI's own org-migration tooling, which uses it in production against a plain personal token — that is how this provider knows it works — but treat it as best-effort all the same.
+
+## One resource for both scopes
+
+An organization's budgets are one collection on the API, distinguished only by whether `project_id` is set: `GET` returns every budget for the organization together, and the same `PUT` writes either one depending on whether `project_id` is present in the request body. This resource follows that shape rather than splitting into an organization-level type and a project-level type — set `project_id` to manage a per-project budget, or omit it to manage the organization-level one.
+
+Applying this resource a second time for the same `org_id`/`project_id` pair updates the existing budget's `credits` in place; it does not create a duplicate.
+
+## `enforcement_type` cannot be set
+
+`enforcement_type` (`warn` or `block`) is reported as a read-only attribute, not something this resource can configure. The write route accepts only `credits` and `project_id` — there is no field for it anywhere on the request, on either create or update. CircleCI's own org-migration tooling hits the identical limit and documents it the same way: enforcement mode can only be changed in the CircleCI web UI.
+
+Because of this, `terraform plan` will keep showing `enforcement_type` as unchanged no matter what the configuration does — there is nothing to configure it with — and a budget whose enforcement is set to `block` outside Terraform stays `block` regardless of anything this resource does.
+
+## `consumption`, `percentage` and `threshold_exceeded` reflect real spend
+
+These three are runtime statistics CircleCI computes from actual usage, reported on every read. They can change between applies with no configuration change at all, the same way `circleci_audit_log_config`'s `connection_status` does — that is expected, not drift to chase.
+
+## There is no single-budget read
+
+`GET` only ever returns an organization's whole collection of budgets; there is no route that reads one budget by id. This resource's `Read` re-lists the organization's budgets on every refresh and locates the entry for its own scope (`org_id` plus the optional `project_id`) — which is also why `id` cannot be used to look anything up. It exists only so `terraform destroy` has something to send to the one route that does address a single budget: `DELETE .../budgets/{budget_id}`.
+
+A budget removed outside Terraform is dropped from state on the next refresh, rather than reported as an error, since there is nothing left to read.
+
+## Example Usage
+
+```terraform
+# The organization-level budget: omit project_id entirely. Applying this a
+# second time with a different credits value updates the existing budget in
+# place rather than creating a duplicate.
+resource "circleci_budget" "org" {
+  org_id  = "00000000-0000-0000-0000-000000000000"
+  credits = 2000000
+}
+
+# A per-project budget: set project_id to scope it to one project instead of
+# the whole organization.
+resource "circleci_budget" "checkout_service" {
+  org_id     = "00000000-0000-0000-0000-000000000000"
+  project_id = "11111111-1111-1111-1111-111111111111"
+  credits    = 50000
+}
+
+# enforcement_type, consumption, percentage and threshold_exceeded are all
+# read-only: CircleCI reports them, but this resource cannot set or reset
+# them. See the resource's own warning about enforcement_type specifically.
+output "checkout_service_budget_enforcement" {
+  value = circleci_budget.checkout_service.enforcement_type
+}
+
+output "checkout_service_budget_usage" {
+  value = "${circleci_budget.checkout_service.consumption} of ${circleci_budget.checkout_service.credits} credits (${circleci_budget.checkout_service.percentage}%)"
+}
+```
+
+<!-- schema generated by tfplugindocs -->
+## Schema
+
+### Required
+
+- `credits` (Number) The credit limit for this scope. Updatable in place.
+
+### Optional
+
+- `org_id` (String) The unique identifier (UUID) of the organization that owns this budget.
+
+This is the same field as the deprecated `organization_id`; set exactly one of the two.
+
+Changing this value forces a new resource to be created.
+- `organization_id` (String, Deprecated) The unique identifier (UUID) of the organization that owns this budget.
+
+~> **Deprecated in favour of `org_id`**, which matches CircleCI's own naming. Both work and mean the same thing; set exactly one. Switching from this attribute to `org_id` does not replace the resource.
+- `project_id` (String) Unique identifier (UUID) of the project this budget limits. Omit this to manage the organization-level budget instead.
+
+Changing this value forces a new resource to be created: it addresses a different budget entry on the API, not a rename of this one, so the old entry would otherwise be orphaned rather than moved.
+
+### Read-Only
+
+- `consumption` (Number) Credits consumed against this budget so far, as CircleCI last computed it. This reflects real spend and can change between applies with no configuration change.
+- `enforcement_type` (String) CircleCI's report of what happens once spend crosses this budget: `warn` (surface overage without blocking) or `block` (stop new workflows). Read-only — see the resource-level warning above.
+- `id` (String) Unique identifier (UUID) of the budget, assigned by CircleCI. There is no route to read a budget by this id — it exists so `terraform destroy` has something to send to the delete route, which addresses a budget only by id.
+- `percentage` (Number) `consumption` as a percentage of `credits`, as CircleCI last computed it. Like `consumption`, this can change between applies on its own.
+- `threshold_exceeded` (Boolean) Whether CircleCI reports this budget's enforcement threshold as currently exceeded.
+
+## Import
+
+Import the organization-level budget using the organization ID alone:
+
+```shell
+terraform import circleci_budget.org "00000000-0000-0000-0000-000000000000"
+```
+
+Import a per-project budget using the organization ID and the project ID, separated by a slash:
+
+```shell
+terraform import circleci_budget.checkout_service "00000000-0000-0000-0000-000000000000/11111111-1111-1111-1111-111111111111"
+```
+
+Only the scope (`org_id` and, for a per-project budget, `project_id`) is read from the import ID. `id`, `credits`, `enforcement_type` and the usage statistics are all filled in by the refresh that follows import, the same way `Read` fills them in on every subsequent plan — there is no single-budget GET to look them up with directly.

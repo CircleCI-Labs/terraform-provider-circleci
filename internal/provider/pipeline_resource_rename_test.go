@@ -73,9 +73,9 @@ resource %[1]q "example" {
   description                      = "original"
   config_source_provider           = "github_app"
   config_source_file_path          = "config.yml"
-  config_source_repo_external_id   = "ext-1"
+  config_source_repo_external_id   = "100001"
   checkout_source_provider         = "github_app"
-  checkout_source_repo_external_id = "ext-2"
+  checkout_source_repo_external_id = "100002"
 }
 `, typeName, fakePipelineProjectID)
 }
@@ -111,7 +111,7 @@ func TestPipelineResourceRename_BothTypeNamesWork(t *testing.T) {
 							statecheck.ExpectKnownValue(
 								address,
 								tfjsonpath.New("config_source_repo_full_name"),
-								knownvalue.StringExact(resolveFullName("ext-1")),
+								knownvalue.StringExact(resolveFullName("100001")),
 							),
 						},
 					},
@@ -200,7 +200,7 @@ moved {
 					statecheck.ExpectKnownValue(
 						"circleci_pipeline_definition.example",
 						tfjsonpath.New("config_source_repo_full_name"),
-						knownvalue.StringExact(resolveFullName("ext-1")),
+						knownvalue.StringExact(resolveFullName("100001")),
 					),
 				},
 				Check: func(*terraform.State) error {
@@ -371,11 +371,11 @@ func TestPipelineResourceRename_StateMoverMatchesOnTypeNameAlone(t *testing.T) {
 		CreatedAt:                    types.StringValue("2024-03-01T00:00:00.000Z"),
 		ConfigSourceProvider:         types.StringValue("github_app"),
 		ConfigSourceFilePath:         types.StringValue("config.yml"),
-		ConfigSourceRepoFullName:     types.StringValue(resolveFullName("ext-1")),
-		ConfigSourceRepoExternalId:   types.StringValue("ext-1"),
+		ConfigSourceRepoFullName:     types.StringValue(resolveFullName("100001")),
+		ConfigSourceRepoExternalId:   types.StringValue("100001"),
 		CheckoutSourceProvider:       types.StringValue("github_app"),
-		CheckoutSourceRepoFullName:   types.StringValue(resolveFullName("ext-2")),
-		CheckoutSourceRepoExternalId: types.StringValue("ext-2"),
+		CheckoutSourceRepoFullName:   types.StringValue(resolveFullName("100002")),
+		CheckoutSourceRepoExternalId: types.StringValue("100002"),
 	}); diags.HasError() {
 		t.Fatalf("building the source state: %v", diags)
 	}

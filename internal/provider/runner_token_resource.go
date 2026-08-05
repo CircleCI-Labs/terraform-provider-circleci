@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -24,6 +26,7 @@ var (
 	_ resource.ResourceWithConfigure        = &runnerTokenResource{}
 	_ resource.ResourceWithImportState      = &runnerTokenResource{}
 	_ resource.ResourceWithConfigValidators = &runnerTokenResource{}
+	_ resource.ResourceWithModifyPlan       = &runnerTokenResource{}
 )
 
 // runnerTokenResourceModel maps the resource schema.
@@ -55,7 +58,12 @@ func (r *runnerTokenResource) Metadata(_ context.Context, req resource.MetadataR
 // Schema defines the schema for the resource.
 func (r *runnerTokenResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a CircleCI runner authentication token. The token value is only available at creation time and cannot be retrieved afterwards.",
+		MarkdownDescription: "Manages a CircleCI runner authentication token. The token value is only " +
+			"available at creation time and cannot be retrieved afterwards.\n\n" +
+			"~> **A resource class holds at most 10 tokens.** The eleventh create is refused with " +
+			"HTTP 403 and a message naming the limit. The limit counts every token on the resource " +
+			"class, including any created outside Terraform — list them with " +
+			"`circleci_runner_tokens` if an apply hits it.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the runner token.",
@@ -64,13 +72,31 @@ func (r *runnerTokenResource) Schema(_ context.Context, _ resource.SchemaRequest
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
-			// See org_id_deprecation.go for why these are Optional+Computed and why
-			// replacement is conditional on being configured.
-			"organization_id": deprecatedOrgIDAttribute("this runner token", true),
-			"org_id":          orgIDAttribute("this runner token", true),
+			// replaces is false here, unlike TokenInput's doc comment might suggest
+			// at a glance -- and for exactly the reason circleci_runner_resource_class
+			// gives for the same choice (see that resource's Schema method): the
+			// runner API derives the owning organization from resource_class's
+			// namespace and never reads org_id from the create body at all (see
+			// TokenInput's doc comment), so a changed organization here is
+			// bookkeeping, not something the service acts on. Forcing a replacement
+			// on it would mean every import -- which cannot recover either
+			// organization attribute, since the token representation carries no
+			// organization field -- destroys and recreates the token, permanently
+			// invalidating it, the moment a configuration supplies the organization
+			// that ConfigValidators requires. See ModifyPlan and Update below, and
+			// TestRunnerTokenImport.
+			"organization_id": deprecatedOrgIDAttribute("this runner token", false),
+			"org_id":          orgIDAttribute("this runner token", false),
 			"resource_class": schema.StringAttribute{
 				MarkdownDescription: "The resource class this token grants access to, in `namespace/name` format (e.g. `myorg/myrunner`). Changing this value forces a new resource to be created.",
 				Required:            true,
+				// Same shape check as every other runner attribute naming a resource
+				// class. It was missing here, so a namespace the service rejects
+				// (upper case, or containing a dot) only failed once Create was
+				// already running. See runnerResourceClassPattern.
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(runnerResourceClassPattern, runnerResourceClassFormatMessage),
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
@@ -83,7 +109,7 @@ func (r *runnerTokenResource) Schema(_ context.Context, _ resource.SchemaRequest
 				},
 			},
 			"token": schema.StringAttribute{
-				MarkdownDescription: "The token value used to authenticate a runner agent. Only available at creation time — this value is not returned by the API on subsequent reads and will be empty after an import.",
+				MarkdownDescription: "The token value used to authenticate a runner agent. Only available at creation time — this value is not returned by the API on subsequent reads and is null after an import.",
 				Computed:            true,
 				Sensitive:           true,
 				PlanModifiers: []planmodifier.String{
@@ -106,6 +132,28 @@ func (r *runnerTokenResource) ConfigValidators(_ context.Context) []resource.Con
 	return []resource.ConfigValidator{
 		orgIDConfigValidator(),
 	}
+}
+
+// ModifyPlan makes both organization attribute names agree in the plan.
+//
+// Needed for exactly the reason given on circleci_runner_resource_class's
+// ModifyPlan, which this mirrors: every other attribute here still forces
+// replacement, so the only way Update is ever called is a plan that changes
+// nothing but the organization, and Terraform's dual Optional+Computed
+// attributes retain a stale value across that plan unless it is reconciled
+// here. See org_id_deprecation.go.
+func (r *runnerTokenResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if !orgIDPlanNeedsReconcile(req) {
+		return
+	}
+
+	var config runnerTokenResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	reconcileOrgIDPlan(ctx, resp, config.OrganizationId, config.OrgId)
 }
 
 // Create creates the resource and sets the initial Terraform state.
@@ -195,8 +243,26 @@ func (r *runnerTokenResource) Read(ctx context.Context, req resource.ReadRequest
 	resp.Diagnostics.Append(diags...)
 }
 
-// Update updates the resource. All fields require replacement, so this is a no-op.
-func (r *runnerTokenResource) Update(_ context.Context, _ resource.UpdateRequest, _ *resource.UpdateResponse) {
+// Update persists plan values (the organization) into state. Every other
+// attribute forces replacement (see the Schema method), so the only plan that
+// ever reaches Update is one that changes nothing but organization_id/org_id,
+// and the runner API has no update route to call for that -- it is bookkeeping
+// this provider carries, not something the service is told about. The plan is
+// persisted verbatim, including both organization attribute names: ModifyPlan
+// has already made them agree, and re-deriving them here could only disagree
+// with the plan Terraform is holding. That also covers the update after an
+// import, where neither name is in state and the unconfigured one would
+// otherwise still be unknown.
+func (r *runnerTokenResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan runnerTokenResourceModel
+	diags := req.Plan.Get(ctx, &plan)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	diags = resp.State.Set(ctx, &plan)
+	resp.Diagnostics.Append(diags...)
 }
 
 // Delete deletes the resource and removes the Terraform state on success.

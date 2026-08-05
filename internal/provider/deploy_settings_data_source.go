@@ -50,7 +50,7 @@ func (d *deploySettingsDataSource) Schema(_ context.Context, _ datasource.Schema
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches a CircleCI project's deploy/release settings: the pipeline " +
 			"definitions used for automatic deploys and rollbacks.\n\n" +
-			"-> **This route also accepts writes** (`PATCH .../settings` on the API), but this " +
+			"-> **This route also accepts writes** (`PATCH .../settings`), but this " +
 			"provider exposes it read-only: both settings are pipeline-definition ids, and pipeline " +
 			"definitions are a separate, not-yet-built area of this provider's scope. A future resource " +
 			"can add the write side without changing this data source.\n\n" +

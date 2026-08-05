@@ -86,15 +86,17 @@ func (r *configPolicyBundleResource) Schema(_ context.Context, _ resource.Schema
 				},
 			},
 			"policy_context": schema.StringAttribute{
-				MarkdownDescription: "Which policy context the bundle belongs to. Defaults to `" +
-					circleci.PolicyContextConfig + "`, the context evaluated against pipeline " +
-					"configuration; `" + circleci.PolicyContextCustom + "` is evaluated against " +
-					"caller-supplied data instead. Changing this value forces a new resource to be created.\n\n" +
+				MarkdownDescription: "Which policy context the bundle belongs to. `" +
+					circleci.PolicyContextConfig + "` is the only accepted value, and the default: it " +
+					"is the context evaluated against pipeline configuration. Changing this value " +
+					"forces a new resource to be created.\n\n" +
 					"~> A policy context is **not** a CircleCI context. It has nothing to do with " +
 					"`circleci_context` or the environment variables that live there: it is a namespace " +
-					"for a bundle of policies, and its only valid values are `" +
-					circleci.PolicyContextConfig + "`. CircleCI documents a `custom` context, but every " +
-					"the API route rejects it with a 400, so it is not offered here.",
+					"for a bundle of policies. CircleCI's documentation mentions a `" +
+					circleci.PolicyContextCustom + "` context for policies evaluated against " +
+					"caller-supplied data, but no route accepts it — every handler that takes this path " +
+					"segment validates it against the single value `" + circleci.PolicyContextConfig +
+					"` and answers 400 for anything else — so it is not offered here.",
 				Optional: true,
 				Computed: true,
 				Default:  stringdefault.StaticString(circleci.PolicyContextConfig),

@@ -27,9 +27,13 @@ installation does not expose.
 
 ## Example Usage
 
-One endpoint covers four event sources, and which attributes are required — even
+One endpoint covers five event sources, and which attributes are required — even
 which are *permitted* — depends on which one you pick. Each is shown separately
 below rather than as one configuration with everything in it.
+
+Every one of those rules is checked when the plan is built, so a combination this
+endpoint will not accept fails at `terraform plan` rather than part-way through
+`terraform apply`.
 
 ### GitHub App trigger
 
@@ -48,6 +52,22 @@ below rather than as one configuration with everything in it.
 {{ tffile "examples/resources/circleci_trigger/webhook.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}
+
+## Changing the pipeline definition replaces the trigger
+
+`pipeline_definition_id` (and its deprecated spelling `pipeline_id`) can only be set
+when the trigger is created: the definition is a path segment on
+`POST .../pipeline-definitions/{pipeline_definition_id}/triggers`, and the update
+endpoint — `PATCH /projects/{project_id}/triggers/{trigger_id}` — has no field for
+it. Editing the attribute therefore plans a destroy and create.
+
+~> **Changed in 0.5.0.** Earlier versions planned an in-place update, which the API
+accepted and silently ignored: `terraform apply` reported success while the trigger
+stayed attached to the old definition, and no refresh could notice, because the read
+response carries no definition id either. Replacement produces a **new trigger id**,
+and for a `webhook` event source a **new `event_source_web_hook_url`** — so anything
+posting to the old URL must be repointed. Renaming `pipeline_id` to
+`pipeline_definition_id` is still not a change and still replaces nothing.
 
 ## Import
 
@@ -68,3 +88,20 @@ left the pipeline definition id unset in state after import, leaving the next pl
 no way to converge short of editing state by hand. Supplying the third segment is what
 makes import produce usable state; the two-segment form now reports an error explaining
 this rather than silently importing something broken.
+
+Every other attribute round-trips through import cleanly, with two exceptions specific
+to import (both documented on their own attribute above, and covered by
+`ImportStateVerify` in this provider's test suite so a regression here would be caught):
+
+- A `schedule` trigger's `event_source_schedule_attribution_actor` comes back from
+  import as the actor's literal id, not the `system`/`current` alias that was
+  configured. `terraform plan -generate-config-out` will therefore write that literal
+  id into the generated configuration, which fails plan-time validation on the next
+  `terraform plan` — this provider only accepts the two aliases. Edit the generated
+  attribute to `system` or `current` before applying.
+- A `webhook` trigger's `event_source_web_hook_url` reads back exactly as created only
+  when the token used to import has permission to see the embedded secret. A
+  lower-privileged token gets the API's `**REDACTED**` placeholder instead, and nothing
+  in this provider can recover the real value after that — there is no write-only
+  attribute for it, because CircleCI mints this URL rather than accepting one from
+  configuration.
