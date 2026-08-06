@@ -135,8 +135,13 @@ jobs:
           command: |
             set -euo pipefail
 
-            # Needs $GPG_PRIVATE_KEY and $PASSPHRASE from the context — see
+            # Needs $GPG_PRIVATE_KEY and $GPG_PASSPHRASE from the context — see
             # the `release` workflow below for exactly how to create them.
+            #
+            # $GPG_PRIVATE_KEY is the ASCII-armoured secret key, base64-encoded:
+            # `gpg --armor --export-secret-keys FPR | base64`. Encoding it avoids
+            # any question of how a multi-line value survives being put into an
+            # environment variable, which is why the decode below is not optional.
             command -v gpg-connect-agent >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y gnupg)
 
             mkdir -p ~/.gnupg
@@ -165,7 +170,7 @@ jobs:
             # stripped down to certify-only with a separate signing subkey).
             FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10; exit}')
             KEYGRIP=$(gpg --batch --with-colons --with-keygrip --list-secret-keys "$FPR" | awk -F: '$1=="grp"{print $10; exit}')
-            HEX_PASSPHRASE=$(printf '%s' "$PASSPHRASE" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
+            HEX_PASSPHRASE=$(printf '%s' "$GPG_PASSPHRASE" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')
             gpg-connect-agent "PRESET_PASSPHRASE $KEYGRIP -1 $HEX_PASSPHRASE" /bye >/dev/null
 
             echo "export GPG_FINGERPRINT=$FPR" >> "$BASH_ENV"

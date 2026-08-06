@@ -41,9 +41,9 @@ part most likely to be missed.
 
 | Variable | What it is | Notes |
 |---|---|---|
-| `GPG_PRIVATE_KEY` | The ASCII-armoured private signing key | Imported into the keyring before GoReleaser runs |
-| `GPG_PASSPHRASE` | Its passphrase | The GitHub workflow calls this `PASSPHRASE` |
-| `GPG_FINGERPRINT` | Fingerprint of that key | `.goreleaser.yml` reads it directly as `{{ .Env.GPG_FINGERPRINT }}`. In the GitHub workflow it came from the import step's output; in CircleCI it must be supplied |
+| `GPG_PRIVATE_KEY` | The ASCII-armoured private signing key, **base64-encoded** — `gpg --armor --export-secret-keys FPR \| base64` | The release job pipes it through `base64 --decode` before importing. Encoding sidesteps any question of how a multi-line value survives an environment variable; storing it un-encoded fails the import |
+| `GPG_PASSPHRASE` | Its passphrase | Seeded into the gpg-agent cache so GoReleaser's detached signing never prompts. The GitHub Actions workflow called this `PASSPHRASE`; the release job now reads `GPG_PASSPHRASE`, matching the other two |
+| `GPG_FINGERPRINT` | Fingerprint of that key | Optional. `.goreleaser.yml` reads `{{ .Env.GPG_FINGERPRINT }}`, but the release job derives the fingerprint from the key it just imported and exports it, so a stored value is unused. Harmless to set, and worth setting only as documentation of which key is expected |
 | `GITHUB_TOKEN` | A GitHub personal access token with **contents: write** on this repository | **This is the new requirement.** GitHub Actions injects `GITHUB_TOKEN` automatically; CircleCI has no equivalent, so a PAT is required for GoReleaser to create the release and upload assets |
 
 Put all four in a CircleCI context and grant it to this project. The release job's comments
