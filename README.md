@@ -19,44 +19,37 @@
 
 The CircleCI Terraform Provider enable customers to manage CircleCI projects with IaC patterns, matching the same patterns used to manage GitHub repos. For large-scale organizations, this enables automated project creation for new teams or projects.
 
-## Installing this fork
+## Installing
 
-> [!WARNING]
-> **The `source` address below resolves to the officially published provider, which does
-> not include the resources added here.** This fork is not published to the Terraform
-> Registry. Writing `source = "CircleCI-Public/circleci"` and running `terraform init`
-> gets you the official provider, and every resource documented here that it does not
-> implement fails with "Invalid resource type" — which reads like a typo rather than the
-> wrong provider.
-
-To use this fork, build it and point Terraform at the binary with a development override,
-in `~/.terraformrc` (or `%APPDATA%\terraform.rc` on Windows):
+This fork is published to the Terraform Registry under the **`CircleCI-Labs`** namespace,
+which is a different provider from the official `CircleCI-Public/circleci`. Use this
+address to get the resources documented here:
 
 ```hcl
-provider_installation {
-  dev_overrides {
-    "CircleCI-Public/circleci" = "/Users/you/go/bin"
+terraform {
+  required_providers {
+    circleci = {
+      source  = "CircleCI-Labs/circleci"
+      version = "~> 0.5"
+    }
   }
-  direct {}
 }
 ```
 
-```sh
-go build -o "$(go env GOPATH)/bin/terraform-provider-circleci" .
-```
-
-With an override active, **do not run `terraform init`** — Terraform uses the local binary
-directly and warns on every command that the override is in effect. Dependency lock files
-are bypassed, which is why this is a development mechanism and not a distribution one.
+> [!IMPORTANT]
+> `CircleCI-Labs/circleci` and `CircleCI-Public/circleci` are two separate providers, not
+> two versions of one. Terraform tracks each by its full address, so switching between them
+> is a provider migration and not a version bump — state written by one is not read by the
+> other. Pick one per configuration.
 
 ## Usage
-The current documentation is found [here](https://registry.terraform.io/providers/CircleCI-Public/circleci/latest/docs).
+The current documentation is found [here](https://registry.terraform.io/providers/CircleCI-Labs/circleci/latest/docs).
 Define the provider:
 ```hcl
 terraform {
   required_providers {
     circleci = {
-      source = "CircleCI-Public/circleci"
+      source = "CircleCI-Labs/circleci"
       version = "~> 0.5"
     }
   }
@@ -116,7 +109,7 @@ Where they overlap, the narrower one wins:
 
 | Document | Authoritative for |
 |---|---|
-| Each type's `## Availability` table in the [registry docs](https://registry.terraform.io/providers/CircleCI-Public/circleci/latest/docs) | **That one type on the Cloud/Server axis**, plus its routes, organization-type requirement and token requirement |
+| Each type's `## Availability` table in the [registry docs](https://registry.terraform.io/providers/CircleCI-Labs/circleci/latest/docs) | **That one type on the Cloud/Server axis**, plus its routes, organization-type requirement and token requirement |
 | **This matrix** | **The VCS-integration axis** — the columns below |
 | The summary table on the provider index page | **Nothing.** It is a summary and must never disagree with either of the above |
 

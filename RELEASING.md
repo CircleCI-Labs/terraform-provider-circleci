@@ -60,8 +60,11 @@ name the context it expects.
    GitHub repository. This one is currently private, so publication is blocked regardless of
    tooling.
 2. **The GPG public key must be uploaded** to the registry under the publishing namespace.
-3. **The namespace must own the provider name.** `source = "CircleCI-Public/circleci"` in the
-   documentation implies publishing under that organization, not a fork.
+3. **The namespace must own the provider name.** This branch publishes under
+   `CircleCI-Labs`, so the address is `source = "CircleCI-Labs/circleci"`. The namespace is
+   the GitHub organization that published it; the type is the repository name with the
+   mandatory `terraform-provider-` prefix stripped. `main` deliberately still says
+   `CircleCI-Public/circleci`, because that is what an upstream pull request should contain.
 
 ## Cutting a release
 

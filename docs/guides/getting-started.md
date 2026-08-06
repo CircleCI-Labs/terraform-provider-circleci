@@ -76,7 +76,7 @@ Reading that as a route through the guide:
 terraform {
   required_providers {
     circleci = {
-      source  = "CircleCI-Public/circleci"
+      source  = "CircleCI-Labs/circleci"
       version = "~> 0.4"
     }
   }
@@ -445,7 +445,7 @@ terraform {
 
   required_providers {
     circleci = {
-      source  = "CircleCI-Public/circleci"
+      source  = "CircleCI-Labs/circleci"
       version = "~> 0.4"
     }
   }

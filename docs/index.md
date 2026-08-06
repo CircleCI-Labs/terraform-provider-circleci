@@ -25,7 +25,7 @@ holding a secret the jobs can use.
 terraform {
   required_providers {
     circleci = {
-      source  = "CircleCI-Public/circleci"
+      source  = "CircleCI-Labs/circleci"
       version = "~> 0.5"
     }
   }
@@ -231,7 +231,7 @@ this one is a bug — please report it.
 | Audit log streaming | yes[^scaleplan] | **no**[^scaleplan] |
 | Spend budgets | yes[^privateroute] | **no**[^privateroute] |
 
-The three [provider functions](https://registry.terraform.io/providers/CircleCI-Public/circleci/latest/docs)
+The three [provider functions](https://registry.terraform.io/providers/CircleCI-Labs/circleci/latest/docs)
 are pure string handling and make no API call, so `deployment` does not affect
 them at all.
 
