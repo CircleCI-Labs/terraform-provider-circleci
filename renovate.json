@@ -1,10 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "forkProcessing is enabled because this repository is a fork of CircleCI-Public/terraform-provider-circleci, and Renovate skips forks by default. Without it the app reports itself installed and enabled while doing nothing at all: no dependency dashboard, no pull requests, no vulnerability alerts. The default exists so Renovate does not spam every drive-by fork; here the fork is the maintained copy.",
   "extends": [
     "config:best-practices",
     ":dependencyDashboard",
     ":semanticCommits"
   ],
+  "forkProcessing": "enabled",
   "timezone": "Etc/UTC",
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
