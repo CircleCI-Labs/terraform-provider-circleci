@@ -1,6 +1,49 @@
 # Changelog
 
-## 0.5.0 (Unreleased)
+## Unreleased
+
+### BREAKING CHANGES
+
+* **`circleci_oidc_custom_claims.audience` is now a set rather than a list.**
+  CircleCI does not preserve the order the audience was submitted in and reports
+  it back in an order of its own choosing. Unlike ordinary refresh noise, this
+  attribute round-trips through the API on every `Read`, so a reordering API
+  response produced a **permanent** diff no `apply` could ever settle — the same
+  bug fixed for `events` and `pr_only_branch_overrides` in 0.5.0, and the same
+  fix: see that release's BREAKING CHANGES entry for the mechanics.
+
+  **No state migration is needed and nothing already in state changes.** A list
+  and a set of the same element type share one JSON encoding, so existing state
+  decodes as a set untouched; the schema version stays at 0 and no
+  `UpgradeState` was added. `TestListToSetNeedsNoStateUpgrade` now covers this
+  attribute alongside the three it already proved.
+
+  What does break is a configuration that treats `audience` as ordered —
+  `audience[0]`, `element(...)`, or anything relying on the order surviving. It
+  never did survive, so such a configuration was already producing a plan that
+  never converged.
+
+### BUG FIXES
+
+* **`circleci_orb.categories` could show a spurious diff, or fail an update
+  outright with "Provider produced inconsistent result after apply".** The
+  registry gives no ordering guarantee for the categories an orb belongs to,
+  and `categories` is a `Computed` list with no plan modifier, so the framework
+  carries its value in state forward as the planned one whenever some other
+  attribute (for example `is_listed`) is what triggers an update. When `Update`
+  then rebuilt the list from a fresh API response ordered differently from the
+  one `Create` had written, the apply's actual result disagreed with what was
+  planned.
+
+  `categories` is now sorted by name (falling back to id to break a tie) every
+  time it is built, so the order the API happens to answer with can no longer
+  disagree with what is already in state. This is a description-only schema
+  change — the element type is unchanged, so no state migration is needed.
+
+  Every existing test managed only one category, which cannot show a
+  reordering at all; the regression test uses two.
+
+## 0.5.0 (2026-08-06)
 
 The provider goes from 11 resources and 10 data sources to **35 resources, 66 data
 sources, 2 ephemeral resources and 3 provider functions**, and stops depending on

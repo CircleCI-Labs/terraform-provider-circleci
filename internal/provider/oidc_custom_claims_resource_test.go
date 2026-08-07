@@ -214,7 +214,10 @@ func (a *oidcClaimsAPI) write(w http.ResponseWriter, path string) {
 		payload["project_id"] = testOIDCProjectID
 	}
 	if state.audience != nil {
-		payload["audience"] = *state.audience
+		// Not *state.audience as submitted: the real API does not preserve the
+		// order the audience was sent in and reports it back in an order of its
+		// own. See reorderedAudienceLikeTheAPI.
+		payload["audience"] = reorderedAudienceLikeTheAPI(*state.audience)
 		payload["audience_updated_at"] = state.audienceUpdatedAt
 	}
 	if state.ttl != nil {
@@ -223,6 +226,24 @@ func (a *oidcClaimsAPI) write(w http.ResponseWriter, path string) {
 	}
 
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// reorderedAudienceLikeTheAPI returns the audience reversed, never in the order
+// it was submitted.
+//
+// This mirrors reorderedLikeTheAPI in webhook_resource_fake_test.go: CircleCI
+// stores the audience claim as an unordered collection and reports it back in
+// an order of its own choosing, and a fake that echoes the submitted order
+// straight back cannot catch a resource that wrongly depends on it. A
+// collection of one element is returned unchanged, which is unavoidable and
+// harmless — the tests that must detect ordering all submit two or more.
+func reorderedAudienceLikeTheAPI(audience []string) []string {
+	reordered := make([]string, len(audience))
+	for i, v := range audience {
+		reordered[len(audience)-1-i] = v
+	}
+
+	return reordered
 }
 
 // recorded returns the request lines seen so far.
@@ -269,7 +290,7 @@ resource "circleci_oidc_custom_claims" "test" {
 					statecheck.ExpectKnownValue(
 						"circleci_oidc_custom_claims.test",
 						tfjsonpath.New("audience"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("https://sts.amazonaws.com"),
 						}),
 					),
@@ -297,7 +318,7 @@ resource "circleci_oidc_custom_claims" "test" {
 					statecheck.ExpectKnownValue(
 						"circleci_oidc_custom_claims.test",
 						tfjsonpath.New("audience"),
-						knownvalue.ListExact([]knownvalue.Check{
+						knownvalue.SetExact([]knownvalue.Check{
 							knownvalue.StringExact("my-audience"),
 						}),
 					),
@@ -438,6 +459,58 @@ resource "circleci_oidc_custom_claims" "test" {
 	if !sawTTLOnlyDelete {
 		t.Errorf("no DELETE naming only the ttl claim, got %v", api.recorded())
 	}
+}
+
+// TestAccOIDCCustomClaimsAudienceOrderDoesNotDiff is the regression test for
+// issue #5: `audience` round-trips through the API on every read, and CircleCI
+// does not preserve the order it was submitted in (see
+// reorderedAudienceLikeTheAPI). With audience declared as a List, the
+// configured order and the order the fake echoes back on refresh disagree, and
+// Terraform planned a change forever — worse than ordinary refresh noise,
+// because no apply can ever make the two orders match: the very act of writing
+// the audience is what triggers the API to hand it back reordered. audience is
+// now a Set, so this must plan empty however the API orders the elements.
+//
+// Two elements are required: reorderedAudienceLikeTheAPI is a no-op on a single
+// element, and the bug it catches only exists when there is more than one.
+func TestAccOIDCCustomClaimsAudienceOrderDoesNotDiff(t *testing.T) {
+	api := newOIDCClaimsAPI()
+	srv := newOIDCClaimsServer(t, api)
+
+	config := governanceProviderConfig(srv.URL) + fmt.Sprintf(`
+resource "circleci_oidc_custom_claims" "test" {
+  organization_id = %q
+  audience        = ["sts.amazonaws.com", "vault.example.com"]
+}
+`, testOIDCOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_oidc_custom_claims.test",
+						tfjsonpath.New("audience"),
+						knownvalue.SetExact([]knownvalue.Check{
+							knownvalue.StringExact("sts.amazonaws.com"),
+							knownvalue.StringExact("vault.example.com"),
+						}),
+					),
+				},
+			},
+			// The identical configuration, replanned. The fake answers every GET
+			// with the audience reversed relative to whatever was last written (see
+			// reorderedAudienceLikeTheAPI), so this is precisely the shape of request
+			// that produced a permanent diff before audience became a Set.
+			{
+				Config:             config,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
 }
 
 // TestAccOIDCCustomClaimsDropsResetClaims covers the authoritative model: a claim

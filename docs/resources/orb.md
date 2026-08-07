@@ -94,7 +94,7 @@ Omit this attribute to leave categories unmanaged, so that categories set outsid
 
 ### Read-Only
 
-- `categories` (Attributes List) The registry categories the orb is currently listed under. (see [below for nested schema](#nestedatt--categories))
+- `categories` (Attributes List) The registry categories the orb is currently listed under, sorted by name so that the order the API returns them in — which is not part of its contract — cannot produce a diff. (see [below for nested schema](#nestedatt--categories))
 - `created_at` (String) When the orb was created, as an RFC 3339 timestamp.
 - `full_name` (String) The orb's fully qualified name, `<namespace>/<name>`. This is what a `.circleci/config.yml` refers to, as `<full_name>@<version>`.
 - `home_url` (String) The orb's home page, when one is set.

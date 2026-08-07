@@ -142,6 +142,84 @@ resource "circleci_orb" "test" {
 	}
 }
 
+// TestAccOrbResource_CategoriesOrderDoesNotDiff is the regression test for
+// issue #5: `categories` is a Computed ListNestedAttribute, and the registry
+// gives no ordering guarantee for the categories an orb belongs to.
+//
+// `categories` has no plan modifier, so the framework's default behaviour for
+// an unconfigured Computed attribute carries the value in state forward as the
+// PLANNED one whenever some other attribute is what triggers an update. That
+// makes an update that leaves category membership untouched — here, flipping
+// is_listed — the shape that actually breaks: Update() re-fetches the orb and
+// rebuilds `categories` from that fresh response, and if the API answers with
+// the same categories in a different order than the one Create last wrote to
+// state, the apply's actual result no longer matches what was planned. Terraform
+// reports that as "Provider produced inconsistent result after apply" — not a
+// mere diff, an error every subsequent plan would keep hitting.
+//
+// The fake models this deliberately: orbDetail (orb_fake_test.go) renders
+// add-category responses in insertion order but a set-listed response (like a
+// GET) as a snapshot in the registry's own order, which is what lets an
+// is_listed-only change surface a reordering that never touched category_ids.
+// Two categories are required — a single-element list cannot show a reordering
+// at all, which is exactly the gap that let this ship: every other orb test
+// manages only one.
+func TestAccOrbResource_CategoriesOrderDoesNotDiff(t *testing.T) {
+	api := newOrbFakeAPI(t)
+	ns := api.seedNamespace("acme")
+
+	config := func(listed bool) string {
+		return orbProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_orb" "test" {
+  namespace_id = %q
+  name         = "node"
+  is_listed    = %t
+  category_ids = [%q, %q]
+}
+`, ns.ID, listed, orbBuildCategoryID, orbNotifyCategoryID)
+	}
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config(false),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_orb.test",
+						tfjsonpath.New("categories").AtSliceIndex(0).AtMapKey("name"),
+						knownvalue.StringExact("Build")),
+					statecheck.ExpectKnownValue("circleci_orb.test",
+						tfjsonpath.New("categories").AtSliceIndex(1).AtMapKey("name"),
+						knownvalue.StringExact("Notifications")),
+				},
+			},
+			// is_listed flips; category_ids does not. Update() still re-fetches the
+			// orb and rebuilds `categories` from whatever order the fake's set-listed
+			// response happens to use, which is deliberately not the order Create
+			// wrote. Without sorting, this either fails apply outright with
+			// "Provider produced inconsistent result after apply" or leaves a
+			// permanent diff; with it, both responses collapse to the same order and
+			// this step — and the empty replan after it — succeed.
+			{
+				Config: config(true),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_orb.test",
+						tfjsonpath.New("categories").AtSliceIndex(0).AtMapKey("name"),
+						knownvalue.StringExact("Build")),
+					statecheck.ExpectKnownValue("circleci_orb.test",
+						tfjsonpath.New("categories").AtSliceIndex(1).AtMapKey("name"),
+						knownvalue.StringExact("Notifications")),
+				},
+			},
+			{
+				Config:             config(true),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
 // TestAccOrbResource_RejectsQualifiedName guards the validator: the namespace
 // comes from namespace_id, so name must not repeat it.
 func TestAccOrbResource_RejectsQualifiedName(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -187,8 +188,10 @@ func (r *orbResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				ElementType: types.StringType,
 			},
 			"categories": schema.ListNestedAttribute{
-				MarkdownDescription: "The registry categories the orb is currently listed under.",
-				Computed:            true,
+				MarkdownDescription: "The registry categories the orb is currently listed under, " +
+					"sorted by name so that the order the API returns them in — which is not part " +
+					"of its contract — cannot produce a diff.",
+				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"id": schema.StringAttribute{
@@ -586,9 +589,37 @@ func orbBareName(fullName, namespace string) string {
 }
 
 // orbCategoriesToList converts API categories into the computed categories list.
+//
+// The API reports an orb's categories in an order of its own choosing rather
+// than a stable one, and nothing about the category-membership routes promises
+// the order survives from one response to the next. `categories` is Computed
+// with no plan modifier, so the framework's default plan carries the value in
+// state forward whenever some OTHER attribute is what triggers an update. If
+// Update then rebuilds this list from a fresh, differently-ordered API
+// response, the apply's actual result no longer matches what was planned, and
+// Terraform reports "Provider produced inconsistent result after apply" —
+// worse than an ordinary diff, since every later plan keeps failing the same
+// way until something touches category membership directly.
+//
+// Sorting here, by name and then by id to break a tie, makes the attribute's
+// order a property of this provider rather than of the API, so a reordering
+// response can never disagree with what was last written. It is a copy: the
+// input slice is also used by reconcileCategories, whose category membership
+// check does not care about order, but mutating a caller's slice in place is
+// worth avoiding regardless.
 func orbCategoriesToList(ctx context.Context, categories []circleci.OrbCategory) (types.List, diag.Diagnostics) {
-	models := make([]orbCategoryModel, 0, len(categories))
-	for _, category := range categories {
+	sorted := make([]circleci.OrbCategory, len(categories))
+	copy(sorted, categories)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Name != sorted[j].Name {
+			return sorted[i].Name < sorted[j].Name
+		}
+
+		return sorted[i].ID < sorted[j].ID
+	})
+
+	models := make([]orbCategoryModel, 0, len(sorted))
+	for _, category := range sorted {
 		models = append(models, orbCategoryModel{
 			Id:   types.StringValue(category.ID),
 			Name: types.StringValue(category.Name),

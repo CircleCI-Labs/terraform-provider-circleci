@@ -53,7 +53,7 @@ resource "circleci_oidc_custom_claims" "audience_only" {
 
 ### Optional
 
-- `audience` (List of String) The values placed in the token's `aud` claim, replacing CircleCI's default audience. Set it to the audience your identity provider expects, for example `["sts.amazonaws.com"]` for AWS. An empty list is sent as an explicit empty audience; omit the attribute entirely to leave the claim at CircleCI's default.
+- `audience` (Set of String) The values placed in the token's `aud` claim, replacing CircleCI's default audience. Set it to the audience your identity provider expects, for example `["sts.amazonaws.com"]` for AWS. An empty set is sent as an explicit empty audience; omit the attribute entirely to leave the claim at CircleCI's default. Order is not significant: CircleCI does not preserve the order the audience is sent in.
 - `org_id` (String) The unique identifier (UUID) of the organization that owns this OIDC claim customization.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.

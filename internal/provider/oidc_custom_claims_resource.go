@@ -35,15 +35,18 @@ const oidcCustomClaimsTypeName = "circleci_oidc_custom_claims"
 
 // oidcCustomClaimsResourceModel maps the resource schema.
 //
-// Audience is a types.List rather than a []string so that "no audience
+// Audience is a types.Set rather than a []string so that "no audience
 // configured" (null) stays distinguishable from "an audience configured as
 // empty" ([]). Those mean different things to the API: the first omits the claim
-// from the PATCH body, the second overwrites it with an empty list.
+// from the PATCH body, the second overwrites it with an empty list. It is a Set
+// rather than a types.List because CircleCI does not preserve the order the
+// audience was submitted in and reports it back in an order of its own choosing
+// — see the audience attribute's schema comment.
 type oidcCustomClaimsResourceModel struct {
 	OrganizationID    types.String  `tfsdk:"organization_id"`
 	OrgID             types.String  `tfsdk:"org_id"`
 	ProjectID         types.String  `tfsdk:"project_id"`
-	Audience          types.List    `tfsdk:"audience"`
+	Audience          types.Set     `tfsdk:"audience"`
 	TTL               durationValue `tfsdk:"ttl"`
 	AudienceUpdatedAt types.String  `tfsdk:"audience_updated_at"`
 	TTLUpdatedAt      types.String  `tfsdk:"ttl_updated_at"`
@@ -119,11 +122,24 @@ func (r *oidcCustomClaimsResource) Schema(_ context.Context, _ resource.SchemaRe
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
-			"audience": schema.ListAttribute{
+			// This is a set, not a list. CircleCI does not preserve the order the
+			// audience was submitted in and reports it back in an order of its own
+			// choosing, so a plain List compared the configured order against the
+			// returned order and could plan a change on every run with nothing to
+			// apply — worse here than mere refresh noise, since audience round-trips
+			// through the API on every read: a reordering API would have produced a
+			// PERMANENT diff no apply could settle.
+			//
+			// No state upgrade accompanies this change: a list and a set of the same
+			// element type share one JSON encoding, and the framework re-reads prior
+			// raw state against the current schema type, so existing state decodes as
+			// a set unchanged. TestListToSetNeedsNoStateUpgrade proves it.
+			"audience": schema.SetAttribute{
 				MarkdownDescription: "The values placed in the token's `aud` claim, replacing CircleCI's " +
 					"default audience. Set it to the audience your identity provider expects, for example " +
-					"`[\"sts.amazonaws.com\"]` for AWS. An empty list is sent as an explicit empty " +
-					"audience; omit the attribute entirely to leave the claim at CircleCI's default.",
+					"`[\"sts.amazonaws.com\"]` for AWS. An empty set is sent as an explicit empty " +
+					"audience; omit the attribute entirely to leave the claim at CircleCI's default. " +
+					"Order is not significant: CircleCI does not preserve the order the audience is sent in.",
 				ElementType: types.StringType,
 				Optional:    true,
 			},
@@ -241,7 +257,7 @@ func (r *oidcCustomClaimsResource) Read(ctx context.Context, req resource.ReadRe
 		return
 	}
 
-	audience, diags := types.ListValueFrom(ctx, types.StringType, claims.Audience)
+	audience, diags := types.SetValueFrom(ctx, types.StringType, claims.Audience)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
