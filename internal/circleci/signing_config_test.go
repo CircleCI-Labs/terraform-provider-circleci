@@ -6,6 +6,7 @@ package circleci_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -196,6 +197,37 @@ func TestGetSigningConfigNotFoundWhenAbsentFromList(t *testing.T) {
 	_, err := client.GetSigningConfig(context.Background(), signingConfigOrgID, "does-not-exist")
 	if !circleci.IsNotFound(err) {
 		t.Errorf("err = %v, want it to satisfy IsNotFound", err)
+	}
+}
+
+// TestGetSigningConfigDistinguishesTransport404FromEmptyList pins the
+// distinction a caller needs to tell a deleted configuration from an
+// organization the token has lost access to.
+//
+// There is no single-config route, so GetSigningConfig always works by
+// listing and matching on id. circleci.IsNotFound says yes to both a
+// transport 404 from that list call and the ErrNotFound sentinel this package
+// wraps around a successful-but-empty match -- but only the sentinel means
+// the configuration itself is gone. A caller that checks the broader
+// IsNotFound, rather than errors.Is(err, circleci.ErrNotFound), cannot tell
+// the two apart, and that is exactly the defect this pins: v3 answers 404 for
+// filter[org_id] both when the organization does not exist and when the token
+// can no longer manage it.
+func TestGetSigningConfigDistinguishesTransport404FromEmptyList(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newOrbClient(t, orbStatus(http.StatusNotFound, `{"error":{"title":"Org not found"}}`))
+
+	_, err := client.GetSigningConfig(context.Background(), signingConfigOrgID, signingConfigID)
+	if err == nil {
+		t.Fatal("GetSigningConfig returned no error for a 404 from the list, want one")
+	}
+	if !circleci.IsNotFound(err) {
+		t.Errorf("IsNotFound(%v) = false, want true: a transport 404 still satisfies it", err)
+	}
+	if errors.Is(err, circleci.ErrNotFound) {
+		t.Errorf("errors.Is(%v, ErrNotFound) = true, want false: a 404 from the list call itself "+
+			"is not the same as the configuration being absent from a successful list", err)
 	}
 }
 

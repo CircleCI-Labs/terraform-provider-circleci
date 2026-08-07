@@ -5,7 +5,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -328,14 +330,50 @@ func (r *iosSigningConfigResource) Read(ctx context.Context, req resource.ReadRe
 		return
 	}
 
-	cfg, err := r.client.GetSigningConfig(ctx,
-		effectiveOrgID(state.OrganizationId, state.OrgId), state.Id.ValueString())
-	if circleci.IsNotFound(err) {
-		resp.State.RemoveResource(ctx)
+	orgID := effectiveOrgID(state.OrganizationId, state.OrgId)
 
-		return
-	}
+	cfg, err := r.client.GetSigningConfig(ctx, orgID, state.Id.ValueString())
 	if err != nil {
+		// There is no single-config route: a configuration is read by listing the
+		// organization's configurations and matching on id (see
+		// getSigningConfigByID in internal/circleci/signing_config.go). Only the
+		// configuration being genuinely absent from that list -- the ErrNotFound
+		// sentinel wrapped around a successful-but-empty match -- may drop this
+		// resource from state.
+		//
+		// A *transport* 404 from the list call itself must not, even though
+		// IsNotFound would say yes to it: v3 answers 404 for a filtered collection
+		// both when the organization no longer exists and when the token has lost
+		// access to one that does, which is not the same thing as the configuration
+		// being deleted. Dropping state there would plan a recreate on the next
+		// apply, and the create would then collide with this resource's own
+		// unique-name constraint -- so a token losing access would surface as an
+		// HTTP 409 conflict rather than as the permissions problem it actually is.
+		// Report it instead and leave state alone.
+		if errors.Is(err, circleci.ErrNotFound) {
+			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
+		if circleci.HasStatus(err, http.StatusNotFound) {
+			resp.Diagnostics.AddError(
+				"Unable to read CircleCI iOS signing configuration",
+				fmt.Sprintf(
+					"CircleCI answered 404 for organization %s while reading iOS signing "+
+						"configuration %s. The configuration is read by listing the organization's "+
+						"signing configurations, so this is about the organization, not the "+
+						"configuration: either organization %s does not exist, or the API token can "+
+						"no longer manage it.\n\n"+
+						"%s has been left in Terraform state, because removing it would have the next "+
+						"apply try to recreate it and collide with its own unique-name constraint.",
+					orgID, state.Id.ValueString(), orgID, iosSigningConfigTypeName,
+				),
+			)
+
+			return
+		}
+
 		resp.Diagnostics.AddError(
 			"Unable to read CircleCI iOS signing configuration",
 			circleci.Detail(err),

@@ -380,6 +380,64 @@ resource "circleci_ios_signing_config" "test" {
 	})
 }
 
+// TestAccIOSSigningConfigResource_lostAccessKeepsState is the counterpart to
+// the ordinary drift case (a configuration deleted outside Terraform, which
+// this resource never got a dedicated test for even though it is exercised
+// implicitly by the plan-only step in TestAccIOSSigningConfigResource):
+// GetSigningConfig has no single-entity route, so a configuration is read by
+// listing the organization's configurations and matching on id. When the list
+// call itself fails -- because the token has lost access to the organization,
+// modelled here as the same 404 v3 answers for that -- the configuration is
+// not necessarily gone at all. Read must report the failure and leave state
+// alone, rather than dropping the resource and letting the next apply collide
+// with this resource's own unique-name constraint.
+func TestAccIOSSigningConfigResource_lostAccessKeepsState(t *testing.T) {
+	api := newIOSSigningFakeAPI(t)
+
+	const profileBlob = "bW9iaWxlcHJvdmlzaW9uLWNvbnRlbnQ="
+
+	config := iosSigningProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_ios_signing_certificate" "cert" {
+  organization_id      = %[1]q
+  file_name             = "distribution.p12"
+  certificate_blob      = "cDEy...cert..."
+  certificate_password  = "secret"
+}
+
+resource "circleci_ios_signing_config" "test" {
+  organization_id = %[1]q
+  name            = "release-config"
+  certificate_id  = circleci_ios_signing_certificate.cert.id
+
+  provisioning_profiles = [
+    {
+      file_name = "release.mobileprovision"
+      blob      = %[2]q
+    },
+  ]
+}
+`, iosSigningTestOrgID, profileBlob)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+			{
+				PreConfig:    func() { api.setListConfigsStatus(404) },
+				RefreshState: true,
+				// Line-wrapped by Terraform, so match a short phrase: this is the
+				// branch that reports the 404 instead of removing the resource.
+				ExpectError: regexp.MustCompile(`(?s)404 for organization`),
+			},
+			// Undo the failure so the framework's own destroy step can run.
+			{
+				PreConfig: func() { api.setListConfigsStatus(0) },
+				Config:    config,
+			},
+		},
+	})
+}
+
 // TestAccIOSSigningConfigResource_duplicateNameConflicts pins that a signing
 // configuration name is unique within the organization: a repeat is refused with
 // a conflict rather than replacing the existing configuration. Nothing asserted

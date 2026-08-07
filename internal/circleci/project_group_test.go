@@ -6,6 +6,7 @@ package circleci_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -196,6 +197,40 @@ func TestProjectGroupServiceGetPropagatesErrors(t *testing.T) {
 	}
 	if !circleci.IsUnauthorized(err) {
 		t.Errorf("IsUnauthorized(%v) = false, want true", err)
+	}
+}
+
+// TestProjectGroupServiceGetDistinguishesTransport404FromEmptyList is the
+// counterpart to TestProjectGroupServiceGetNotAssignedIsNotFound and
+// TestProjectGroupServiceGetPropagatesErrors: there is no single-grant route,
+// so Get always works by listing the project's groups and matching on id.
+// circleci.IsNotFound says yes to both a transport 404 from that list call
+// and the bare ErrNotFound this package returns for a successful-but-empty
+// match, but only the latter means the grant was actually revoked. A caller
+// that checks the broader IsNotFound, rather than
+// errors.Is(err, circleci.ErrNotFound), cannot tell a revoked grant from an
+// organization or project the token has lost access to -- both of which the
+// route answers with the same 404.
+func TestProjectGroupServiceGetDistinguishesTransport404FromEmptyList(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newProjectGroupServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Project not found"}`))
+	})
+
+	_, err := client.ProjectGroups().Get(context.Background(),
+		testProjectGroupOrgID, testProjectGroupProjectID, testProjectGroupGroupID)
+	if err == nil {
+		t.Fatal("Get returned no error for a 404 from the list, want one")
+	}
+	if !circleci.IsNotFound(err) {
+		t.Errorf("IsNotFound(%v) = false, want true: a transport 404 still satisfies it", err)
+	}
+	if errors.Is(err, circleci.ErrNotFound) {
+		t.Errorf("errors.Is(%v, ErrNotFound) = true, want false: a 404 from the list call itself "+
+			"is not the same as the grant being absent from a successful list", err)
 	}
 }
 
