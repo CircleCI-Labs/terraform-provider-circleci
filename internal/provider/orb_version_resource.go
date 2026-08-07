@@ -191,24 +191,41 @@ func (r *orbVersionResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	source := published.Source
-	if source == "" {
-		source, err = r.client.GetOrbSource(ctx, published.ID)
-		if err != nil {
-			resp.Diagnostics.AddError(
-				"Unable to read the source of the published CircleCI orb version "+version,
-				circleci.Detail(err),
-			)
-
-			return
-		}
-	}
-
+	// The version is published from here on, and publishing cannot be undone or
+	// retried: a stable version is immutable, so a later apply cannot republish
+	// it if this Create returns with no record of it. Every field the publish
+	// response carries is copied in now, before the one call left that can still
+	// fail, so that a failure below writes state instead of orphaning a
+	// permanent orb version. See trigger_resource.go's Create for the model
+	// this follows and why: it is the same shape issue #6 fixed there.
 	plan.Id = types.StringValue(published.ID)
 	plan.OrbId = types.StringValue(published.OrbID)
 	plan.OrbName = types.StringValue(published.OrbName)
 	plan.Version = types.StringValue(published.Version)
 	plan.CreatedAt = types.StringValue(published.CreatedAt)
+
+	// Unlike issue #6, this call cannot be dropped: attributes.source is never
+	// present on a publish response in practice (see orbVersionWire's comment
+	// and the orbVersionEntity fixture in orb_test.go, which models exactly what
+	// production sends), so this always runs, not merely as a fallback.
+	source := published.Source
+	if source == "" {
+		source, err = r.client.GetOrbSource(ctx, published.ID)
+		if err != nil {
+			// source is Computed and cannot be left unknown in state. Recording it
+			// empty rather than dropping the whole resource is fine: the next Read —
+			// for example the one `terraform untaint` triggers — fetches it exactly
+			// the same way.
+			plan.Source = types.StringValue("")
+			resp.Diagnostics.AddError(
+				"Unable to read the source of the published CircleCI orb version "+version,
+				circleci.Detail(err),
+			)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+
+			return
+		}
+	}
 	plan.Source = types.StringValue(source)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)

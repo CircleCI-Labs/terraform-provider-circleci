@@ -25,6 +25,7 @@
 
 ### BUG FIXES
 
+
 * **`circleci_orb.categories` could show a spurious diff, or fail an update
   outright with "Provider produced inconsistent result after apply".** The
   registry gives no ordering guarantee for the categories an orb belongs to,
@@ -42,6 +43,38 @@
 
   Every existing test managed only one category, which cannot show a
   reordering at all; the regression test uses two.
+
+
+* **`circleci_orb_version` and `circleci_orb` could lose track of an object CircleCI had
+  already created.** In each `Create`, a second API call ran after the first had
+  already succeeded, and its failure returned before `resp.State.Set` — the same shape
+  issue #6 fixed on `circleci_trigger`. `circleci_orb_version` is the worst case:
+  `PublishOrbVersion` succeeds, then `GetOrbSource` fetches the source text (the publish
+  response never carries it in practice) — and a published version is immutable, so a
+  retry cannot republish it. The practitioner was stuck until they imported it by hand or
+  bumped the version. `circleci_orb` is similar: `CreateOrbPackage` succeeds, then
+  `SetOrbListed` and the category calls apply the rest of the configuration — and the
+  API has no route to delete an orb, so a retry collided with the name it could never
+  reclaim.
+
+  Both now write every field the successful call already returned before attempting
+  anything further, so a later failure marks the resource tainted (recoverable with
+  `terraform untaint`) instead of losing it from state outright.
+
+* **`circleci_project` could lose track of a project CircleCI had already created and
+  followed.** `Create`'s settings call — `GetProjectSettings` or `UpdateProjectSettings`,
+  whichever the configuration needs — ran after `CreateProject` had already succeeded,
+  and its failure, or a failure converting `pr_only_branch_overrides`, returned before
+  `resp.State.Set`. The project was left running at CircleCI, followed, with nothing in
+  Terraform tracking it. Fixed the same way as above.
+
+* **`circleci_budget` and `circleci_notification_preferences` are fixed for consistency
+  with the above, though neither was as severe.** `circleci_budget`'s `SetBudget` is an
+  upsert, so a retry after a failed `FindBudget` read-back converges rather than
+  orphaning anything. `circleci_notification_preferences`'s `Create` writes preferences
+  and reads the full matrix back in the same call — there was no second network call for
+  a later step to lose track of, only a local mapping step that does not fail against
+  real API responses. Both now write state defensively regardless.
 
 ## 0.5.0 (2026-08-06)
 

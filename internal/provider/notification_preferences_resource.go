@@ -276,11 +276,15 @@ func (r *notificationPreferencesResource) Create(ctx context.Context, req resour
 		return
 	}
 
+	// When updates is non-empty, the write above already happened at CircleCI:
+	// UpdateNotificationPreferences both writes and returns the refreshed
+	// matrix in one call, so there is no further request left that could
+	// strand it. applyNotificationPreferences below is a plain, local copy
+	// into the model with no request of its own — but state is still set
+	// unconditionally rather than only when it reports no diagnostics, on the
+	// same principle as trigger_resource.go's Create: a write that already
+	// happened must never be one `return` away from nothing recording it.
 	resp.Diagnostics.Append(applyNotificationPreferences(ctx, &plan, prefs)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

@@ -11,8 +11,14 @@ import (
 	"strings"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 const orbTestYAML = "version: 2.1\ndescription: an orb\n"
@@ -243,6 +249,101 @@ resource "circleci_orb_version" "test" {
 			},
 		},
 	})
+}
+
+// orbVersionResourceSchemaForTest returns the resource's schema, the same way
+// budgetResourceSchemaForTest does.
+func orbVersionResourceSchemaForTest(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	(&orbVersionResource{}).Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	return resp.Schema
+}
+
+// orbVersionStateForTest builds a tfsdk.State (or, read as a Plan's raw value,
+// the identical thing) from a fully-populated model.
+func orbVersionStateForTest(t *testing.T, schema rschema.Schema, model orbVersionResourceModel) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// TestOrbVersionResourceUnit_CreateWritesStateWhenSourceFetchFails is a
+// regression test for issue #37.
+//
+// PublishOrbVersion is irreversible: once it succeeds, the version is
+// published at CircleCI forever, and a stable version can never be
+// republished. attributes.source is never present on a publish response in
+// practice (see orbVersionWire's comment), so Create always follows a publish
+// with GetOrbSource. Before the fix, a failure there returned before
+// resp.State.Set, so a version CircleCI had just created permanently had no
+// record in Terraform state at all — the next apply would try to publish it
+// again and fail with "already exists", with no way to recover except
+// importing by hand or bumping the version.
+//
+// Driven directly through Create, rather than resource.UnitTest, because the
+// plugin-testing framework does not make "still in state after a failed
+// apply" easy to assert on — see project_resource_unit_test.go's
+// TestProjectResourceUnit_UpdateRejectsBadSlug for the same rationale.
+func TestOrbVersionResourceUnit_CreateWritesStateWhenSourceFetchFails(t *testing.T) {
+	api := newOrbFakeAPI(t)
+	ns := api.seedNamespace("acme")
+	orb := api.seedOrb("acme/node", ns.ID)
+	api.setFailGetOrbSourceStatus(http.StatusInternalServerError)
+
+	schema := orbVersionResourceSchemaForTest(t)
+	client := circleci.New(circleci.Config{Host: api.URL(), Token: "fake"})
+	r := &orbVersionResource{client: client}
+
+	plan := orbVersionStateForTest(t, schema, orbVersionResourceModel{
+		Id:        types.StringUnknown(),
+		OrbId:     types.StringValue(orb.ID),
+		OrbName:   types.StringUnknown(),
+		Version:   types.StringValue("1.0.0"),
+		Yaml:      types.StringValue(orbTestYAML),
+		Source:    types.StringUnknown(),
+		CreatedAt: types.StringUnknown(),
+	})
+
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create returned no diagnostics for a failed source fetch, want one")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Create left state empty after the publish succeeded; the published version now exists " +
+			"permanently at CircleCI with nothing in Terraform tracking it")
+	}
+
+	var out orbVersionResourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if out.Id.ValueString() == "" {
+		t.Error("state id is empty, want the id the publish response returned")
+	}
+	if out.Version.ValueString() != "1.0.0" {
+		t.Errorf("state version = %q, want 1.0.0", out.Version.ValueString())
+	}
+	if out.OrbId.ValueString() != orb.ID {
+		t.Errorf("state orb_id = %q, want %q", out.OrbId.ValueString(), orb.ID)
+	}
+
+	if published := api.requestsFor("POST", "/api/v3/orb/versions"); len(published) != 1 {
+		t.Errorf("publish requests = %d, want exactly 1: the failure was in reading the source back, "+
+			"not in publishing, and publishing must not be retried on that account", len(published))
+	}
 }
 
 // TestAccOrbVersionResource_RejectsBadVersion guards the validator, so that a

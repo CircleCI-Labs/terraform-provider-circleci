@@ -808,3 +808,60 @@ func emptyBudgetModelForTest() budgetResourceModel {
 		ThresholdExceeded: types.BoolNull(),
 	}
 }
+
+// TestBudgetResourceCreate_WritesStateWhenFindBudgetFails is a regression test
+// for issue #37.
+//
+// SetBudget is an upsert, so this one is self-healing in a way
+// circleci_orb_version and circleci_orb are not: a retry after this point
+// simply repeats the same write and converges. Even so, before the fix, a
+// failure from FindBudget — the call Create makes right after SetBudget to
+// learn the id, enforcement type and statistics none of which SetBudget's own
+// response carries — returned before resp.State.Set, so a budget CircleCI had
+// already written had no record in Terraform state until the next apply
+// happened to succeed.
+//
+// removeOrg is enough to reach this: unlike the list route, the fake's set
+// route (mirroring the real upsert PUT) does not consult missingOrgs, so
+// SetBudget still succeeds while the following FindBudget/list fails with
+// 403 — exactly "first call succeeds, second fails" with no new fake
+// plumbing needed.
+func TestBudgetResourceCreate_WritesStateWhenFindBudgetFails(t *testing.T) {
+	t.Parallel()
+
+	api, host := newFakeBudgetAPI(t)
+	api.removeOrg(testBudgetOrgID)
+	schema := budgetResourceSchemaForTest(t)
+	r := &budgetResource{client: api.client(host)}
+
+	plan := budgetStateForTest(t, schema, budgetPlanModel(testBudgetOrgID, "", 1000))
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create returned no diagnostics for a failed FindBudget call, want one")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Create left state empty after SetBudget succeeded; the budget now exists at CircleCI " +
+			"with nothing in Terraform tracking it")
+	}
+
+	var out budgetResourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if out.OrgID.ValueString() != testBudgetOrgID {
+		t.Errorf("state org_id = %q, want %q", out.OrgID.ValueString(), testBudgetOrgID)
+	}
+	if out.Credits.ValueInt64() != 1000 {
+		t.Errorf("state credits = %d, want 1000 (the value SetBudget already wrote)", out.Credits.ValueInt64())
+	}
+
+	// SetBudget itself succeeded: the fake's set route ignores missingOrgs, so
+	// the write really did happen, matching the "write already succeeded"
+	// premise of this test.
+	if entries := api.entries(testBudgetOrgID); len(entries) != 1 || entries[0].credits != 1000 {
+		t.Errorf("fake budgets for the org = %+v, want one entry with credits=1000 (the write from "+
+			"SetBudget, which does not consult missingOrgs)", entries)
+	}
+}

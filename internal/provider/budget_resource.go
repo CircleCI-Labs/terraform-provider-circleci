@@ -185,12 +185,22 @@ func (r *budgetResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	// The budget now exists at this scope, and SetBudget is an upsert: unlike
+	// circleci_orb_version or circleci_orb, a retry after this point converges
+	// rather than orphaning or colliding with anything, so this is the
+	// self-healing case #37 also asked to be fixed for consistency. Even so, a
+	// failure to read the write back below must not return before state
+	// records what org_id and org/project scope were just written — see
+	// trigger_resource.go's Create for the model.
+	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
+
 	budget, ok, err := r.client.FindBudget(ctx, orgID, projectID)
 	if !budgetFoundAfterWrite(&resp.Diagnostics, "creating", budget, ok, err) {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+
 		return
 	}
 
-	setOrgIDs(&plan.OrganizationID, &plan.OrgID, orgID)
 	applyBudget(&plan, budget)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
