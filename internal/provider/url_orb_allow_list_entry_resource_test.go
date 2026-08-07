@@ -33,6 +33,12 @@ type fakeOrbAllowListAPI struct {
 	// both for an organization that does not exist and for one the token may not
 	// view -- which is a different thing from an entry being absent.
 	listStatus int
+	// deleteStatus, when non-zero, makes the delete route answer with that status
+	// instead of removing the entry. It stands in for the 404 the real delete
+	// route throws when the organization cannot be resolved or viewed -- the real
+	// route never 404s over a missing entry, so this is the only way a delete 404
+	// happens.
+	deleteStatus int
 }
 
 func newFakeOrbAllowListAPI(t *testing.T) (*httptest.Server, *fakeOrbAllowListAPI) {
@@ -90,8 +96,20 @@ func newFakeOrbAllowListAPI(t *testing.T) (*httptest.Server, *fakeOrbAllowListAP
 			}
 
 		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, collection+"/"):
+			if api.deleteStatus != 0 {
+				w.WriteHeader(api.deleteStatus)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+
+				return
+			}
+
 			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 
+			// The real route answers 200 whether or not id was present -- deleting an
+			// entry that is already gone succeeds rather than 404ing. Mirror that here
+			// rather than erroring on an unknown id, so this fake cannot mask the bug
+			// where the provider mistook that 200-regardless-of-existence for "a 404
+			// means the entry was already gone".
 			kept := make([]map[string]any, 0, len(api.entries))
 			for _, entry := range api.entries {
 				if entry["id"] != id {
@@ -128,6 +146,15 @@ func (a *fakeOrbAllowListAPI) setListStatus(status int) {
 	defer a.mu.Unlock()
 
 	a.listStatus = status
+}
+
+// setDeleteStatus makes the delete route fail with status instead of removing
+// the entry, or restores normal behavior when status is zero.
+func (a *fakeOrbAllowListAPI) setDeleteStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.deleteStatus = status
 }
 
 func (a *fakeOrbAllowListAPI) count() int {
@@ -563,5 +590,89 @@ resource "circleci_url_orb_allow_list_entry" "t" {
 	if creates != 1 {
 		t.Errorf("%d create requests, want 1: a 404 on the organization must not cause a "+
 			"recreate, got %v", creates, api.recordedPaths())
+	}
+}
+
+// TestAccURLOrbAllowListEntry_DestroyFailsWhenTheOrganizationAnswers404 is the
+// regression test for the issue where `terraform destroy` reported success
+// without deleting anything.
+//
+// DeleteURLOrbAllowListEntry documents that the delete route answers 200
+// whether or not the entry existed, so a 404 from that call is never "already
+// gone" -- it means the organization itself could not be resolved or viewed, a
+// renamed org or a token that lost access being the likely causes. Delete used
+// to treat that 404 the same as "already gone" (circleci.IsNotFound), which
+// made Terraform drop the resource from state while the entry stayed live
+// upstream, permanently occupying one of the organization's five allow-list
+// slots with nothing left tracking it -- and silently, since destroy reported
+// success. Delete must instead report an error naming the organization and
+// leave the resource in state, matching the distinction Read already draws for
+// the same 404.
+func TestAccURLOrbAllowListEntry_DestroyFailsWhenTheOrganizationAnswers404(t *testing.T) {
+	srv, api := newFakeOrbAllowListAPI(t)
+
+	cfg := fmt.Sprintf(`
+provider "circleci" {
+  host = %q
+  key  = "fake"
+}
+resource "circleci_url_orb_allow_list_entry" "t" {
+  organization = %q
+  name         = "orbs"
+  prefix       = "https://orbs.example.com/"
+  auth         = "none"
+}
+`, srv.URL, testOrbAllowListOrg)
+
+	sdkresource.UnitTest(t, sdkresource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []sdkresource.TestStep{
+			{Config: cfg},
+			{
+				PreConfig: func() { api.setDeleteStatus(http.StatusNotFound) },
+				Config:    cfg,
+				Destroy:   true,
+				// Terraform wraps the diagnostic detail, so match a short phrase
+				// naming the organization rather than a full sentence.
+				ExpectError: regexp.MustCompile(`(?s)organization`),
+			},
+			{
+				// The failed destroy above must not have dropped the resource from
+				// state: undo the failure and confirm a plan against the same config
+				// is empty, a refresh rather than a recreate. Had the bug survived,
+				// this step would see a diff to create a duplicate entry.
+				PreConfig: func() {
+					if got := api.count(); got != 1 {
+						t.Errorf("fake API holds %d entries after the failed destroy, want 1: "+
+							"the failed delete must not have removed the live entry", got)
+					}
+
+					api.setDeleteStatus(0)
+				},
+				Config:   cfg,
+				PlanOnly: true,
+			},
+		},
+	})
+
+	// The framework's own destroy step runs last, once deleteStatus is back to
+	// zero, so by now the entry is gone for real. Exactly one delete request
+	// should have succeeded: the one from that final step. The failed attempt
+	// above must have reached the API (recorded) without removing anything.
+	var deletes int
+
+	for _, path := range api.recordedPaths() {
+		if strings.HasPrefix(path, http.MethodDelete+" ") {
+			deletes++
+		}
+	}
+
+	if deletes != 2 {
+		t.Errorf("%d delete requests, want 2 (the failed attempt plus the framework's "+
+			"final destroy), got %v", deletes, api.recordedPaths())
+	}
+
+	if got := api.count(); got != 0 {
+		t.Errorf("the fake API still holds %d entries after the test, want 0", got)
 	}
 }
