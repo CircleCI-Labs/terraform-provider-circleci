@@ -240,9 +240,29 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	// Map response to state
+	// Convert the response's events to types.Set, the same way Read does: the API
+	// reports them in an order of its own, and a set has no order to disagree with.
+	createdEvents, eventDiags := types.SetValueFrom(ctx, types.StringType, createdWebhook.Events)
+	resp.Diagnostics.Append(eventDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Map response to state, like Read does for every field below, and unlike Read
+	// only because there is now a response to take them from: createdWebhook is
+	// what CircleCI reports having stored, not the plan that was just sent, and
+	// there is nothing here to assume the two agree. signing_secret is the
+	// deliberate exception: CreateWebhook's response never carries the real
+	// value (only WebhookSigningSecretMask, if anything), so it is left as the
+	// plan's user-provided value, matching Read's own comment on the same
+	// exception.
 	plan.Id = types.StringValue(createdWebhook.ID)
-	// Note: signing_secret is preserved from plan (user-provided value)
+	plan.Name = types.StringValue(createdWebhook.Name)
+	plan.Url = types.StringValue(createdWebhook.URL)
+	plan.VerifyTls = types.BoolValue(createdWebhook.VerifyTLS)
+	plan.ScopeId = types.StringValue(createdWebhook.Scope.ID)
+	plan.ScopeType = types.StringValue(createdWebhook.Scope.Type)
+	plan.Events = createdEvents
 	plan.CreatedAt = types.StringValue(createdWebhook.CreatedAt)
 	plan.UpdatedAt = types.StringValue(createdWebhook.UpdatedAt)
 
@@ -396,9 +416,38 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// Map response to state
+	// Convert the response's events to types.Set, the same way Read does: the API
+	// reports them in an order of its own, and a set has no order to disagree with.
+	updatedEvents, eventDiags := types.SetValueFrom(ctx, types.StringType, updatedWebhook.Events)
+	resp.Diagnostics.Append(eventDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Map response to state, like Read does for every field below, and unlike Read
+	// only because there is now a response to take them from: updatedWebhook is
+	// what CircleCI reports having stored, not the plan that was just sent, so a
+	// name, url, verify_tls or events CircleCI normalises, rejects part of, or
+	// otherwise reports back differently from the request belongs in state, not
+	// what Terraform asked for. Before this, only id, created_at and updated_at
+	// came from updatedWebhook; the rest were left holding the plan's values.
+	// Read already refreshes every one of these on the next plan regardless, so
+	// this closes a window rather than fixing a value that would otherwise have
+	// stayed wrong: it was a one-`apply`-cycle staleness, not persistent drift.
+	//
+	// scope_id and scope_type are not read from the response here: they carry
+	// RequiresReplace, so an Update's plan value already equals the prior
+	// state's, and UpdateWebhook does not send a scope to change in the first
+	// place (see its own comment on the route being unable to move a webhook).
 	plan.Id = state.Id
-	// Note: signing_secret is preserved from plan (user-provided value)
+	plan.Name = types.StringValue(updatedWebhook.Name)
+	plan.Url = types.StringValue(updatedWebhook.URL)
+	plan.VerifyTls = types.BoolValue(updatedWebhook.VerifyTLS)
+	plan.Events = updatedEvents
+	// signing_secret is the deliberate exception: UpdateWebhook's response never
+	// carries the real value (only WebhookSigningSecretMask, if anything), so it
+	// is left as the plan's user-provided value, matching Read's own comment on
+	// the same exception.
 	plan.CreatedAt = state.CreatedAt
 	plan.UpdatedAt = types.StringValue(updatedWebhook.UpdatedAt)
 
