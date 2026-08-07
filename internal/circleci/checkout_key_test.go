@@ -322,6 +322,83 @@ func TestCheckoutKeyRejectsMalformedProjectSlug(t *testing.T) {
 	}
 }
 
+// TestCheckoutKeyProjectPathRejectsDotSegments is the regression test for
+// checkoutKeyProjectPath's dot-segment defence in depth: a slug segment that is
+// exactly "." or ".." survives url.PathEscape unchanged (it doesn't touch dots)
+// and url.Parse doesn't clean dot-segments out of a path either, so either one
+// would put a literal "./" or "../" into the outbound request path and
+// retarget it at a different route. This is defence in depth, not a fix for a
+// reachable bug: a slug comes from Terraform configuration or from CircleCI's
+// own API responses, never from a third party.
+//
+// It also checks the legitimate cases still parse, including a segment that
+// merely contains a dot (a repository named "my.repo"), which must remain
+// valid — rejecting that would break real configurations.
+func TestCheckoutKeyProjectPathRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu      sync.Mutex
+		reqURIs []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqURIs = append(reqURIs, r.RequestURI)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, checkoutKeyBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	tests := []struct {
+		name    string
+		slug    string
+		wantErr bool
+	}{
+		{name: "dot in first segment", slug: "./acme/widgets", wantErr: true},
+		{name: "dot-dot in first segment", slug: "../acme/widgets", wantErr: true},
+		{name: "dot in middle segment", slug: "gh/./widgets", wantErr: true},
+		{name: "dot-dot in middle segment", slug: "gh/../widgets", wantErr: true},
+		{name: "dot in last segment", slug: "gh/acme/.", wantErr: true},
+		{name: "dot-dot in last segment", slug: "gh/acme/..", wantErr: true},
+		{name: "ordinary slug", slug: "gh/acme/widgets", wantErr: false},
+		{name: "segment merely containing a dot", slug: "gh/acme/my.repo", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := c.GetCheckoutKey(context.Background(), tt.slug, "aa:bb")
+			if tt.wantErr && err == nil {
+				t.Errorf("GetCheckoutKey(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("GetCheckoutKey(%q) returned error: %v, want none", tt.slug, err)
+			}
+
+			err = c.DeleteCheckoutKey(context.Background(), tt.slug, "aa:bb")
+			if tt.wantErr && err == nil {
+				t.Errorf("DeleteCheckoutKey(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("DeleteCheckoutKey(%q) returned error: %v, want none", tt.slug, err)
+			}
+		})
+	}
+
+	// Sanity check the legitimate requests actually reached the server, so a
+	// mistake that also broke the happy path wouldn't be masked by an
+	// error-only assertion.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reqURIs) != 4 {
+		t.Fatalf("made %d requests, want 4 (get+delete for each of the two legitimate slugs): %v", len(reqURIs), reqURIs)
+	}
+}
+
 // TestCheckoutKeyDecodesUnderscoreFieldNames pins the JSON field names against
 // the real API.
 //

@@ -161,12 +161,38 @@ func (s ProjectSettings) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// checkProjectSettingsPathSegments rejects a vcsType, orgName or projectName
+// that is exactly "." or ".." — see isDotSegment in project.go — before any of
+// the three reaches RouteParams. RouteParams percent-escapes each value as a
+// route parameter, but escaping does not touch a segment made only of dots, so
+// an unrejected one would put a literal "./" or "../" into the request path.
+//
+// Unlike projectSlugPath, checkoutKeyProjectPath and insightsSlugPath, this
+// takes three already-split arguments rather than a single slug, because
+// GetProjectSettings and UpdateProjectSettings address a project by its three
+// parts directly and pass them through RouteParams individually.
+func checkProjectSettingsPathSegments(vcsType, orgName, projectName string) error {
+	for _, segment := range []string{vcsType, orgName, projectName} {
+		if isDotSegment(segment) {
+			return fmt.Errorf(
+				"circleci: project settings vcs type, org name and project name must not be %q", segment,
+			)
+		}
+	}
+
+	return nil
+}
+
 // GetProjectSettings reads the advanced settings of a project, addressed by the
 // three parts of its slug ("gh", "acme", "repo").
 //
 // A project that does not exist, or one whose settings the token may not read,
 // yields an error satisfying IsNotFound.
 func (c *Client) GetProjectSettings(ctx context.Context, vcsType, orgName, projectName string) (*ProjectSettings, error) {
+	if err := checkProjectSettingsPathSegments(vcsType, orgName, projectName); err != nil {
+		return nil, err
+	}
+
 	var envelope projectSettingsEnvelope
 
 	err := c.GetV2(ctx, projectSettingsRoute, &envelope, RouteParams(vcsType, orgName, projectName))
@@ -185,6 +211,10 @@ func (c *Client) GetProjectSettings(ctx context.Context, vcsType, orgName, proje
 // Only the non-nil fields of settings are sent, so settings a caller does not
 // manage keep their current values.
 func (c *Client) UpdateProjectSettings(ctx context.Context, vcsType, orgName, projectName string, settings ProjectSettings) (*ProjectSettings, error) {
+	if err := checkProjectSettingsPathSegments(vcsType, orgName, projectName); err != nil {
+		return nil, err
+	}
+
 	var envelope projectSettingsEnvelope
 
 	err := c.PatchV2(

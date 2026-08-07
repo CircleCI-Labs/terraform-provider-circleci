@@ -110,7 +110,9 @@ func checkoutKeyRoute(projectSlug, fingerprint string) (string, error) {
 // checkoutKeyProjectPath percent-escapes each segment of a project slug for use
 // in a request path, leaving the separators literal. It rejects a slug that is
 // not of the documented vcs-slug/org-name/repo-name shape, because the resulting
-// request would otherwise fail with a confusing HTTP 404.
+// request would otherwise fail with a confusing HTTP 404. It also rejects a
+// segment that is exactly "." or ".." — see isDotSegment in project.go — before
+// any segment is escaped.
 func checkoutKeyProjectPath(projectSlug string) (string, error) {
 	if projectSlug == "" {
 		return "", errors.New("circleci: project slug is empty, want the form vcs-slug/org-name/repo-name")
@@ -129,6 +131,12 @@ func checkoutKeyProjectPath(projectSlug string) (string, error) {
 			return "", fmt.Errorf(
 				"circleci: project slug %q has an empty segment, want the form vcs-slug/org-name/repo-name",
 				projectSlug,
+			)
+		}
+		if isDotSegment(segment) {
+			return "", fmt.Errorf(
+				"circleci: project slug %q has a %q segment, want the form vcs-slug/org-name/repo-name",
+				projectSlug, segment,
 			)
 		}
 		segments[i] = url.PathEscape(segment)
