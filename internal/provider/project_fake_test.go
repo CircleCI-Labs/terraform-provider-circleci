@@ -57,6 +57,17 @@ type fakeProjectAPI struct {
 	// cannot produce.
 	forceSlug string
 
+	// branchOverridesResponse, when non-nil, replaces whatever
+	// pr_only_branch_overrides a settings PATCH would otherwise store and echo
+	// back, regardless of what was sent. Every other response this fake gives
+	// is derived from the request (or, for pr_only_branch_overrides, reordered
+	// but otherwise unchanged by reorderedLikeTheAPI), so there is no other way
+	// to make it answer with a list that genuinely differs in *content* from
+	// the one a test sent — which is exactly what a caller must be able to do
+	// to tell apart "state written from the request" from "state written from
+	// the response".
+	branchOverridesResponse *[]string
+
 	nextID int
 }
 
@@ -343,6 +354,11 @@ func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Requ
 	}
 
 	applySettingsPatch(current, advanced)
+
+	if a.branchOverridesResponse != nil {
+		current["pr_only_branch_overrides"] = *a.branchOverridesResponse
+	}
+
 	a.settings[slug] = current
 
 	a.write(w, http.StatusOK, map[string]any{"advanced": current})
@@ -532,6 +548,15 @@ func (a *fakeProjectAPI) setForceSlug(slug string) {
 	defer a.mu.Unlock()
 
 	a.forceSlug = slug
+}
+
+// setBranchOverridesResponse overrides the pr_only_branch_overrides a settings
+// PATCH answers with. See branchOverridesResponse.
+func (a *fakeProjectAPI) setBranchOverridesResponse(branches []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.branchOverridesResponse = &branches
 }
 
 func (a *fakeProjectAPI) recordedRequests() []string {

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -915,6 +916,128 @@ func TestProjectResourceUnit_UpdateRejectsBadSlug(t *testing.T) {
 	}
 	if requests := api.recordedRequests(); len(requests) != 0 {
 		t.Errorf("Update made %v, want no request for an invalid slug", requests)
+	}
+}
+
+// stringSet is a small helper for building a pr_only_branch_overrides value by
+// hand, the way the direct-call tests in this section need to.
+func stringSet(values ...string) types.Set {
+	elements := make([]attr.Value, 0, len(values))
+	for _, v := range values {
+		elements = append(elements, types.StringValue(v))
+	}
+
+	return types.SetValueMust(types.StringType, elements)
+}
+
+// TestProjectResourceUnit_UpdateWritesBranchOverridesFromResponseNotRequest is
+// the regression test for issue #4: Update wrote pr_only_branch_overrides to
+// state from the request it had just sent (projectSettings, built from the
+// plan) rather than from updatedProject, the settings the API reported back —
+// unlike every other field this function sets, all of which come from
+// updatedProject.
+//
+// The bug is latent as long as the API echoes the list back unchanged, which
+// is all the existing fakes ever did (reorderedLikeTheAPI only reorders, and a
+// Set does not see order). So this test gives the fake a hook
+// (setBranchOverridesResponse, project_fake_test.go) that makes a settings
+// PATCH answer with a list that genuinely differs in content from the one
+// sent — the only shape of test that can tell "state written from the
+// request" apart from "state written from the response". The plan asks for
+// ["yankee", "zulu"]; the fake answers the PATCH with ["alpha", "bravo"]
+// regardless. Only state built from the response can end up holding
+// ["alpha", "bravo"].
+func TestProjectResourceUnit_UpdateWritesBranchOverridesFromResponseNotRequest(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeProjectClient(t)
+
+	const slug = "gh/AcmeOrg/my-repo"
+	api.addProject(&fakeProject{
+		id:            "id",
+		name:          "my-repo",
+		slug:          slug,
+		orgName:       "AcmeOrg",
+		orgSlug:       "gh/AcmeOrg",
+		orgID:         testProjectResourceOrgID,
+		vcsURL:        "url",
+		vcsProvider:   "GitHub",
+		defaultBranch: "main",
+	}, map[string]any{
+		"autocancel_builds":             false,
+		"build_fork_prs":                false,
+		"build_prs_only":                false,
+		"disable_ssh":                   false,
+		"forks_receive_secret_env_vars": true,
+		"oss":                           false,
+		"set_github_status":             true,
+		"setup_workflows":               true,
+		"write_settings_requires_admin": false,
+		"pr_only_branch_overrides":      []any{"main"},
+	})
+
+	// The response to the PATCH the plan below is about to trigger: a list that
+	// shares nothing with either the prior state or the request, so any of the
+	// three appearing in the final state is unambiguous about where it came
+	// from.
+	api.setBranchOverridesResponse([]string{"alpha", "bravo"})
+
+	schema := projectResourceSchemaForTest(t)
+
+	prior := minimalProjectModel(slug)
+	prior.AutoCancelBuilds = types.BoolValue(false)
+	prior.BuildForkPrs = types.BoolValue(false)
+	prior.BuildPrsOnly = types.BoolValue(false)
+	prior.DisableSSH = types.BoolValue(false)
+	prior.ForksReceiveSecretEnvVars = types.BoolValue(true)
+	prior.OSS = types.BoolValue(false)
+	prior.SetGithubStatus = types.BoolValue(true)
+	prior.SetupWorkflows = types.BoolValue(true)
+	prior.WriteSettingsRequiresAdmin = types.BoolValue(false)
+	prior.PROnlyBranchOverrides = stringSet("main")
+
+	state := projectResourceStateForTest(t, schema, prior)
+
+	plan := prior
+	plan.PROnlyBranchOverrides = stringSet("yankee", "zulu")
+	planState := projectResourceStateForTest(t, schema, plan)
+
+	r := &projectResource{client: client}
+	resp := &fwresource.UpdateResponse{State: state}
+
+	assertNoPanic(t, func() {
+		r.Update(t.Context(), fwresource.UpdateRequest{
+			Plan:  tfsdk.Plan{Schema: schema, Raw: planState.Raw},
+			State: state,
+		}, resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update diagnostics: %+v", resp.Diagnostics)
+	}
+
+	var got projectResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("could not read the resulting state: %+v", diags)
+	}
+
+	var branches []string
+	if diags := got.PROnlyBranchOverrides.ElementsAs(t.Context(), &branches, false); diags.HasError() {
+		t.Fatalf("could not read pr_only_branch_overrides from state: %+v", diags)
+	}
+
+	want := map[string]bool{"alpha": true, "bravo": true}
+	if len(branches) != len(want) {
+		t.Fatalf("pr_only_branch_overrides after Update = %v, want exactly %v (what the API reported)", branches, want)
+	}
+	for _, b := range branches {
+		if !want[b] {
+			t.Errorf(
+				"pr_only_branch_overrides after Update contains %q, want only what the API's response "+
+					"reported (%v); %q is either the request just sent or the prior state, not the response",
+				b, want, b,
+			)
+		}
 	}
 }
 
