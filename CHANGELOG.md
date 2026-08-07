@@ -76,6 +76,24 @@
   a later step to lose track of, only a local mapping step that does not fail against
   real API responses. Both now write state defensively regardless.
 
+* **`circleci_webhook`'s `Create` and `Update` wrote most fields to state from
+  the plan rather than from what `CreateWebhook`/`UpdateWebhook` actually
+  reported storing.** Only `id`, `created_at` and `updated_at` came from the
+  response; `name`, `url`, `verify_tls` and `events` — and `scope_id`/
+  `scope_type` in `Create` — were left holding whatever Terraform had just
+  asked for. Had the API ever normalised, rejected part of, or otherwise
+  echoed back something other than the request, state would have recorded
+  the request instead of what CircleCI actually held.
+
+  Lower severity than the equivalent `pr_only_branch_overrides` fix for
+  `circleci_project`: `Read` already refreshes every one of these fields from
+  `GetWebhook` unconditionally, so any such drift self-corrected on the very
+  next plan rather than persisting. The bug cost at most a one-`apply`-cycle
+  window where state disagreed with the API, not lasting drift. `Create` and
+  `Update` now set every field from the response, matching `Read`.
+  `signing_secret` is unchanged and still comes from the plan: CircleCI never
+  returns the real value on any route.
+
 ## 0.5.0 (2026-08-06)
 
 The provider goes from 11 resources and 10 data sources to **35 resources, 66 data

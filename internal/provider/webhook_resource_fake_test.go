@@ -14,7 +14,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -65,6 +67,16 @@ type fakeWebhookAPI struct {
 	webhooks map[string]map[string]any
 	nextID   int
 	requests []fakeRecordedRequest
+
+	// updateResponseOverride, when non-nil, replaces the given keys of whatever
+	// an update (PUT) would otherwise store and echo back, regardless of what
+	// was sent. Every other response this fake gives is derived from the
+	// request, so there is no other way to make an update answer with a value
+	// that genuinely differs in *content* from the one a test sent — which is
+	// exactly what a caller must be able to do to tell apart "state written
+	// from the request" from "state written from the response". See
+	// setUpdateResponseOverride.
+	updateResponseOverride map[string]any
 }
 
 func newFakeWebhookAPI(t *testing.T) (*fakeWebhookAPI, string) {
@@ -85,6 +97,26 @@ func newFakeWebhookAPI(t *testing.T) (*fakeWebhookAPI, string) {
 	t.Cleanup(srv.Close)
 
 	return api, srv.URL
+}
+
+// newFakeWebhookClient starts the stand-in API and returns it alongside a
+// circleci.Client pointed at it, for tests that drive the resource's Go
+// methods directly rather than through Terraform.
+func newFakeWebhookClient(t *testing.T) (*fakeWebhookAPI, *circleci.Client) {
+	t.Helper()
+
+	api, host := newFakeWebhookAPI(t)
+
+	return api, circleci.New(circleci.Config{Host: host, Token: "fake"})
+}
+
+// setUpdateResponseOverride overrides the given fields of whatever an update
+// (PUT) answers with. See updateResponseOverride.
+func (a *fakeWebhookAPI) setUpdateResponseOverride(fields map[string]any) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.updateResponseOverride = fields
 }
 
 func (a *fakeWebhookAPI) record(r *http.Request, body map[string]any) {
@@ -285,10 +317,15 @@ func (a *fakeWebhookAPI) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updated := a.buildRecord(id, body)
-	// The scope cannot be updated (see webhook.go's WebhookService.Update
-	// comment); keep the original.
+	// The scope cannot be updated (see webhook.go's UpdateWebhook comment);
+	// keep the original.
 	updated["scope"] = existing["scope"]
 	updated["created_at"] = existing["created_at"]
+
+	for field, value := range a.updateResponseOverride {
+		updated[field] = value
+	}
+
 	a.webhooks[id] = updated
 
 	w.WriteHeader(http.StatusOK)
@@ -735,6 +772,161 @@ func TestWebhookResourceUnit_Create4xxIsADiagnosticNotAPanic(t *testing.T) {
 			ExpectError: regexp.MustCompile(`(?s)Error creating CircleCI webhook.*events must not be empty`),
 		}},
 	})
+}
+
+// --- Update writes from the response, not the plan ---
+
+// webhookResourceStateForTest builds a tfsdk.State from a webhookResourceModel,
+// for the tests below that drive Update directly rather than through
+// resource.UnitTest.
+func webhookResourceStateForTest(t *testing.T, schema rschema.Schema, model webhookResourceModel) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// TestWebhookResourceUnit_UpdateWritesFromResponseNotPlan is the regression
+// test for the bug in webhookResource.Update (webhook_resource.go): only id,
+// created_at and updated_at were copied from updatedWebhook — the object
+// UpdateWebhook reports having actually stored — while name, url, verify_tls
+// and events were left holding whatever the plan held, even though the same
+// response carries all of them.
+//
+// This is a lower-severity sibling of the pr_only_branch_overrides bug fixed
+// for circleci_project's Update: Read (webhook_resource.go) unconditionally
+// refreshes every one of these fields from GetWebhook, so state written from
+// the plan self-corrects on the very next plan or refresh rather than
+// persisting. What this bug cost, before the fix, was a one-cycle window in
+// which Terraform's state disagreed with the API about what an update had
+// actually done — not permanent drift.
+//
+// The only thing that can tell "state written from the plan" apart from
+// "state written from the response" is a case where the two disagree in
+// *content*, so the fake is told (setUpdateResponseOverride) to answer the PUT
+// below with a name, a URL, a verify_tls and an events set that all genuinely
+// differ from what the plan sent. Only state built from the response can end
+// up holding those values.
+//
+// Update is driven directly, not through resource.UnitTest: a full
+// apply-then-refresh cycle would call Read afterwards, which self-heals
+// exactly the drift this test exists to catch, masking the bug entirely.
+func TestWebhookResourceUnit_UpdateWritesFromResponseNotPlan(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeWebhookClient(t)
+
+	const id = "fixed-webhook-id"
+	api.mu.Lock()
+	api.webhooks[id] = map[string]any{
+		"id":             id,
+		"name":           "hook-1",
+		"url":            "https://example.com/hook",
+		"verify_tls":     true,
+		"signing_secret": "****",
+		"scope":          map[string]any{"id": fakeWebhookScopeID, "type": "project"},
+		"events":         []any{"workflow-completed"},
+		"created_at":     "2024-07-01T00:00:00.000Z",
+		"updated_at":     "2024-07-01T00:00:00.000Z",
+	}
+	api.mu.Unlock()
+
+	// The PUT below answers with these, regardless of what the plan sends: a
+	// name, a URL, a verify_tls and an events set that all genuinely differ in
+	// content from the request, so any of them appearing in the final state is
+	// unambiguous about where it came from.
+	api.setUpdateResponseOverride(map[string]any{
+		"name":       "server-renamed-hook",
+		"url":        "https://example.com/hook-normalised",
+		"verify_tls": false,
+		"events":     []any{"job-completed"},
+	})
+
+	schema := webhookResourceSchemaForTest(t)
+
+	prior := webhookResourceModel{
+		Id:                     types.StringValue(id),
+		Name:                   types.StringValue("hook-1"),
+		Url:                    types.StringValue("https://example.com/hook"),
+		VerifyTls:              types.BoolValue(true),
+		SigningSecret:          types.StringValue("s3cr3t"),
+		SigningSecretWO:        types.StringNull(),
+		SigningSecretWOVersion: types.Int64Null(),
+		ScopeId:                types.StringValue(fakeWebhookScopeID),
+		ScopeType:              types.StringValue("project"),
+		Events:                 types.SetValueMust(types.StringType, []attr.Value{types.StringValue("workflow-completed")}),
+		CreatedAt:              types.StringValue("2024-07-01T00:00:00.000Z"),
+		UpdatedAt:              types.StringValue("2024-07-01T00:00:00.000Z"),
+	}
+	state := webhookResourceStateForTest(t, schema, prior)
+
+	// The plan: a different name and URL than the fake will answer with, and a
+	// two-member events set (still true, but not what the response reports)
+	// verify_tls, so every overridden field disagrees with what gets sent.
+	plan := prior
+	plan.Name = types.StringValue("hook-renamed-by-config")
+	plan.Url = types.StringValue("https://example.com/hook-2")
+	plan.VerifyTls = types.BoolValue(true)
+	plan.Events = types.SetValueMust(types.StringType, []attr.Value{
+		types.StringValue("workflow-completed"),
+		types.StringValue("job-completed"),
+	})
+	planState := webhookResourceStateForTest(t, schema, plan)
+
+	r := &webhookResource{client: client}
+	resp := &fwresource.UpdateResponse{State: state}
+
+	assertNoPanic(t, func() {
+		r.Update(t.Context(), fwresource.UpdateRequest{
+			Config: configForTest(t, schema, plan),
+			Plan:   tfsdk.Plan{Schema: schema, Raw: planState.Raw},
+			State:  state,
+		}, resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update diagnostics: %+v", resp.Diagnostics)
+	}
+
+	var got webhookResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("could not read the resulting state: %+v", diags)
+	}
+
+	if got.Name.ValueString() != "server-renamed-hook" {
+		t.Errorf("name after Update = %q, want %q (what the API reported) rather than %q (the plan)",
+			got.Name.ValueString(), "server-renamed-hook", plan.Name.ValueString())
+	}
+	if got.Url.ValueString() != "https://example.com/hook-normalised" {
+		t.Errorf("url after Update = %q, want %q (what the API reported) rather than %q (the plan)",
+			got.Url.ValueString(), "https://example.com/hook-normalised", plan.Url.ValueString())
+	}
+	if got.VerifyTls.ValueBool() != false {
+		t.Errorf("verify_tls after Update = %v, want false (what the API reported) rather than %v (the plan)",
+			got.VerifyTls.ValueBool(), plan.VerifyTls.ValueBool())
+	}
+
+	var events []string
+	if diags := got.Events.ElementsAs(t.Context(), &events, false); diags.HasError() {
+		t.Fatalf("could not read events from state: %+v", diags)
+	}
+	if len(events) != 1 || events[0] != "job-completed" {
+		t.Errorf("events after Update = %v, want exactly [job-completed] (what the API reported), not the "+
+			"two-event set the plan sent", events)
+	}
+
+	// signing_secret must still come from the plan: CircleCI never returns the
+	// real value on any route, so this is the one field that is correct to
+	// leave alone rather than take from the response.
+	if got.SigningSecret.ValueString() != "s3cr3t" {
+		t.Errorf(`signing_secret after Update = %q, want %q — it must be preserved from the plan `+
+			`(the API never returns a usable value), and a future change must not "fix" that into a regression`,
+			got.SigningSecret.ValueString(), "s3cr3t")
+	}
 }
 
 // --- singular data source ---
