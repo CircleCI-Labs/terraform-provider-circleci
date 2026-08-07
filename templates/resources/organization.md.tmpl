@@ -7,7 +7,17 @@ description: |-
 
 # circleci_organization (Resource)
 
-Manages a CircleCI organization.
+Manages a CircleCI organization. If you only need an existing organization's id, prefer the [`circleci_organization` data source](../data-sources/organization) — see the note below.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Unverified. *Reading* an organization is a v2 route served directly by CircleCI's API and should work. *Creating* one is a different question: a Server installation's organizations come from its VCS and are always `github` type, so a create there likely has nothing to do. See the CircleCI Server note on the provider index page. |
+| **API** | `POST /api/v2/organization`, `GET` and `DELETE /api/v2/organization/{slug-or-id}` |
+| **Organization type** | Any — `vcs_type` selects which kind of organization this resource creates or adopts, it is not a restriction on who may call it. |
+| **Token** | A personal API token. Adopting a `github` or `bitbucket` organization additionally requires being an admin on the VCS side, which the API verifies. |
 
 ## What `vcs_type` changes
 

@@ -7,17 +7,24 @@ description: |-
 
 # circleci_project_environment_variable (Data Source)
 
-Fetches information about a CircleCI project environment variable.
+Fetches information about a CircleCI project environment variable. Use
+[`circleci_project_environment_variable`](../resources/project_environment_variable)
+to manage one.
 
 > **Note:** The CircleCI API returns a masked value for project environment variables. The `value` attribute will contain a masked string, not the actual secret value.
 
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Project environment variables are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/project/{project-slug}/envvar/{name}` |
+| **Organization type** | Any. Works the same for VCS-connected (`gh/<org>/<repo>`) and standalone (`circleci/<org-id>/<project-id>`) projects. |
+| **Token** | Any valid API token with read access to the project. |
+
 ## Example Usage
 
-```terraform
-data "circleci_project_environment_variable" "example" {
-  project_slug = "github/my-org/my-repo"
-  name         = "MY_SECRET"
-}
-```
+{{ tffile "examples/data-sources/circleci_project_environment_variable/data-source.tf" }}
 
 {{ .SchemaMarkdown | trimspace }}

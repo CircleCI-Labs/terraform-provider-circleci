@@ -7,13 +7,40 @@ description: |-
 
 # circleci_webhook (Data Source)
 
-Fetches information about an existing CircleCI webhook.
+Fetches information about an existing CircleCI webhook by id. Use
+[`circleci_webhooks`](webhooks) (plural) to list every webhook on a project, and
+[`circleci_webhook`](../resources/webhook) to manage one.
+
+~> **The signing secret is not returned.** The API masks it unconditionally, so
+`signing_secret` is always null here rather than the mask — a `Sensitive` string
+holding the literal mask would look exactly like a real credential a
+configuration could pass to a receiver, and never would be one. Use
+`circleci_webhooks`' `has_signing_secret` to check only whether one is
+configured; `signing_secret` here is deprecated and scheduled for removal in
+1.0.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Outbound webhooks are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/webhook/{id}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 
 ```terraform
+# The API never discloses a webhook's signing secret, so `signing_secret` here is
+# always null -- use circleci_webhooks' `has_signing_secret` to check only whether
+# one is configured.
 data "circleci_webhook" "example" {
   id = "00000000-0000-0000-0000-000000000000"
+}
+
+output "circleci_webhook_events" {
+  value = data.circleci_webhook.example.events
 }
 ```
 

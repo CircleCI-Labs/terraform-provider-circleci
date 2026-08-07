@@ -7,7 +7,17 @@ description: |-
 
 # circleci_runner_resource_class (Resource)
 
-Manages a CircleCI self-hosted runner resource class. Resource classes define a pool of self-hosted runners within an organization namespace.
+Manages a CircleCI self-hosted runner resource class. Resource classes define a pool of self-hosted runners within an organization namespace. Add [`circleci_runner_token`](runner_token) to issue tokens the runner agents authenticate with.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `POST /api/v3/runner/resource`, `GET /api/v3/runner/resource` (filtered client-side, for reads), `DELETE /api/v3/runner/resource/{id}` (all on `runner_host`) |
+| **Organization type** | Any. |
+| **Token** | A personal API token with admin permission on the namespace. |
 
 ## Example Usage
 

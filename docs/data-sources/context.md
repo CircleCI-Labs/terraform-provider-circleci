@@ -7,7 +7,18 @@ description: |-
 
 # circleci_context (Data Source)
 
-Fetches information about a CircleCI context, including its restrictions.
+Fetches information about a CircleCI context, including its restrictions. Use
+[`circleci_contexts`](contexts) to list every context in an organization.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Contexts are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/context/{context_id}`, plus `GET .../restrictions` to populate `restrictions` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the context's organization. |
 
 ## Example Usage
 

@@ -7,7 +7,17 @@ description: |-
 
 # circleci_context (Resource)
 
-Manages a CircleCI context. Contexts provide a mechanism for securing and sharing environment variables across projects.
+Manages a CircleCI context. Contexts provide a mechanism for securing and sharing environment variables across projects. Add [`circleci_context_restriction`](context_restriction) to limit which projects may use one, and [`circleci_context_environment_variable`](context_environment_variable) to populate it.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Contexts are a first-class CircleCI Server feature with the same v2 surface. A Server installation additionally requires the owner to be given as `owner.type: "account"` with an id — owner slugs are not supported there — and context names must be unique across every organization in the account, not just within one. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `POST /api/v2/context`, `GET` and `DELETE /api/v2/context/{context_id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token with write access to the organization. |
 
 ## Example Usage
 

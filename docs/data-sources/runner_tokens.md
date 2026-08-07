@@ -9,7 +9,15 @@ description: |-
 
 Lists the authentication tokens of a self-hosted runner resource class, including tokens created outside Terraform.
 
-Works against both **CircleCI Cloud and CircleCI Server**. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it, so **Server users must set the provider's `runner_host` attribute** to their Server hostname.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `GET /api/v3/runner/token` (on `runner_host`) |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the resource class's namespace. |
 
 > **The token secret is not available here, and there is deliberately no `token` attribute.** The runner API returns a token's value only in the response to the request that created it; every later read returns metadata alone. A data source could therefore never populate the secret, and exposing an always-empty attribute would be worse than omitting it. Use the `circleci_runner_token` resource when the secret is needed — it captures the value at creation and keeps it in state.
 

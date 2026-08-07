@@ -7,7 +7,19 @@ description: |-
 
 # circleci_context_environment_variable (Resource)
 
-Manages an environment variable stored in a CircleCI context.
+Manages an environment variable stored in a CircleCI context. Use
+[`circleci_project_environment_variable`](project_environment_variable) instead for
+a variable scoped to a single project.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Contexts are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `PUT /api/v2/context/{context_id}/environment-variable/{name}`, `GET .../environment-variable` (to read one back), `DELETE .../environment-variable/{name}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token with write access to the context's organization. |
 
 ## Example Usage
 

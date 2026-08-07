@@ -7,7 +7,17 @@ description: |-
 
 # circleci_context_restriction (Resource)
 
-Manages a restriction on a CircleCI context. Restrictions control which projects or groups can use a context.
+Manages a restriction on a CircleCI context. Restrictions control which projects, groups or pipeline conditions can use a context. Use [`circleci_context_restrictions`](../data-sources/context_restrictions) to list every restriction on a context, including ones created outside Terraform.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Contexts are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `POST /api/v2/context/{context_id}/restrictions`, `GET .../restrictions` (to read one back), `DELETE .../restrictions/{restriction_id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token with write access to the context's organization. |
 
 ## Example Usage
 

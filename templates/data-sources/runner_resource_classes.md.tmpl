@@ -11,7 +11,15 @@ Lists CircleCI self-hosted runner resource classes, including ones created outsi
 
 Use `circleci_runner_resource_class` (singular) to look a single resource class up by name.
 
-Works against both **CircleCI Cloud and CircleCI Server**. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it, so **Server users must set the provider's `runner_host` attribute** to their Server hostname.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `GET /api/v3/runner/resource` (on `runner_host`) |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization or namespace. |
 
 ## Example Usage
 

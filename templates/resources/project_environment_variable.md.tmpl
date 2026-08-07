@@ -7,17 +7,23 @@ description: |-
 
 # circleci_project_environment_variable (Resource)
 
-Manages an environment variable stored in a CircleCI project.
+Manages an environment variable stored in a CircleCI project. Use
+[`circleci_context_environment_variable`](context_environment_variable) instead
+for a variable shared across several projects through a context.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Project environment variables are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET` and `POST /api/v2/project/{project-slug}/envvar`, `GET` and `DELETE .../envvar/{name}` |
+| **Organization type** | Any. Unlike `circleci_checkout_key`, this route places no restriction on the project's slug form, so it works the same for VCS-connected (`gh/<org>/<repo>`) and standalone (`circleci/<org-id>/<project-id>`) projects. |
+| **Token** | A personal API token with write access to the project. |
 
 ## Example Usage
 
-```terraform
-resource "circleci_project_environment_variable" "example" {
-  project_slug = "github/my-org/my-repo"
-  name         = "MY_SECRET"
-  value        = "my-secret-value"
-}
-```
+{{ tffile "examples/resources/circleci_project_environment_variable/resource.tf" }}
 
 ### Keeping the value out of state
 
@@ -27,16 +33,8 @@ as a [write-only argument](https://developer.hashicorp.com/terraform/language/re
 in neither state nor the plan file. Set exactly one of the two.
 
 Because nothing derived from the value is stored, Terraform cannot tell that
-`value_wo` changed. Increment `value_wo_version` to rotate the secret:
-
-```terraform
-resource "circleci_project_environment_variable" "write_only" {
-  project_slug     = "github/my-org/my-repo"
-  name             = "MY_SECRET"
-  value_wo         = ephemeral.some_provider_secret.example.value
-  value_wo_version = 1 # bump to 2 to send a new value
-}
-```
+`value_wo` changed. Increment `value_wo_version` to rotate the secret — see the
+second resource in the example above.
 
 {{ .SchemaMarkdown | trimspace }}
 

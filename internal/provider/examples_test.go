@@ -364,15 +364,6 @@ var examplelessTypes = map[string]string{
 	// we are asking people to stop writing.
 	"resources/circleci_pipeline":    "deprecated alias of circleci_pipeline_definition",
 	"data-sources/circleci_pipeline": "deprecated alias of circleci_pipeline_definition",
-
-	// Documented with inline HCL in their templates, which is what this file exists
-	// to discourage. Consolidating them is the same piece of work done for the eight
-	// directories that motivated these guards, and is simply not done yet.
-	"resources/circleci_project_environment_variable":    "template still carries inline HCL",
-	"data-sources/circleci_project_environment_variable": "template still carries inline HCL",
-	"data-sources/circleci_project_settings":             "template still carries inline HCL",
-	"resources/circleci_webhook":                         "template still carries inline HCL",
-	"data-sources/circleci_webhook":                      "template still carries inline HCL",
 }
 
 // TestEveryRegisteredTypeHasAnExample fails when a resource, data source, ephemeral

@@ -11,6 +11,16 @@ Manages a token for a CircleCI self-hosted runner resource class. Tokens are use
 
 > **Note:** The token value is only available at creation time. After the initial `terraform apply`, CircleCI does not expose the token value via the API and it will not appear in subsequent reads. Store the token value securely (e.g., in a secrets manager) immediately after creation.
 
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `POST /api/v3/runner/token`, `GET /api/v3/runner/token` (filtered client-side, for reads), `DELETE /api/v3/runner/token/{id}` (all on `runner_host`) |
+| **Organization type** | Any. |
+| **Token** | A personal API token with admin permission on the resource class's namespace. |
+
 ## Example Usage
 
 {{ tffile "examples/resources/circleci_runner_token/resource.tf" }}
