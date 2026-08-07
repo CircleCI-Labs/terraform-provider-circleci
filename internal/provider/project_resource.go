@@ -228,6 +228,33 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
+	// The project exists in CircleCI, and is now followed, from here on: every
+	// failure below must write state with what create already returned instead
+	// of returning early and leaving a project CircleCI is tracking with
+	// nothing on the Terraform side pointing at it. See trigger_resource.go's
+	// Create for the model this follows — the same shape issue #6 fixed there.
+	//
+	// Map response body to schema and populate Computed attribute values, ahead
+	// of the settings call below so that every return past this point has
+	// something to write.
+	plan.Id = types.StringValue(newCreatedProject.ID)
+	plan.Name = types.StringValue(newCreatedProject.Name)
+	plan.Slug = types.StringValue(newCreatedProject.Slug)
+	plan.OrganizationName = types.StringValue(newCreatedProject.OrganizationName)
+	plan.OrganizationSlug = types.StringValue(newCreatedProject.OrganizationSlug)
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, newCreatedProject.OrganizationID)
+	plan.VcsInfoUrl = types.StringValue(newCreatedProject.VCSInfo.VCSURL)
+	plan.VcsInfoProvider = types.StringValue(newCreatedProject.VCSInfo.Provider)
+	plan.VcsInfoDefaultBranch = types.StringValue(newCreatedProject.VCSInfo.DefaultBranch)
+
+	vcsType, orgName, projectName, slugDiags := parseProjectSlug(newCreatedProject.Slug)
+	resp.Diagnostics.Append(slugDiags...)
+	if resp.Diagnostics.HasError() {
+		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+
+		return
+	}
+
 	// Only the settings this configuration actually sets are sent; every other one
 	// is left out so that CircleCI applies its own default. The defaults are
 	// listed in templates/resources/project.md.tmpl.
@@ -259,26 +286,11 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 		branches, diags := branchOverrides(ctx, plan.PROnlyBranchOverrides)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
+			resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+
 			return
 		}
 		newAdvancedSettings.PROnlyBranchOverrides = &branches
-	}
-
-	// Map response body to schema and populate Computed attribute values
-	plan.Id = types.StringValue(newCreatedProject.ID)
-	plan.Name = types.StringValue(newCreatedProject.Name)
-	plan.Slug = types.StringValue(newCreatedProject.Slug)
-	plan.OrganizationName = types.StringValue(newCreatedProject.OrganizationName)
-	plan.OrganizationSlug = types.StringValue(newCreatedProject.OrganizationSlug)
-	setOrgIDs(&plan.OrganizationId, &plan.OrgId, newCreatedProject.OrganizationID)
-	plan.VcsInfoUrl = types.StringValue(newCreatedProject.VCSInfo.VCSURL)
-	plan.VcsInfoProvider = types.StringValue(newCreatedProject.VCSInfo.Provider)
-	plan.VcsInfoDefaultBranch = types.StringValue(newCreatedProject.VCSInfo.DefaultBranch)
-
-	vcsType, orgName, projectName, slugDiags := parseProjectSlug(newCreatedProject.Slug)
-	resp.Diagnostics.Append(slugDiags...)
-	if resp.Diagnostics.HasError() {
-		return
 	}
 
 	// A configuration that sets no setting has nothing to write, and the API
@@ -294,6 +306,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 				"Error reading CircleCI project settings",
 				fmt.Sprintf("Could not read the settings of the recently created CircleCI project %s: %s", newCreatedProject.Slug, err.Error()),
 			)
+			resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 
 			return
 		}
@@ -304,6 +317,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 				"Error updating CircleCI project settings",
 				fmt.Sprintf("Could not update recently created CircleCI project settings:\n\nsettings: %+v\norg: %s\nproject_id: %s\nproject_name: %s\nslug: %s\n\nUnexpected error: %s\n", newAdvancedSettings, effectiveOrgID(plan.OrganizationId, plan.OrgId), newCreatedProject.ID, newCreatedProject.Name, newCreatedProject.Slug, err.Error()),
 			)
+			resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 
 			return
 		}
@@ -322,6 +336,8 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	plan.PROnlyBranchOverrides, diags = branchOverrideSet(ctx, newProjectSettings.PROnlyBranchOverrides)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+
 		return
 	}
 

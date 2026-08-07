@@ -5,6 +5,7 @@ package provider
 
 import (
 	"fmt"
+	"net/http"
 	"regexp"
 	"testing"
 
@@ -1336,5 +1337,75 @@ resource "circleci_project" "test" {
 				}},
 			})
 		})
+	}
+}
+
+// TestProjectResourceUnit_CreateWritesStateWhenSettingsFetchFails is a
+// regression test for issue #37.
+//
+// Once CreateProject succeeds, the project exists at CircleCI and is
+// followed: unlike circleci_orb_version or circleci_orb, a retry after this
+// point does not collide with anything (CreateProject on a name that is
+// already taken is its own, differently-shaped failure), but it does leave
+// the project running with nothing in Terraform tracking it until the
+// practitioner notices and imports it by hand. Because every toggle here is
+// Computed, Create still needs a settings call after CreateProject even when
+// the configuration sets none of them (see the comment above
+// newProjectSettings in Create) — that call is what this test makes fail.
+//
+// Before the fix, that failure returned before resp.State.Set, so state was
+// left completely empty.
+func TestProjectResourceUnit_CreateWritesStateWhenSettingsFetchFails(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeProjectClient(t)
+	api.setFailSettingsStatus(http.StatusInternalServerError)
+
+	schema := projectResourceSchemaForTest(t)
+	plan := minimalProjectModel("")
+	plan.Id = types.StringUnknown()
+	plan.Slug = types.StringUnknown()
+	plan.OrganizationName = types.StringUnknown()
+	plan.OrganizationSlug = types.StringUnknown()
+	plan.VcsInfoUrl = types.StringUnknown()
+	plan.VcsInfoProvider = types.StringUnknown()
+	plan.VcsInfoDefaultBranch = types.StringUnknown()
+
+	r := &projectResource{client: client}
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{
+		Schema: schema,
+		Raw:    projectResourceStateForTest(t, schema, plan).Raw,
+	}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create returned no diagnostics for a failed settings fetch, want one")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Create left state empty after CreateProject succeeded; the project now exists " +
+			"and is followed at CircleCI with nothing in Terraform tracking it")
+	}
+
+	var out projectResourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if out.Id.ValueString() == "" {
+		t.Error("state id is empty, want the id CreateProject returned")
+	}
+	if out.Slug.ValueString() == "" {
+		t.Error("state slug is empty, want the slug CreateProject returned")
+	}
+
+	var creates int
+	for _, req := range api.recordedRequests() {
+		if req == "POST /api/v2/organization/"+testProjectResourceOrgID+"/project" {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Errorf("project create requests = %d, want exactly 1: the failure was in reading settings "+
+			"back, not in creating the project, and create must not be retried on that account", creates)
 	}
 }

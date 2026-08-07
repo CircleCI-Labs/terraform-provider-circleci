@@ -274,27 +274,40 @@ func (r *orbResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
+	// wantListed is what the configuration asked for, captured before applyOrb
+	// overwrites plan.IsListed with whatever CreateOrbPackage actually returned
+	// (which is CircleCI's own default, not the plan's).
+	wantListed := plan.IsListed
+
+	// The orb exists in CircleCI from here on, and its name cannot be reused by
+	// a retry: the API has no delete route for an orb (see Delete below), so a
+	// failure past this point must write state with what create already
+	// returned instead of returning early and orphaning it. See
+	// trigger_resource.go's Create for the model this follows — the same shape
+	// issue #6 fixed there.
+	r.applyOrb(ctx, &plan, pkg, false, &resp.Diagnostics)
+
 	// is_listed and the categories are separate routes, so they are applied after
 	// the orb exists.
-	if !plan.IsListed.IsNull() && !plan.IsListed.IsUnknown() && plan.IsListed.ValueBool() != pkg.IsListed {
-		pkg, err = r.client.SetOrbListed(ctx, pkg.ID, plan.IsListed.ValueBool())
+	if !wantListed.IsNull() && !wantListed.IsUnknown() && wantListed.ValueBool() != pkg.IsListed {
+		pkg, err = r.client.SetOrbListed(ctx, pkg.ID, wantListed.ValueBool())
 		if err != nil {
 			resp.Diagnostics.AddError(
 				"Unable to set the listed status of CircleCI orb "+fullName,
 				circleci.Detail(err),
 			)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 
 			return
 		}
+		r.applyOrb(ctx, &plan, pkg, false, &resp.Diagnostics)
 	}
 
 	pkg = r.reconcileCategories(ctx, pkg, plan.CategoryIds, &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
 	r.applyOrb(ctx, &plan, pkg, false, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+
 		return
 	}
 

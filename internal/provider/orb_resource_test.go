@@ -5,14 +5,21 @@ package provider
 
 import (
 	"fmt"
+	"net/http"
 	"regexp"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // orbBuildCategoryID and orbNotifyCategoryID are the fake's fixed categories.
@@ -378,5 +385,115 @@ resource "circleci_orb" "test" {
 	// Listing an unlisted orb is an in-place update, not a replacement.
 	if got := api.requestsFor("POST", "/api/v3/orb/packages"); len(got) != 3 {
 		t.Errorf("orb POSTs = %d, want 3 (create plus two set-listed), got %v", len(got), got)
+	}
+}
+
+// orbResourceSchemaForTest returns the resource's schema, the same way
+// budgetResourceSchemaForTest does.
+func orbResourceSchemaForTest(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	(&orbResource{}).Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	return resp.Schema
+}
+
+// orbStateForTest builds a tfsdk.State (or, read as a Plan's raw value, the
+// identical thing) from a fully-populated model.
+func orbStateForTest(t *testing.T, schema rschema.Schema, model orbResourceModel) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// TestOrbResourceUnit_CreateWritesStateWhenSetListedFails is a regression test
+// for issue #37.
+//
+// CreateOrbPackage has no is_listed field, so making a new orb unlisted (or,
+// as here, keeping a private-looking one listed) takes a second call,
+// SetOrbListed, against the orb CreateOrbPackage just made. The API has no
+// route to delete an orb (see Delete's own doc comment), so a name a create
+// has already claimed cannot be reclaimed by a retry. Before the fix, a
+// failure from SetOrbListed returned before resp.State.Set, so an orb
+// CircleCI had just created permanently had no record in Terraform state at
+// all — the next apply would try to create it again and collide with the
+// name it could never delete.
+//
+// Driven directly through Create, rather than resource.UnitTest, for the same
+// reason TestProjectResourceUnit_UpdateRejectsBadSlug is: asserting "still in
+// state after a failed apply" is awkward through the plugin-testing
+// framework.
+func TestOrbResourceUnit_CreateWritesStateWhenSetListedFails(t *testing.T) {
+	api := newOrbFakeAPI(t)
+	ns := api.seedNamespace("acme")
+	api.setFailSetOrbListedStatus(http.StatusInternalServerError)
+
+	schema := orbResourceSchemaForTest(t)
+	client := circleci.New(circleci.Config{Host: api.URL(), Token: "fake"})
+	r := &orbResource{client: client}
+
+	plan := orbStateForTest(t, schema, orbResourceModel{
+		Id:            types.StringUnknown(),
+		NamespaceId:   types.StringValue(ns.ID),
+		Namespace:     types.StringUnknown(),
+		Name:          types.StringValue("node"),
+		FullName:      types.StringUnknown(),
+		IsPrivate:     types.BoolValue(false),
+		IsListed:      types.BoolValue(false),
+		CategoryIds:   types.SetNull(types.StringType),
+		Categories:    types.ListUnknown(orbCategoryObjectType),
+		CreatedAt:     types.StringUnknown(),
+		HomeUrl:       types.StringUnknown(),
+		LatestVersion: types.StringUnknown(),
+	})
+
+	resp := &fwresource.CreateResponse{State: tfsdk.State{Schema: schema}}
+	r.Create(t.Context(), fwresource.CreateRequest{Plan: tfsdk.Plan{Schema: schema, Raw: plan.Raw}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create returned no diagnostics for a failed set-listed call, want one")
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Create left state empty after CreateOrbPackage succeeded; the orb now exists " +
+			"permanently at CircleCI (there is no delete route) with nothing in Terraform tracking it")
+	}
+
+	var out orbResourceModel
+	if diags := resp.State.Get(t.Context(), &out); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if out.Id.ValueString() == "" {
+		t.Error("state id is empty, want the id CreateOrbPackage returned")
+	}
+	if out.FullName.ValueString() != "acme/node" {
+		t.Errorf("state full_name = %q, want acme/node", out.FullName.ValueString())
+	}
+
+	// Exact path equality, not requestsFor's substring match: "/api/v3/orb/packages"
+	// is also a prefix of the set-listed route, and the client's own transport
+	// retries a 500 up to three more times (see httpcl.NewClient's RetryMax),
+	// so a substring count would conflate one create with several retried
+	// set-listed attempts.
+	var creates int
+	for _, req := range api.allRequests() {
+		if req.Method == "POST" && req.Path == "/api/v3/orb/packages" {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Errorf("orb create requests = %d, want exactly 1: the failure was in set-listed, "+
+			"not create, and create must not be retried on that account", creates)
+	}
+	if setListed := api.requestsFor("POST", "/set-listed"); len(setListed) == 0 {
+		t.Error("no set-listed request was recorded, want at least one (the forced failure)")
 	}
 }

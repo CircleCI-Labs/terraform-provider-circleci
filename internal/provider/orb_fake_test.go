@@ -67,6 +67,15 @@ type orbFakeAPI struct {
 	orbs       map[string]*orbFakeOrb
 	versions   map[string]*orbFakeVersion
 	nextID     int
+
+	// failSetOrbListedStatus and failGetOrbSourceStatus, when non-zero, make
+	// every request to the corresponding route answer with that status instead
+	// of the normal behavior. They exist to test what happens when the create
+	// call that establishes an orb, or an orb version, succeeds but a call
+	// after it fails — see setFailSetOrbListedStatus and
+	// setFailGetOrbSourceStatus.
+	failSetOrbListedStatus int
+	failGetOrbSourceStatus int
 }
 
 // orbFakeCategories is the fixed category set CircleCI publishes.
@@ -128,6 +137,26 @@ func (a *orbFakeAPI) record(r *http.Request) {
 		Query:  r.URL.Query(),
 		Body:   string(body),
 	})
+}
+
+// setFailSetOrbListedStatus makes every POST .../set-listed answer with status
+// instead of setting the listed flag, so a test can force that one route to
+// fail after CreateOrbPackage has already succeeded.
+func (a *orbFakeAPI) setFailSetOrbListedStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.failSetOrbListedStatus = status
+}
+
+// setFailGetOrbSourceStatus makes every GET .../source answer with status
+// instead of the stored source, so a test can force that one route to fail
+// after PublishOrbVersion has already succeeded.
+func (a *orbFakeAPI) setFailGetOrbSourceStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.failGetOrbSourceStatus = status
 }
 
 // requestsFor returns every recorded request whose method matches and whose path
@@ -565,6 +594,12 @@ func (a *orbFakeAPI) setOrbListed(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if status := a.failSetOrbListedStatus; status != 0 {
+		orbFakeWriteError(w, status, "Internal Server Error", "forced failure for test")
+
+		return
+	}
+
 	orb, ok := a.lockedOrb(w, r)
 	if !ok {
 		return
@@ -818,6 +853,12 @@ func (a *orbFakeAPI) versionsMatchingRef(ref string) []map[string]any {
 func (a *orbFakeAPI) getOrbSource(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if status := a.failGetOrbSourceStatus; status != 0 {
+		orbFakeWriteError(w, status, "Internal Server Error", "forced failure for test")
+
+		return
+	}
 
 	v, ok := a.versions[r.PathValue("id")]
 	if !ok {

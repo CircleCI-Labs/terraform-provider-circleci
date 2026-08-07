@@ -51,6 +51,13 @@ type fakeProjectAPI struct {
 	// simulate a project deleted outside Terraform.
 	missingProject bool
 
+	// failSettingsStatus, when non-zero, makes every settings GET and PATCH
+	// answer with that status instead of the normal behavior. It exists to
+	// test what happens when CreateProject has already succeeded but the
+	// settings call Create makes right after it fails — see
+	// setFailSettingsStatus.
+	failSettingsStatus int
+
 	// forceSlug, when non-empty, overrides the slug Create responds with,
 	// regardless of orgKind. It exists to test the provider's handling of a
 	// malformed slug coming back from the API, which orgKind's normal shapes
@@ -314,6 +321,12 @@ func (a *fakeProjectAPI) handleGetSettings(w http.ResponseWriter, slug string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if status := a.failSettingsStatus; status != 0 {
+		a.write(w, status, map[string]any{"message": "forced failure for test"})
+
+		return
+	}
+
 	current, ok := a.settings[slug]
 	if !ok {
 		a.write(w, http.StatusNotFound, map[string]any{"message": "Project not found"})
@@ -334,6 +347,12 @@ func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Requ
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if status := a.failSettingsStatus; status != 0 {
+		a.write(w, status, map[string]any{"message": "forced failure for test"})
+
+		return
+	}
 
 	current, ok := a.settings[slug]
 	if !ok {
@@ -557,6 +576,16 @@ func (a *fakeProjectAPI) setBranchOverridesResponse(branches []string) {
 	defer a.mu.Unlock()
 
 	a.branchOverridesResponse = &branches
+}
+
+// setFailSettingsStatus makes every settings GET and PATCH answer with status,
+// to test what happens when the settings call Create makes right after
+// CreateProject has already succeeded fails. See failSettingsStatus.
+func (a *fakeProjectAPI) setFailSettingsStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.failSettingsStatus = status
 }
 
 func (a *fakeProjectAPI) recordedRequests() []string {
