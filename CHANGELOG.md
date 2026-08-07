@@ -7,30 +7,23 @@
 * **A path segment that is exactly `.` or `..` is now rejected before it can reach a
   request path.** `url.PathEscape` does not touch dots and `url.Parse` does not clean
   dot-segments, so such a segment survived escaping and put a literal `./` or `../` into the
-  outbound path, retargeting the request at a different route. Every place this client
-  interpolates a caller-supplied segment now checks for it through one shared predicate:
-  the project slug, the checkout-key project path (which also covers the project
-  environment-variable routes), the Insights slugs, and the three arguments the
-  project-settings routes pass individually.
+  outbound path, retargeting the request at a different route.
+
+  Every place this client interpolates a caller-supplied value into a path now checks for it
+  through one shared predicate. That means both the multi-segment slugs — the project slug,
+  the checkout-key project path, the Insights slugs, and the three arguments the
+  project-settings routes pass individually — and the identifiers appended as a further
+  segment *after* one of those slugs, which were the last gap: the checkout-key fingerprint,
+  the project environment-variable name, and the context environment-variable name.
 
   **This is defence in depth, not a reachable vulnerability.** These values come from
   Terraform configuration or from CircleCI's own API responses, never from a third party, so
   abusing it required already controlling the Terraform run. The project-settings case was
   the one a configuration could drive end to end — its data source splits a configured
-  `project_slug` and validates nothing beyond the segment count — and its regression test
-  asserts at the provider layer that no request is made at all. A name that merely contains
-  a dot, such as a repository called `my.repo`, stays valid. (#7, #35)
-
-### DEPENDENCIES
-
-* golangci-lint 2.2.1 → 2.12.2, terraform-plugin-testing 1.12.0 → 1.16.0,
-  terraform-plugin-log 0.10.0 → 0.11.0, the `circleci/go` orb 3.0.3 → 4.0.0, and a batch of
-  build tooling that also drops `mongo-driver`, `go-openapi` and `govalidator` from the
-  module graph entirely. The CI image is now pinned by digest.
-
-* The Terraform test matrix moves to 1.13.5, 1.14.9 and 1.15.8. Renovate proposed replacing
-  the 1.14 entry with 1.15, which reads as a patch bump but would have dropped a whole
-  supported minor from CI; the matrix is rotated instead.
+  `project_slug` and validates nothing beyond the segment count. Every regression test
+  asserts that no request was made at all rather than merely that an error came back, since
+  that is what proves the segment never reached the wire. A name that merely contains a dot,
+  such as a repository called `my.repo`, stays valid. (#7, #35)
 
 ### BREAKING CHANGES
 

@@ -77,10 +77,20 @@ func (c *Client) ListProjectEnvironmentVariables(ctx context.Context, projectSlu
 // separator in place of the slug's literal "/". The name is escaped the same
 // way, appended after the slug is already escaped, so it must not be passed
 // through fmt.Sprintf either.
+//
+// A name that is exactly "." or ".." is rejected outright, before it is
+// escaped — see isDotSegment in project.go. The slug's own segments are
+// already checked inside projectEnvVarRoute, but that check does not extend
+// to this trailing segment, which is appended after the slug is already
+// escaped.
 func projectEnvVarNameRoute(projectSlug, name string) (string, error) {
 	route, err := projectEnvVarRoute(projectSlug)
 	if err != nil {
 		return "", err
+	}
+
+	if isDotSegment(name) {
+		return "", fmt.Errorf("circleci: environment variable name %q is not allowed", name)
 	}
 
 	return route + "/" + url.PathEscape(name), nil
@@ -255,6 +265,19 @@ func (c *Client) ListContextEnvironmentVariables(ctx context.Context, contextID 
 	})
 }
 
+// checkContextEnvVarName rejects a name that is exactly "." or ".." — see
+// isDotSegment in project.go — before it reaches RouteParams. RouteParams
+// percent-escapes each value as its own path segment, but escaping does not
+// touch a segment made only of dots, so an unrejected name would put a
+// literal "./" or "../" into the request path in place of the variable name.
+func checkContextEnvVarName(name string) error {
+	if isDotSegment(name) {
+		return fmt.Errorf("circleci: context environment variable name %q is not allowed", name)
+	}
+
+	return nil
+}
+
 // UpsertContextEnvironmentVariable creates or overwrites an environment
 // variable on a context and returns it as stored. The returned value's
 // TruncatedValue is always "" — see ContextEnvironmentVariable's doc comment —
@@ -264,6 +287,10 @@ func (c *Client) UpsertContextEnvironmentVariable(
 	ctx context.Context,
 	contextID, name, value string,
 ) (*ContextEnvironmentVariable, error) {
+	if err := checkContextEnvVarName(name); err != nil {
+		return nil, err
+	}
+
 	var updated ContextEnvironmentVariable
 	body := ContextEnvironmentVariableInput{Value: value}
 	if err := c.PutV2(ctx, contextEnvVarRoute, body, &updated, RouteParams(contextID, name)); err != nil {
@@ -279,5 +306,9 @@ func (c *Client) UpsertContextEnvironmentVariable(
 // This route sits behind the same middleware as GetContext (see
 // context.go), so a context that no longer exists answers 403 rather than 404.
 func (c *Client) DeleteContextEnvironmentVariable(ctx context.Context, contextID, name string) error {
+	if err := checkContextEnvVarName(name); err != nil {
+		return err
+	}
+
 	return c.DeleteV2(ctx, contextEnvVarRoute, RouteParams(contextID, name))
 }

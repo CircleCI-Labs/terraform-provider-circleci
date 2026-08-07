@@ -399,6 +399,64 @@ func TestCheckoutKeyProjectPathRejectsDotSegments(t *testing.T) {
 	}
 }
 
+// TestCheckoutKeyRouteRejectsDotSegmentFingerprint is the regression test for
+// checkoutKeyRoute's fingerprint check: a fingerprint that is exactly "." or
+// ".." survives url.PathEscape unchanged (it doesn't touch dots) and
+// url.Parse doesn't clean dot-segments out of a path either, so either one
+// would put a literal "./" or "../" into the outbound request path and
+// retarget it at a different route — the same risk checkoutKeyProjectPath
+// already closes for the slug, but the fingerprint is appended as a trailing
+// segment after the slug is already escaped, so that check does not reach it.
+// This is defence in depth, not a fix for a reachable bug: a fingerprint comes
+// from Terraform configuration or from CircleCI's own API responses, never
+// from a third party.
+//
+// It also pins that an ordinary fingerprint, and one that merely contains a
+// dot (an MD5 or SHA256 digest is rendered with ":" separators, not dots, but
+// nothing here should reject one that happened to contain "."), remain valid.
+func TestCheckoutKeyRouteRejectsDotSegmentFingerprint(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the client made a request for fingerprint case, URI = %q", r.RequestURI)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, checkoutKeyBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	badClient := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	for _, fingerprint := range []string{".", ".."} {
+		t.Run("fingerprint="+fingerprint, func(t *testing.T) {
+			if _, err := badClient.GetCheckoutKey(context.Background(), "gh/acme/widgets", fingerprint); err == nil {
+				t.Errorf("GetCheckoutKey(fingerprint=%q) returned no error, want one", fingerprint)
+			}
+			if err := badClient.DeleteCheckoutKey(context.Background(), "gh/acme/widgets", fingerprint); err == nil {
+				t.Errorf("DeleteCheckoutKey(fingerprint=%q) returned no error, want one", fingerprint)
+			}
+		})
+	}
+
+	// A fingerprint that is ordinary, or that merely contains a dot, must
+	// still reach the server with the expected escaped URI: rejecting either
+	// would break real configurations.
+	goodSrv, rec := newRecordingServer(t, http.StatusOK, checkoutKeyBody)
+	goodClient := circleci.New(circleci.Config{Host: goodSrv.URL, Token: "tok"})
+
+	for _, fingerprint := range []string{"aa:bb:cc", "SHA256:a.b.c"} {
+		if _, err := goodClient.GetCheckoutKey(context.Background(), "gh/acme/widgets", fingerprint); err != nil {
+			t.Errorf("GetCheckoutKey(fingerprint=%q) returned error: %v, want none", fingerprint, err)
+		}
+
+		wantURI := "/api/v2/project/gh/acme/widgets/checkout-key/" + fingerprint
+		if rec.requestURI != wantURI {
+			t.Errorf("raw request URI = %q, want %q", rec.requestURI, wantURI)
+		}
+	}
+}
+
 // TestCheckoutKeyDecodesUnderscoreFieldNames pins the JSON field names against
 // the real API.
 //

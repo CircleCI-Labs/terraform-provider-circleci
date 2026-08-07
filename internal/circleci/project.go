@@ -128,6 +128,14 @@ func (c *Client) DeleteProject(ctx context.Context, slug string) error {
 // projectName trio project_settings.go passes through RouteParams — checks
 // its segments against this before they are escaped or handed off.
 //
+// The same check also guards two identifiers that are appended as a single
+// trailing segment after an already-checked slug, rather than split into
+// segments themselves: the fingerprint in checkoutKeyRoute (checkout_key.go)
+// and the name in projectEnvVarNameRoute (environment_variable.go). And it
+// guards the environment variable name in the context environment-variable
+// routes (also environment_variable.go), which reaches RouteParams directly
+// rather than through one of the escaping helpers above.
+//
 // This is defence in depth rather than a fix for a reachable bug: a slug or
 // name reaching any of those functions comes from Terraform configuration or
 // from CircleCI's own API responses, never from a third party. Rejecting it
