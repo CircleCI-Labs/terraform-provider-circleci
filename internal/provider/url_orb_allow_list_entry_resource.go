@@ -277,10 +277,32 @@ func (r *urlOrbAllowListEntryResource) Delete(ctx context.Context, req resource.
 		return
 	}
 
-	err := r.client.DeleteURLOrbAllowListEntry(ctx, state.Organization.ValueString(), state.Id.ValueString())
+	org := state.Organization.ValueString()
+
+	err := r.client.DeleteURLOrbAllowListEntry(ctx, org, state.Id.ValueString())
 	if err != nil {
-		// Already gone is the outcome Delete wants.
-		if circleci.IsNotFound(err) {
+		// Unlike most deletes, a 404 here is never "already gone": the handler
+		// answers 200 with {"id", "message"} whether or not the entry was there, so
+		// it never 404s over the entry itself. A 404 means the organization could
+		// not be resolved or viewed, per DeleteURLOrbAllowListEntry. Reporting
+		// success in that case would make Terraform drop the resource from state
+		// while the entry stayed live upstream, permanently occupying one of the
+		// organization's five allow-list slots with nothing left tracking it. Read
+		// draws the same distinction for the same reason; see there for more.
+		if circleci.HasStatus(err, http.StatusNotFound) {
+			resp.Diagnostics.AddError(
+				"Unable to delete CircleCI URL orb allow list entry "+state.Id.ValueString(),
+				fmt.Sprintf(
+					"CircleCI answered 404 for organization %s. This route answers success for an "+
+						"entry that no longer exists, so a 404 here is about the organization instead: "+
+						"either %s does not exist, or the API token may not access it. Check the "+
+						"organization id and the token's access.\n\n"+
+						"The entry has been left in Terraform state, because reporting success here "+
+						"would leave it live upstream with nothing tracking it.",
+					org, org,
+				),
+			)
+
 			return
 		}
 
