@@ -68,16 +68,38 @@ name the context it expects.
 
 ## Cutting a release
 
+Close the changelog first. The `## Unreleased` heading becomes the version and the date it
+shipped, and a release cut without doing this publishes a changelog that describes the
+release as unreleased — which is what happened to 0.5.0, and was corrected afterwards by
+hand.
+
+```md
+## 0.6.0 (2026-08-14)
+```
+
+Then verify and tag:
+
 ```sh
 task lint && task test && task validate-examples && task ci:diff
-git tag v0.5.0
-git push origin v0.5.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 The tag triggers the release workflow. Nothing else does.
 
-Version numbers carry no compatibility promise yet — nothing has been released from this
-work, and the provider has no users outside this repository, so the number is free to pick.
+### Picking the number
+
+**This provider has published releases and can have users outside this repository, so the
+number carries a compatibility promise.** Read the `## Unreleased` section before choosing:
+
+- a `### BREAKING CHANGES` entry means the **minor** must increase, even below 1.0. A
+  practitioner pinning `~> 0.5` receives `0.6.0` automatically, so a breaking change
+  released as a patch reaches them without warning.
+- anything else is a patch.
+
+Whichever it is, the guides and README recommend a constraint (`version = "~> 0.5"`) that
+has to be moved forward in the same release the minor changes, or the quickstart pins a
+version older than the features it documents.
 
 ## Deliberately not done
 
