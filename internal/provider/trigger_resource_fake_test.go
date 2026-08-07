@@ -623,6 +623,63 @@ func TestTriggerResourceUnit_GithubAppCRUD(t *testing.T) {
 	}
 }
 
+// TestTriggerResourceUnit_CreateDoesNotNeedASecondReadToPopulateState is a
+// regression test for issue #6.
+//
+// Create used to follow a successful CreateTrigger with a GetTrigger call
+// made for no reason but to pick up CreatedAt — even though CreateTrigger
+// "returns it as stored" (see that method's doc comment in
+// internal/circleci/trigger.go): the create response is already a full
+// Trigger, the same shape GetTrigger returns, so CreatedAt was sitting right
+// there unused. Because that extra call happened *before* resp.State.Set,
+// its failure returned early and left a trigger the API had already created
+// with no record in Terraform state at all — the next apply would try to
+// create it again. The fix trusts the create response directly and makes no
+// such call.
+//
+// This is checked by counting requests rather than by failing a follow-up
+// read, because after the fix there is no follow-up read left to fail. A
+// single create-and-verify test step should produce exactly one POST (the
+// create) and exactly one GET (the plugin-testing framework's own
+// post-apply refresh, which confirms the plan comes back empty) — not two
+// GETs, which is what the extra internal GetTrigger call used to add.
+func TestTriggerResourceUnit_CreateDoesNotNeedASecondReadToPopulateState(t *testing.T) {
+	api, host := newFakeTriggerAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: triggerFakeGithubAppConfig(host, "1234", "all-pushes", false),
+				ConfigStateChecks: []statecheck.StateCheck{
+					// The value the fake's create response carries (see buildRecord),
+					// proving created_at came from the create response and not from a
+					// second call.
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("created_at"), knownvalue.StringExact("2024-06-01T00:00:00.000Z")),
+				},
+			},
+		},
+	})
+
+	var creates, gets int
+	for _, req := range api.recorded() {
+		switch req.Method {
+		case http.MethodPost:
+			creates++
+		case http.MethodGet:
+			gets++
+		}
+	}
+	if creates != 1 {
+		t.Errorf("saw %d create requests, want exactly 1: %+v", creates, api.recorded())
+	}
+	if gets != 1 {
+		t.Errorf("saw %d GET requests for one create-and-verify step, want exactly 1 (the "+
+			"framework's own post-apply refresh); Create must not make its own follow-up "+
+			"read to populate state: %+v", gets, api.recorded())
+	}
+}
+
 // fakeTriggerOtherProjectID is a second project id, used only by
 // TestTriggerResourceUnit_ProjectIDChangeForcesReplacement.
 const fakeTriggerOtherProjectID = "cccccccc-9999-8888-7777-444444444444"
