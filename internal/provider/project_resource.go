@@ -541,8 +541,16 @@ func (r *projectResource) Update(ctx context.Context, req resource.UpdateRequest
 	state.SetupWorkflows = types.BoolPointerValue(updatedProject.SetupWorkflows)
 	state.WriteSettingsRequiresAdmin = types.BoolPointerValue(updatedProject.WriteSettingsRequiresAdmin)
 
+	// Guarded on what was requested (projectSettings), not on what came back:
+	// an unmanaged pr_only_branch_overrides sends nothing, and this must not
+	// adopt whatever CircleCI happens to already hold, for the same reason as
+	// Read's guard above. The value written to state, though, comes from
+	// updatedProject — what the API reported — like every other field in this
+	// function, rather than from the request that was just sent. CircleCI is
+	// free to normalise, sort, deduplicate or partially reject the list, so
+	// state must record what it now holds, not what Terraform asked for.
 	if len(derefBranches(projectSettings.PROnlyBranchOverrides)) > 0 {
-		overrides, overrideDiags := branchOverrideSet(ctx, projectSettings.PROnlyBranchOverrides)
+		overrides, overrideDiags := branchOverrideSet(ctx, updatedProject.PROnlyBranchOverrides)
 		resp.Diagnostics.Append(overrideDiags...)
 		if resp.Diagnostics.HasError() {
 			return
