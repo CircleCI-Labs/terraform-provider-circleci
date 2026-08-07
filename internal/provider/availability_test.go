@@ -5,10 +5,8 @@ package provider
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -490,27 +488,17 @@ func truncate(s string, limit int) string {
 func gatedTypeNames(t *testing.T) map[string]string {
 	t.Helper()
 
-	fset := token.NewFileSet()
+	// Production code only: a gate that exists solely in a test gates nothing.
+	files := parsePackageGoFiles(t, func(fileName string) bool {
+		return !strings.HasSuffix(fileName, "_test.go")
+	})
 
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		// Production code only: a gate that exists solely in a test gates nothing.
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parsing package: %v", err)
-	}
-
-	pkg, ok := pkgs["provider"]
-	if !ok {
-		t.Fatalf("package %q not found in %v", "provider", keys(pkgs))
-	}
-
-	constants := stringConstants(pkg.Files)
+	constants := stringConstants(files)
 
 	gated := map[string]string{}
 	unresolved := map[string]bool{}
 
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, isCall := node.(*ast.CallExpr)
 			if !isCall {

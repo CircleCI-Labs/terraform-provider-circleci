@@ -7,7 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"strings"
 	"testing"
 
@@ -30,24 +30,15 @@ import (
 func TestEveryConstructorIsRegistered(t *testing.T) {
 	t.Parallel()
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		// Skip test files: constructors must be registered by production code.
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parsing package: %v", err)
-	}
-
-	pkg, ok := pkgs["provider"]
-	if !ok {
-		t.Fatalf("package %q not found in parsed dirs %v", "provider", keys(pkgs))
-	}
+	// Skip test files: constructors must be registered by production code.
+	files := parsePackageGoFiles(t, func(fileName string) bool {
+		return !strings.HasSuffix(fileName, "_test.go")
+	})
 
 	declared := map[string]string{} // constructor name -> "resource" | "datasource"
 	registered := map[string]bool{}
 
-	for name, file := range pkg.Files {
+	for name, file := range files {
 		for _, decl := range file.Decls {
 			fn, isFunc := decl.(*ast.FuncDecl)
 			if !isFunc {
@@ -170,6 +161,48 @@ func TestRegisteredTypeNamesAreUnique(t *testing.T) {
 	}
 
 	t.Logf("registered %d resources and %d data sources", len(seen), len(seenDS))
+}
+
+// parsePackageGoFiles parses the .go files in this package's directory whose
+// names keep accepts, returning them keyed by file name.
+//
+// This stands in for go/parser.ParseDir, deprecated in Go 1.25 because it
+// decides which files belong to a package without consulting build tags. This
+// package declares no build tags, so walking the directory is equivalent — and
+// it drops ParseDir's grouping by package name, which every caller here had to
+// unwrap before doing any work anyway.
+func parsePackageGoFiles(t *testing.T, keep func(fileName string) bool) map[string]*ast.File {
+	t.Helper()
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading the package directory: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	files := map[string]*ast.File{}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || !keep(name) {
+			continue
+		}
+
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+
+		files[name] = file
+	}
+
+	// Every caller asserts something about what it found in these files, so a
+	// filter that matches nothing would pass vacuously.
+	if len(files) == 0 {
+		t.Fatal("the filter matched no .go files; the walk is broken, not the code under test")
+	}
+
+	return files
 }
 
 func keys[V any](m map[string]V) []string {
