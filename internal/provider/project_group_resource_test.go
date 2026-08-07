@@ -89,6 +89,17 @@ func (m *mockProjectGroupAPI) revoke(projectID, groupID string) {
 	delete(m.grants[projectID], groupID)
 }
 
+// setMissingProject makes every request answer 404 "Project not found",
+// standing in for an organization or project the token has lost access to --
+// as distinct from revoke, which removes one grant from an otherwise healthy
+// list.
+func (m *mockProjectGroupAPI) setMissingProject(missing bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.missingProject = missing
+}
+
 // setRole changes a grant's role behind Terraform's back.
 func (m *mockProjectGroupAPI) setRole(projectID, groupID, role string) {
 	m.mu.Lock()
@@ -613,6 +624,39 @@ func TestAccProjectGroupResource_revokedGrantLeavesState(t *testing.T) {
 						plancheck.ExpectResourceAction("circleci_project_group.test", plancheck.ResourceActionCreate),
 					},
 				},
+			},
+		},
+	})
+}
+
+// TestAccProjectGroupResource_lostAccessKeepsState is the counterpart to
+// TestAccProjectGroupResource_revokedGrantLeavesState: a grant genuinely
+// revoked in the web UI is read back as an empty list, but a token that has
+// lost access to the organization or project fails the list call itself, with
+// the same 404 the real API returns for a missing organization or project (see
+// mockProjectGroupAPI.missingProject). Read must tell the two apart --
+// otherwise a permissions problem looks like a deletion, and the next apply
+// calls Assign again instead of reporting the actual problem.
+func TestAccProjectGroupResource_lostAccessKeepsState(t *testing.T) {
+	api, host := newMockProjectGroupAPI(t)
+
+	config := testAccProjectGroupConfig(host, circleci.ProjectRoleViewer)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+			{
+				PreConfig:    func() { api.setMissingProject(true) },
+				RefreshState: true,
+				// The diagnostic is line-wrapped by Terraform, so match a short phrase:
+				// this is the branch that reports the 404 rather than dropping state.
+				ExpectError: regexp.MustCompile(`(?s)404 while listing`),
+			},
+			// Undo the failure so the framework's own destroy step can run.
+			{
+				PreConfig: func() { api.setMissingProject(false) },
+				Config:    config,
 			},
 		},
 	})

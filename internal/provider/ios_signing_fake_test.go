@@ -65,6 +65,12 @@ type iosSigningFakeAPI struct {
 	nextID  int
 	certs   map[string]*iosSigningFakeCert
 	configs map[string]*iosSigningFakeConfig
+	// listConfigsStatus, when non-zero, makes GET .../signing/configs answer with
+	// that status instead of the collection. It stands in for v3's own way of
+	// saying "no" to a filtered collection: a token that has lost access to
+	// filter[org_id]'s organization gets an HTTP error there, which is a very
+	// different thing from the organization simply having no configurations.
+	listConfigsStatus int
 }
 
 // newIOSSigningFakeAPI starts a fake v3 API and stops it when the test ends.
@@ -592,9 +598,25 @@ func (a *iosSigningFakeAPI) createConfig(w http.ResponseWriter, r *http.Request)
 	iosSigningFakeWriteJSON(w, http.StatusCreated, map[string]any{"data": map[string]any{"id": cfg.ID}})
 }
 
+// setListConfigsStatus makes GET .../signing/configs fail with status instead
+// of answering the collection, or restores it when status is zero. See
+// listConfigsStatus.
+func (a *iosSigningFakeAPI) setListConfigsStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.listConfigsStatus = status
+}
+
 func (a *iosSigningFakeAPI) listConfigs(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if a.listConfigsStatus != 0 {
+		iosSigningFakeWriteError(w, a.listConfigsStatus, "Org not found")
+
+		return
+	}
 
 	orgID := r.URL.Query().Get("filter[org_id]")
 

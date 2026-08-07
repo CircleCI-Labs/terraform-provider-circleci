@@ -5,7 +5,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -200,10 +202,39 @@ func (r *projectGroupResource) Read(ctx context.Context, req resource.ReadReques
 
 	group, err := r.client.ProjectGroups().Get(ctx, organizationID, projectID, groupID)
 	if err != nil {
-		// A grant revoked in the web UI is not an error: drop it from state so the
-		// next plan recreates it.
-		if circleci.IsNotFound(err) {
+		// There is no single-grant route: a grant is read by listing the project's
+		// groups and matching on id (see ProjectGroupService.Get in
+		// internal/circleci/project_group.go). Only the grant being genuinely absent
+		// from that list -- the ErrNotFound sentinel Get returns for a
+		// successful-but-empty match -- means it was revoked in the web UI, and only
+		// that may drop this resource from state.
+		//
+		// A *transport* failure looking up the list itself must not, even though
+		// circleci.IsNotFound would say yes to a 404 there: the route 404s both when
+		// the organization or project no longer exists and when the token has lost
+		// access to one that does, which is not the same thing as the grant being
+		// revoked. Dropping state there would have the next apply call Assign again
+		// -- harmless today only because Assign happens to be idempotent, not
+		// because dropping state was the right call. Report it instead and leave
+		// state alone.
+		if errors.Is(err, circleci.ErrNotFound) {
 			resp.State.RemoveResource(ctx)
+
+			return
+		}
+
+		if circleci.HasStatus(err, http.StatusNotFound) {
+			resp.Diagnostics.AddError(
+				"Unable to read the CircleCI project group grant for group "+groupID,
+				fmt.Sprintf(
+					"CircleCI answered 404 while listing project %s's groups in organization %s. "+
+						"The grant is read by listing the project's groups, so this is about the "+
+						"organization or project, not the grant: either one no longer exists, or the "+
+						"API token can no longer manage it.\n\n"+
+						"The grant has been left in Terraform state rather than removed.",
+					projectID, organizationID,
+				),
+			)
 
 			return
 		}
