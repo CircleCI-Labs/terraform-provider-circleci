@@ -17,13 +17,14 @@ import (
 // SetAttribute require a schema version bump and a resource.ResourceWithUpgradeState
 // implementation?
 //
-// Three attributes needed that change, because CircleCI stores them as unordered
+// These attributes needed that change, because CircleCI stores them as unordered
 // collections and reports them back in an order of its own choosing, so Terraform
 // planned a change on every run with nothing to apply:
 //
 //   - circleci_webhook.events
 //   - circleci_project.pr_only_branch_overrides
 //   - circleci_project_settings.pr_only_branch_overrides
+//   - circleci_oidc_custom_claims.audience
 //
 // The answer is no, and the reason is that a list and a set of the same element
 // type share one JSON encoding — both are a JSON array. Terraform stores resource
@@ -64,6 +65,11 @@ func listToSetCases() []listToSetCase {
 			typeName:  "circleci_project_settings",
 			attribute: "pr_only_branch_overrides",
 			elements:  []string{"zebra", "alpha", "main", "beta"},
+		},
+		{
+			typeName:  "circleci_oidc_custom_claims",
+			attribute: "audience",
+			elements:  []string{"sts.amazonaws.com", "vault.example.com"},
 		},
 	}
 }

@@ -340,7 +340,16 @@ func (a *orbFakeAPI) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 // --- orbs ---
 
 // orbDetail renders the by-id shape, whose namespace reference carries a name.
-func (a *orbFakeAPI) orbDetail(orb *orbFakeOrb) map[string]any {
+//
+// reverseCategories controls the order orb_categories renders in — see
+// orbCategoryRefs. getOrb (Read) and setOrbListed pass true, standing in for a
+// route that answers with a snapshot of the package's current state rather than
+// echoing back the effect of a category mutation just performed: createOrb,
+// addOrbCategory and removeOrbCategory pass false. That split is what lets an
+// is_listed-only update — which never touches category membership — show the
+// registry reporting categories in a different order than the one Create last
+// wrote to state, exactly as the real, unordered API could.
+func (a *orbFakeAPI) orbDetail(orb *orbFakeOrb, reverseCategories bool) map[string]any {
 	namespace := map[string]any{"id": orb.NamespaceID, "attributes": map[string]any{"name": ""}}
 	if ns, ok := a.namespaces[orb.NamespaceID]; ok {
 		namespace["attributes"] = map[string]any{"name": ns.Name}
@@ -361,7 +370,7 @@ func (a *orbFakeAPI) orbDetail(orb *orbFakeOrb) map[string]any {
 		"references": map[string]any{
 			"namespace":      namespace,
 			"orb_versions":   a.orbVersionRefs(orb),
-			"orb_categories": a.orbCategoryRefs(orb),
+			"orb_categories": a.orbCategoryRefs(orb, reverseCategories),
 		},
 	}
 }
@@ -380,7 +389,7 @@ func (a *orbFakeAPI) orbSummary(orb *orbFakeOrb) map[string]any {
 		"references": map[string]any{
 			"namespace":      map[string]any{"id": orb.NamespaceID},
 			"orb_versions":   a.orbVersionRefs(orb),
-			"orb_categories": a.orbCategoryRefs(orb),
+			"orb_categories": a.orbCategoryRefs(orb, false),
 		},
 	}
 }
@@ -401,9 +410,28 @@ func (a *orbFakeAPI) orbVersionRefs(orb *orbFakeOrb) []map[string]any {
 	return refs
 }
 
-func (a *orbFakeAPI) orbCategoryRefs(orb *orbFakeOrb) []map[string]any {
-	refs := make([]map[string]any, 0, len(orb.CategoryIDs))
-	for _, id := range orb.CategoryIDs {
+// orbCategoryRefs renders an orb's categories.
+//
+// The real registry gives no ordering guarantee at all for an orb's categories,
+// and this fake previously always echoed orb.CategoryIDs in insertion order —
+// which a test suite that only ever adds one category cannot tell apart from a
+// genuinely stable order. reversed renders them back to front instead, which is
+// what lets a test with two or more categories exercise the same failure a real
+// reordering API would cause: `categories` is a Computed ListNestedAttribute, so
+// two responses disagreeing about element order look like a change with
+// nothing to apply. orbCategoriesToList (orb_resource.go) sorts the result so
+// this cannot happen. See orbDetail for which routes pass true.
+func (a *orbFakeAPI) orbCategoryRefs(orb *orbFakeOrb, reversed bool) []map[string]any {
+	ids := orb.CategoryIDs
+	if reversed {
+		ids = make([]string, len(orb.CategoryIDs))
+		for i, id := range orb.CategoryIDs {
+			ids[len(orb.CategoryIDs)-1-i] = id
+		}
+	}
+
+	refs := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
 		for _, category := range orbFakeCategories {
 			if category.ID == id {
 				refs = append(refs, map[string]any{
@@ -500,7 +528,7 @@ func (a *orbFakeAPI) createOrb(w http.ResponseWriter, r *http.Request) {
 	}
 	a.orbs[orb.ID] = orb
 
-	orbFakeWriteJSON(w, http.StatusCreated, map[string]any{"data": a.orbDetail(orb)})
+	orbFakeWriteJSON(w, http.StatusCreated, map[string]any{"data": a.orbDetail(orb, false)})
 }
 
 func (a *orbFakeAPI) lockedOrb(w http.ResponseWriter, r *http.Request) (*orbFakeOrb, bool) {
@@ -523,7 +551,7 @@ func (a *orbFakeAPI) getOrb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb)})
+	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb, true)})
 }
 
 func (a *orbFakeAPI) setOrbListed(w http.ResponseWriter, r *http.Request) {
@@ -544,7 +572,7 @@ func (a *orbFakeAPI) setOrbListed(w http.ResponseWriter, r *http.Request) {
 
 	orb.IsListed = body.IsListed
 
-	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb)})
+	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb, true)})
 }
 
 func (a *orbFakeAPI) addOrbCategory(w http.ResponseWriter, r *http.Request) {
@@ -565,14 +593,14 @@ func (a *orbFakeAPI) addOrbCategory(w http.ResponseWriter, r *http.Request) {
 
 	for _, id := range orb.CategoryIDs {
 		if id == body.CategoryID {
-			orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb)})
+			orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb, false)})
 
 			return
 		}
 	}
 	orb.CategoryIDs = append(orb.CategoryIDs, body.CategoryID)
 
-	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb)})
+	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb, false)})
 }
 
 func (a *orbFakeAPI) removeOrbCategory(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +627,7 @@ func (a *orbFakeAPI) removeOrbCategory(w http.ResponseWriter, r *http.Request) {
 	}
 	orb.CategoryIDs = remaining
 
-	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb)})
+	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": a.orbDetail(orb, false)})
 }
 
 func (a *orbFakeAPI) listOrbCategories(w http.ResponseWriter, _ *http.Request) {
