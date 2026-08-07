@@ -7,7 +7,19 @@ description: |-
 
 # circleci_organization (Data Source)
 
-Fetches information about a CircleCI organization.
+Fetches information about a CircleCI organization. This is the usual way to
+resolve an organization's UUID from its slug for use in `org_id` elsewhere in
+this provider — see [`circleci_context`](context)'s example.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Unverified. This is a v2 route served directly by CircleCI's API and should work the same way, but no CircleCI Server installation has been available to test against. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/organization/{slug-or-id}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization. |
 
 ## Example Usage
 

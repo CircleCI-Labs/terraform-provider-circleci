@@ -11,7 +11,15 @@ Reads how much work is queued for, and running on, a self-hosted runner resource
 
 The two counts come from two runner API endpoints but are exposed as one data source, because they are only meaningful together — reading them in a single refresh keeps them consistent with each other and with the resource class they describe.
 
-Works against both **CircleCI Cloud and CircleCI Server**. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it, so **Server users must set the provider's `runner_host` attribute** to their Server hostname.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `GET /api/v3/runner/tasks` and `.../tasks/running` (on `runner_host`) |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the resource class's namespace. |
 
 > **These counts change constantly.** They are read at refresh time and will differ by the next run, so anything that derives a managed attribute from them will churn the plan forever. Feed them to something that acts on the current value — an autoscaling group's desired capacity, an output consumed by another system — rather than to configuration that Terraform then has to keep in step.
 

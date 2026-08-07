@@ -11,7 +11,15 @@ Creates a CircleCI self-hosted runner authentication token for the duration of a
 
 This exists alongside the `circleci_runner_token` managed resource rather than replacing it — a Terraform type name must be unique, so a second, differently named type is the only way to offer both shapes. `circleci_runner_token` writes the token to state forever, because the API returns its value only once, at creation; that makes it the right choice when the token needs to outlive this run (for example, when nothing in this Terraform run consumes it, and it will be handed to a runner provisioned entirely outside Terraform later). This ephemeral resource is the better choice for bootstrapping a runner within the same `terraform apply` that consumes the token: `Open` creates it, `Close` deletes it, and the credential never touches a state file.
 
-Works against both **CircleCI Cloud and CircleCI Server**. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it, so **Server users must set the provider's `runner_host` attribute** to their Server hostname.
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `POST /api/v3/runner/token` on `Open`, `DELETE /api/v3/runner/token/{id}` on `Close` (both on `runner_host`) |
+| **Organization type** | Any. |
+| **Token** | A personal API token with admin permission on the resource class's namespace. |
 
 > **Best-effort deletion.** The underlying runner admin API client returns untyped errors, so a delete failure because the token was already gone cannot be told apart from a genuine failure. `Close` still calls delete and, if it errors, raises a warning naming the token id rather than silently leaving a possibly-live credential unaccounted for — check that id and delete it by hand if the warning appears.
 

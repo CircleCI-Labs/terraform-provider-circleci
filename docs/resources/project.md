@@ -11,6 +11,16 @@ Manages a CircleCI project and its advanced settings.
 
 Use this for a project Terraform creates. For a project that **already exists**, use [`circleci_project_settings`](project_settings) instead: this resource owns the project's whole settings record, and it can neither adopt a project it did not create nor be pointed at one alongside another resource — two resources managing the same project overwrite each other's changes on every apply.
 
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Projects are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. Creating a project on a classic (non-standalone) organization additionally follows a v1.1 route to make the project runnable — the oldest API surface this provider still depends on — and that dependency is untested against Server too. See the CircleCI Server note on the provider index page. |
+| **API** | `POST /api/v2/organization/{organization_id}/project`, `GET` and `DELETE /api/v2/project/{project-slug}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token with permission to create projects in the organization. |
+
 ## Example Usage
 
 ```terraform

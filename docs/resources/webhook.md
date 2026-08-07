@@ -7,11 +7,24 @@ description: |-
 
 # circleci_webhook (Resource)
 
-Manages a CircleCI webhook. Webhooks send HTTP POST payloads to a configured URL when specific events occur in a project.
+Manages a CircleCI webhook. Webhooks send HTTP POST payloads to a configured URL when specific events occur in a project. Use [`circleci_webhooks`](../data-sources/webhooks) to list every webhook on a project, including ones created outside Terraform.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Outbound webhooks are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `POST /api/v2/webhook`, `GET`, `PUT` and `DELETE /api/v2/webhook/{id}` |
+| **Organization type** | Any. |
+| **Token** | A personal API token with write access to the project. |
 
 ## Example Usage
 
 ```terraform
+# scope_id is the project's UUID, not its slug -- the same id
+# data.circleci_project's `id` returns. scope_type is "project", the only value
+# the API currently accepts.
 resource "circleci_webhook" "example" {
   name           = "my-webhook"
   url            = "https://example.com/webhook"
@@ -21,14 +34,9 @@ resource "circleci_webhook" "example" {
   events         = ["workflow-completed", "job-completed"]
   verify_tls     = true
 }
-```
 
-### Keeping the signing secret out of state
-
-`signing_secret_wo` is a write-only alternative to `signing_secret`, available with
-Terraform 1.11 or later. Set exactly one of the two.
-
-```terraform
+# `signing_secret_wo` is a write-only alternative to `signing_secret`, available
+# with Terraform 1.11 or later. Set exactly one of the two.
 variable "webhook_signing_secret" {
   type      = string
   sensitive = true
@@ -39,13 +47,19 @@ resource "circleci_webhook" "write_only" {
   url  = "https://example.com/webhook"
 
   signing_secret_wo         = var.webhook_signing_secret
-  signing_secret_wo_version = 1
+  signing_secret_wo_version = 1 # bump to 2 to rotate the secret
 
   scope_id   = "00000000-0000-0000-0000-000000000000"
   scope_type = "project"
   events     = ["workflow-completed", "job-completed"]
 }
 ```
+
+### Keeping the signing secret out of state
+
+`signing_secret_wo` is a write-only alternative to `signing_secret`, available with
+Terraform 1.11 or later. Set exactly one of the two — see the second resource in
+the example above.
 
 The trade between the two is a real one, in both directions:
 

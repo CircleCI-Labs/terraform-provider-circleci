@@ -7,7 +7,19 @@ description: |-
 
 # circleci_runner_resource_class (Data Source)
 
-Fetches information about a CircleCI self-hosted runner resource class.
+Fetches information about a CircleCI self-hosted runner resource class. Use
+[`circleci_runner_resource_classes`](runner_resource_classes) (plural) to list
+every resource class in a namespace or organization.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. The runner administration API lives on its own origin: on Cloud it defaults to `https://runner.circleci.com`, while on Server your own installation serves it — set the provider's `runner_host` attribute to your Server hostname. |
+| **API** | `GET /api/v3/runner/resource` (on `runner_host`), filtered client-side by name |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the organization or namespace. |
 
 ## Example Usage
 

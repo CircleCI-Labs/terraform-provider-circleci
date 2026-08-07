@@ -7,7 +7,21 @@ description: |-
 
 # circleci_project (Data Source)
 
-Fetches information about a CircleCI project and its settings.
+Fetches information about a CircleCI project and its settings. This is the usual
+way to resolve a project's UUID from its slug for use in `project_id` elsewhere
+in this provider — see [`circleci_pipeline_definition`](../resources/pipeline_definition)'s
+example. Build settings are deliberately not reported here: use
+[`circleci_project_settings`](project_settings) for those.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Projects are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/project/{project-slug}` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the project. |
 
 ## Example Usage
 

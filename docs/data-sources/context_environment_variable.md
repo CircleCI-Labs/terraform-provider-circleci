@@ -7,9 +7,21 @@ description: |-
 
 # circleci_context_environment_variable (Data Source)
 
-Fetches metadata about a CircleCI context environment variable.
+Fetches metadata about a CircleCI context environment variable. Use
+[`circleci_context_environment_variables`](context_environment_variables) to list
+every variable in a context.
 
 > **Note:** The CircleCI API does not return the value of context environment variables. This data source only provides metadata such as creation and update timestamps. Use it to check whether a variable exists or to reference its timestamps; the secret value itself is not accessible.
+
+## Availability
+
+| | |
+| --- | --- |
+| **CircleCI Cloud** | Yes |
+| **CircleCI Server** | Yes. Contexts are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
+| **API** | `GET /api/v2/context/{context_id}/environment-variable` |
+| **Organization type** | Any. |
+| **Token** | Any valid API token with read access to the context's organization. |
 
 ## Example Usage
 
