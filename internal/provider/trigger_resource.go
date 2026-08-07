@@ -427,18 +427,16 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 
 	circleCiTerrformTriggerResource.Disabled = types.BoolValue(newReturnedTrigger.IsDisabled())
 
-	readTrigger, err := r.client.GetTrigger(ctx, circleCiTerrformTriggerResource.ProjectId.ValueString(), newReturnedTrigger.ID)
-	if err != nil {
-		resp.Diagnostics.AddError("Failed retrieving", circleci.Detail(err))
-		// Cleanup may be required here (e.g., Delete the resource if it failed to settle)
-		return
-	}
-	circleCiTerrformTriggerResource.CreatedAt = types.StringValue(readTrigger.CreatedAt)
-	if readTrigger.EventSource.Repo.FullName == "" {
-		circleCiTerrformTriggerResource.EventSourceRepoFullName = types.StringNull()
-	} else {
-		circleCiTerrformTriggerResource.EventSourceRepoFullName = types.StringValue(readTrigger.EventSource.Repo.FullName)
-	}
+	// CreateTrigger "returns it as stored" (see that method's doc comment):
+	// the create response is a full Trigger, the same shape GetTrigger
+	// returns, so CreatedAt is already populated here. A follow-up GetTrigger
+	// used to be made purely to pick up CreatedAt (and re-set
+	// EventSourceRepoFullName, already set above from this same response) —
+	// and its failure returned before resp.State.Set below, so a trigger the
+	// API had already created successfully was left with no record in
+	// Terraform state at all. Trusting the create response avoids that
+	// extra round-trip and the failure mode that came with it.
+	circleCiTerrformTriggerResource.CreatedAt = types.StringValue(newReturnedTrigger.CreatedAt)
 
 	// Set state to fully populated data
 	diags = resp.State.Set(ctx, circleCiTerrformTriggerResource)
