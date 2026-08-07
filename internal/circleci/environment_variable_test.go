@@ -553,3 +553,110 @@ func TestDeleteProjectEnvironmentVariableNotFound(t *testing.T) {
 		t.Errorf("DeleteProjectEnvironmentVariable error = %v, want a not found error", err)
 	}
 }
+
+// TestProjectEnvVarNameRouteRejectsDotSegments is the regression test for
+// projectEnvVarNameRoute's name check: a name that is exactly "." or ".."
+// survives url.PathEscape unchanged (it doesn't touch dots) and url.Parse
+// doesn't clean dot-segments out of a path either, so either one would put a
+// literal "./" or "../" into the outbound request path and retarget it at a
+// different route — the same risk checkoutKeyProjectPath already closes for
+// the slug, but the name is appended as a trailing segment after the slug is
+// already escaped, so that check does not reach it. This is defence in
+// depth, not a fix for a reachable bug: a name comes from Terraform
+// configuration or from CircleCI's own API responses, never from a third
+// party.
+//
+// It also pins that an ordinary name, and one that merely contains a dot,
+// remain valid — rejecting either would break real configurations, even
+// though CircleCI environment variable names are conventionally shell
+// identifiers that would not contain one.
+func TestProjectEnvVarNameRouteRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the client made a request for a dot-segment name, URI = %q", r.RequestURI)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, testEnvVarBody)
+	}))
+	t.Cleanup(badSrv.Close)
+
+	badClient := circleci.New(circleci.Config{Host: badSrv.URL, Token: "tok"})
+
+	for _, name := range []string{".", ".."} {
+		t.Run("name="+name, func(t *testing.T) {
+			if _, err := badClient.GetProjectEnvironmentVariable(context.Background(), testEnvVarProjectSlug, name); err == nil {
+				t.Errorf("GetProjectEnvironmentVariable(name=%q) returned no error, want one", name)
+			}
+			if err := badClient.DeleteProjectEnvironmentVariable(context.Background(), testEnvVarProjectSlug, name); err == nil {
+				t.Errorf("DeleteProjectEnvironmentVariable(name=%q) returned no error, want one", name)
+			}
+		})
+	}
+
+	srv, recorded := newEnvVarAPI(t, "")
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	for _, name := range []string{"API_TOKEN", "MY.VAR"} {
+		if _, err := c.GetProjectEnvironmentVariable(context.Background(), testEnvVarProjectSlug, name); err != nil {
+			t.Errorf("GetProjectEnvironmentVariable(name=%q) returned error: %v, want none", name, err)
+		}
+	}
+
+	calls := recorded()
+	if len(calls) != 2 {
+		t.Fatalf("made %d requests, want 2 (one per legitimate name)", len(calls))
+	}
+	if want := "/api/v2/project/" + testEnvVarProjectSlug + "/envvar/API_TOKEN"; calls[0].requestURI != want {
+		t.Errorf("first request URI = %q, want %q", calls[0].requestURI, want)
+	}
+	if want := "/api/v2/project/" + testEnvVarProjectSlug + "/envvar/MY.VAR"; calls[1].requestURI != want {
+		t.Errorf("second request URI = %q, want %q", calls[1].requestURI, want)
+	}
+}
+
+// TestContextEnvVarNameRejectsDotSegments is the regression test for
+// checkContextEnvVarName: a name that is exactly "." or ".." survives
+// url.PathEscape unchanged and url.Parse doesn't clean dot-segments out of a
+// path either, so either one would put a literal "./" or "../" into the
+// outbound request path in place of the variable name and retarget it at a
+// different route. Unlike the project environment-variable and checkout-key
+// routes, this one builds its route through RouteParams rather than manual
+// string concatenation, but RouteParams escapes each value as its own
+// segment the same way, so the same gap applies. This is defence in depth,
+// not a fix for a reachable bug: a name comes from Terraform configuration or
+// from CircleCI's own API responses, never from a third party.
+func TestContextEnvVarNameRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	badClient, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeListJSON(w, `{"variable":"x","context_id":"`+testEnvVarContextID+`","created_at":"","updated_at":""}`)
+	})
+
+	for _, name := range []string{".", ".."} {
+		t.Run("name="+name, func(t *testing.T) {
+			if _, err := badClient.UpsertContextEnvironmentVariable(context.Background(), testEnvVarContextID, name, "v"); err == nil {
+				t.Errorf("UpsertContextEnvironmentVariable(name=%q) returned no error, want one", name)
+			}
+			if err := badClient.DeleteContextEnvironmentVariable(context.Background(), testEnvVarContextID, name); err == nil {
+				t.Errorf("DeleteContextEnvironmentVariable(name=%q) returned no error, want one", name)
+			}
+		})
+	}
+
+	if len(*seen) != 0 {
+		t.Fatalf("made %d requests, want 0: a dot-segment name must be rejected before any request", len(*seen))
+	}
+
+	// An ordinary name must still reach the server.
+	if _, err := badClient.UpsertContextEnvironmentVariable(context.Background(), testEnvVarContextID, "API_KEY", "v"); err != nil {
+		t.Errorf("UpsertContextEnvironmentVariable(name=%q) returned error: %v, want none", "API_KEY", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("made %d requests, want 1 for the legitimate name", len(*seen))
+	}
+	wantURI := "/api/v2/context/" + testEnvVarContextID + "/environment-variable/API_KEY"
+	if got := (*seen)[0].rawURI; got != wantURI {
+		t.Errorf("raw request URI = %q, want %q", got, wantURI)
+	}
+}

@@ -91,6 +91,11 @@ type checkoutKeyInput struct {
 // Because the returned route already contains percent escapes, it must not be
 // passed through fmt.Sprintf afterwards (a %2F would be read as a verb), so the
 // fingerprint is escaped and appended here too and callers pass no RouteParams.
+//
+// A fingerprint that is exactly "." or ".." is rejected outright, before it is
+// escaped — see isDotSegment in project.go. The slug's own segments are
+// already checked by checkoutKeyProjectPath, but that check does not extend to
+// this trailing segment, which is appended after the slug is already escaped.
 func checkoutKeyRoute(projectSlug, fingerprint string) (string, error) {
 	slug, err := checkoutKeyProjectPath(projectSlug)
 	if err != nil {
@@ -99,6 +104,10 @@ func checkoutKeyRoute(projectSlug, fingerprint string) (string, error) {
 
 	route := "/project/" + slug + "/checkout-key"
 	if fingerprint != "" {
+		if isDotSegment(fingerprint) {
+			return "", fmt.Errorf("circleci: checkout key fingerprint %q is not allowed", fingerprint)
+		}
+
 		// A SHA256 fingerprint contains "/" and "+", which the API expects
 		// URL-encoded; PathEscape handles both.
 		route += "/" + url.PathEscape(fingerprint)
