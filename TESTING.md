@@ -158,6 +158,7 @@ read like regressions. Currently gated this way:
 | Test | Requires |
 |---|---|
 | `TestAccCircleCiProjectResource` | `github_oauth` or `bitbucket` — `build_fork_prs = true` is unconfirmed on GitLab and a documented **no** on GitHub App, GitHub Enterprise Server and GitLab self-managed |
+| `TestAccCircleCiProjectOrgUpdateResource` | `github_oauth` or `bitbucket` — same `build_fork_prs = true` assertion, against the same primary organization fixture |
 | `TestAccTriggerResourceWebhook` | `github_app`, `github_oauth` or `github_server` — `circleci_trigger` does not exist at all on GitLab, GitLab self-managed or Bitbucket Cloud |
 | `TestAccScheduledTriggerDataSource` | `github_app`, `github_oauth` or `github_server` — a scheduled trigger is a `circleci_trigger` |
 
