@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### SECURITY
+
+* **A path segment that is exactly `.` or `..` is now rejected before it can reach a
+  request path.** `url.PathEscape` does not touch dots and `url.Parse` does not clean
+  dot-segments, so such a segment survived escaping and put a literal `./` or `../` into the
+  outbound path, retargeting the request at a different route. Every place this client
+  interpolates a caller-supplied segment now checks for it through one shared predicate:
+  the project slug, the checkout-key project path (which also covers the project
+  environment-variable routes), the Insights slugs, and the three arguments the
+  project-settings routes pass individually.
+
+  **This is defence in depth, not a reachable vulnerability.** These values come from
+  Terraform configuration or from CircleCI's own API responses, never from a third party, so
+  abusing it required already controlling the Terraform run. The project-settings case was
+  the one a configuration could drive end to end — its data source splits a configured
+  `project_slug` and validates nothing beyond the segment count — and its regression test
+  asserts at the provider layer that no request is made at all. A name that merely contains
+  a dot, such as a repository called `my.repo`, stays valid. (#7, #35)
+
+### DEPENDENCIES
+
+* golangci-lint 2.2.1 → 2.12.2, terraform-plugin-testing 1.12.0 → 1.16.0,
+  terraform-plugin-log 0.10.0 → 0.11.0, the `circleci/go` orb 3.0.3 → 4.0.0, and a batch of
+  build tooling that also drops `mongo-driver`, `go-openapi` and `govalidator` from the
+  module graph entirely. The CI image is now pinned by digest.
+
+* The Terraform test matrix moves to 1.13.5, 1.14.9 and 1.15.8. Renovate proposed replacing
+  the 1.14 entry with 1.15, which reads as a patch bump but would have dropped a whole
+  supported minor from CI; the matrix is rotated instead.
+
 ### BREAKING CHANGES
 
 * **`circleci_oidc_custom_claims.audience` is now a set rather than a list.**
@@ -21,10 +51,9 @@
   What does break is a configuration that treats `audience` as ordered —
   `audience[0]`, `element(...)`, or anything relying on the order surviving. It
   never did survive, so such a configuration was already producing a plan that
-  never converged.
+  never converged. (#5)
 
 ### BUG FIXES
-
 
 * **`circleci_orb.categories` could show a spurious diff, or fail an update
   outright with "Provider produced inconsistent result after apply".** The
@@ -42,8 +71,7 @@
   change — the element type is unchanged, so no state migration is needed.
 
   Every existing test managed only one category, which cannot show a
-  reordering at all; the regression test uses two.
-
+  reordering at all; the regression test uses two. (#5)
 
 * **`circleci_orb_version` and `circleci_orb` could lose track of an object CircleCI had
   already created.** In each `Create`, a second API call ran after the first had
@@ -59,7 +87,7 @@
 
   Both now write every field the successful call already returned before attempting
   anything further, so a later failure marks the resource tainted (recoverable with
-  `terraform untaint`) instead of losing it from state outright.
+  `terraform untaint`) instead of losing it from state outright. (#37)
 
 * **`circleci_project` could lose track of a project CircleCI had already created and
   followed.** `Create`'s settings call — `GetProjectSettings` or `UpdateProjectSettings`,
@@ -93,6 +121,67 @@
   `Update` now set every field from the response, matching `Read`.
   `signing_secret` is unchanged and still comes from the plan: CircleCI never
   returns the real value on any route.
+
+* **`circleci_url_orb_allow_list_entry`: `terraform destroy` reported success without
+  deleting anything.** The delete route answers `200` whether or not the entry existed,
+  which is why `Delete` needs no existence check — so a `404` from it cannot mean "already
+  gone". It means the organization could not be resolved: renamed, or a token that lost
+  access to it. `Delete` inferred "already gone" anyway and returned success, so Terraform
+  dropped the resource from state while the entry stayed live in CircleCI, holding one of
+  the organization's allow-list slots with nothing tracking it. `Read` on the same resource
+  already refused that inference for the same status; the two disagreed, and `Read` was
+  right. The 404 is now reported, naming the likely cause, and the resource stays in state
+  so a corrected token can destroy it. (#2)
+
+* **`circleci_ios_signing_config` and `circleci_project_group` could not tell a deleted
+  object from one the token may no longer see.** Both find their object by listing a parent
+  collection and matching on id, and both asked `IsNotFound` whether the failure meant it
+  was gone. That helper answers yes both to the sentinel the client returns when the list
+  succeeded and the id was absent — genuinely deleted — and to a bare HTTP 404, which is
+  the list call itself failing. A token that lost access therefore looked exactly like a
+  deletion, and the resource was removed from state.
+
+  For `circleci_ios_signing_config` the consequence went beyond a misleading message: the
+  next apply planned a recreate, the create collided with the resource's own unique-name
+  constraint, and the practitioner was handed an HTTP 409 about a name they never chose to
+  reuse instead of "your token cannot see this organization". Both resources now test the
+  sentinel directly and report an access failure as one, keeping state. (#1)
+
+* **`circleci_trigger` could create a trigger and then lose track of it.** `Create` issued
+  a second `GET` after the trigger already existed, only to read `created_at`, and returned
+  before writing state if it failed — leaving the trigger live in CircleCI with Terraform
+  holding no record of it, so the next apply tried to create it again. The call was never
+  needed: the create response already carries every field it read. (#6)
+
+* **`circleci_project` recorded `pr_only_branch_overrides` from the request rather than the
+  response.** Every other field in `Update` is set from what the API reported; this one was
+  set from what had just been sent. Latent while CircleCI echoes the list back unchanged,
+  and no longer latent the moment it normalises, sorts, deduplicates or partially rejects
+  it — state would record the request and the drift would stay invisible until something
+  else forced a refresh. `Create` was already correct. (#4)
+
+### NOTES
+
+* Three project acceptance tests that skipped unconditionally, with no reason given, now
+  run — gated on a named fixture variable like the rest of the suite. Nothing had been
+  missing: the helpers they needed already existed and were unused. Restoring them exposed
+  two defects the commented-out code had been hiding, including a test whose Create step was
+  commented out while the `ImportState` step depending on it was left in place, so it could
+  not have passed even unskipped. (#8)
+
+* Every documentation page now carries an `## Availability` verdict for CircleCI Cloud and
+  Server, up from 24 pages that had none; the only pages still without one are the three
+  provider functions, which make no API call. `circleci_webhook` and
+  `circleci_project_environment_variable` gained real example files rather than inline HCL,
+  taking the validated example count from 101 to 105. `circleci_webhook`'s data source page
+  now shows the notice, previously present only in the schema and rendered nowhere, that its
+  `signing_secret` is always null. A new guide covers upgrading an existing v0.4.0
+  configuration.
+
+* The three guard tests that walk this package's AST no longer use `go/parser.ParseDir`,
+  deprecated in Go 1.25 for deciding package membership without consulting build tags. This
+  package declares none, so a directory walk is equivalent. Verified behaviour-preserving by
+  injecting the violations each guard exists to catch and confirming both still fail.
 
 ## 0.5.0 (2026-08-06)
 
