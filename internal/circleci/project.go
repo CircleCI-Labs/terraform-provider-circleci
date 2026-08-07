@@ -123,6 +123,14 @@ func (c *Client) DeleteProject(ctx context.Context, slug string) error {
 // slug as a single route parameter would turn its separators into %2F and never
 // match the route. The result is interpolated into the path directly rather than
 // through a format string, since it may now contain % sequences.
+//
+// A segment that is exactly "." or ".." is rejected outright: url.PathEscape does
+// not touch dots, and url.Parse does not clean dot-segments out of a path, so
+// either one would put a literal "./" or "../" into the request path and
+// retarget it at a different route. This is defence in depth rather than a fix
+// for a reachable bug — a slug comes from Terraform configuration or from
+// CircleCI's own API responses, never from a third party — but rejecting it here
+// costs nothing and keeps the escaping's guarantee honest.
 func projectSlugPath(slug string) (string, error) {
 	segments := strings.Split(slug, "/")
 	if len(segments) != projectSlugSegments {
@@ -136,6 +144,9 @@ func projectSlugPath(slug string) (string, error) {
 	for _, segment := range segments {
 		if segment == "" {
 			return "", fmt.Errorf("invalid project slug %q: it has an empty segment", slug)
+		}
+		if segment == "." || segment == ".." {
+			return "", fmt.Errorf("invalid project slug %q: segment %q is not allowed", slug, segment)
 		}
 
 		escaped = append(escaped, url.PathEscape(segment))
