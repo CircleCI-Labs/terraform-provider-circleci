@@ -66,6 +66,9 @@ var InsightsReportingWindows = []string{
 // circleci/<org-uuid>/<project-uuid> instead. Both forms are three segments, so
 // counting works for both, but nothing here may assume the second and third
 // segments are human-readable names.
+//
+// A segment that is exactly "." or ".." is rejected outright, before any segment
+// is escaped — see isDotSegment in project.go.
 func insightsSlugPath(slug string, wantSegments int, shape string) (string, error) {
 	if slug == "" {
 		return "", fmt.Errorf("circleci: slug is empty, want the form %s", shape)
@@ -82,6 +85,9 @@ func insightsSlugPath(slug string, wantSegments int, shape string) (string, erro
 	for i, segment := range segments {
 		if segment == "" {
 			return "", fmt.Errorf("circleci: slug %q has an empty segment, want the form %s", slug, shape)
+		}
+		if isDotSegment(segment) {
+			return "", fmt.Errorf("circleci: slug %q has a %q segment, want the form %s", slug, segment, shape)
 		}
 		segments[i] = url.PathEscape(segment)
 	}

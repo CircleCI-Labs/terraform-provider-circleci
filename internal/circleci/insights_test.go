@@ -617,6 +617,105 @@ func TestInsightsGetSummaryStandaloneOrgSlug(t *testing.T) {
 	}
 }
 
+// TestInsightsRejectsDotSegments is the regression test for insightsSlugPath's
+// dot-segment defence in depth: a slug segment that is exactly "." or ".."
+// survives url.PathEscape unchanged (it doesn't touch dots) and url.Parse
+// doesn't clean dot-segments out of a path either, so either one would put a
+// literal "./" or "../" into the outbound request path and retarget it at a
+// different route. This is defence in depth, not a fix for a reachable bug: a
+// slug comes from Terraform configuration or from CircleCI's own API
+// responses, never from a third party.
+//
+// It also checks the legitimate cases still parse, including a segment that
+// merely contains a dot (a repository or org named "my.repo"/"my.org"), which
+// must remain valid — rejecting that would break real configurations.
+func TestInsightsRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newInsightsServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/workflows"):
+			_, _ = w.Write([]byte(`{"items":[],"next_page_token":null}`))
+		case strings.HasSuffix(r.URL.Path, "/flaky-tests"):
+			_, _ = w.Write([]byte(`{"flaky_tests":[],"total_flaky_tests":0}`))
+		case strings.HasSuffix(r.URL.Path, "/summary"):
+			_, _ = w.Write([]byte(`{"org_data":{"metrics":{},"trends":{}},"org_project_data":[],"all_projects":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	projectSlugs := []struct {
+		name    string
+		slug    string
+		wantErr bool
+	}{
+		{name: "dot in first segment", slug: "./acme/api", wantErr: true},
+		{name: "dot-dot in first segment", slug: "../acme/api", wantErr: true},
+		{name: "dot in middle segment", slug: "gh/./api", wantErr: true},
+		{name: "dot-dot in middle segment", slug: "gh/../api", wantErr: true},
+		{name: "dot in last segment", slug: "gh/acme/.", wantErr: true},
+		{name: "dot-dot in last segment", slug: "gh/acme/..", wantErr: true},
+		{name: "ordinary slug", slug: "gh/acme/api", wantErr: false},
+		{name: "segment merely containing a dot", slug: "gh/acme/my.repo", wantErr: false},
+	}
+
+	for _, tt := range projectSlugs {
+		t.Run("project/"+tt.name, func(t *testing.T) {
+			_, err := client.Insights().ListWorkflows(context.Background(), tt.slug, circleci.InsightsWorkflowsOptions{})
+			if tt.wantErr && err == nil {
+				t.Errorf("ListWorkflows(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ListWorkflows(%q) returned error: %v, want none", tt.slug, err)
+			}
+
+			_, err = client.Insights().GetFlakyTests(context.Background(), tt.slug)
+			if tt.wantErr && err == nil {
+				t.Errorf("GetFlakyTests(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("GetFlakyTests(%q) returned error: %v, want none", tt.slug, err)
+			}
+		})
+	}
+
+	orgSlugs := []struct {
+		name    string
+		slug    string
+		wantErr bool
+	}{
+		{name: "dot in first segment", slug: "./acme", wantErr: true},
+		{name: "dot-dot in first segment", slug: "../acme", wantErr: true},
+		{name: "dot in last segment", slug: "gh/.", wantErr: true},
+		{name: "dot-dot in last segment", slug: "gh/..", wantErr: true},
+		{name: "ordinary slug", slug: "gh/acme", wantErr: false},
+		{name: "segment merely containing a dot", slug: "gh/my.org", wantErr: false},
+	}
+
+	for _, tt := range orgSlugs {
+		t.Run("org/"+tt.name, func(t *testing.T) {
+			_, err := client.Insights().GetSummary(context.Background(), tt.slug, "", nil)
+			if tt.wantErr && err == nil {
+				t.Errorf("GetSummary(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("GetSummary(%q) returned error: %v, want none", tt.slug, err)
+			}
+		})
+	}
+
+	// Sanity check the legitimate requests actually reached the server, so a
+	// mistake that also broke the happy path wouldn't be masked by an
+	// error-only assertion: 2 legitimate project slugs x 2 calls
+	// (ListWorkflows, GetFlakyTests), plus 2 legitimate org slugs x 1 call
+	// (GetSummary).
+	if len(*seen) != 6 {
+		t.Fatalf("made %d requests, want 6: %+v", len(*seen), *seen)
+	}
+}
+
 func TestInsightsRateLimited(t *testing.T) {
 	t.Parallel()
 

@@ -360,3 +360,70 @@ func TestUpdateProjectSettingsAcceptsAClearThatHadNothingToClear(t *testing.T) {
 		t.Errorf("pr_only_branch_overrides = %v, want empty", updated.PROnlyBranchOverrides)
 	}
 }
+
+// TestProjectSettingsRejectsDotSegments is the regression test for
+// checkProjectSettingsPathSegments: a vcsType, orgName or projectName that is
+// exactly "." or ".." survives url.PathEscape unchanged (it doesn't touch
+// dots), and RouteParams's escaping is exactly that — per-value PathEscape —
+// so either one would put a literal "./" or "../" into the outbound request
+// path and retarget it at a different route. This is defence in depth, not a
+// fix for a reachable bug: these arguments come from Terraform configuration
+// or from a slug split at the provider layer, never from a third party.
+//
+// This site matters more than the other three because
+// internal/provider/project_settings_data_source.go builds these three
+// arguments by splitting a configuration-supplied project_slug on "/" and
+// validating nothing beyond the segment count — so a slug like "gh/./repo"
+// reaches this function unchanged.
+//
+// It also checks the legitimate cases still parse, including an argument that
+// merely contains a dot (a repository named "my.repo"), which must remain
+// valid — rejecting that would break real configurations.
+func TestProjectSettingsRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	srv, calls := newProjectSettingsServer(t, projectSettingsResponse)
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	tests := []struct {
+		name                       string
+		vcsType, orgName, projName string
+		wantErr                    bool
+	}{
+		{name: "dot vcsType", vcsType: ".", orgName: "acme", projName: "repo", wantErr: true},
+		{name: "dot-dot vcsType", vcsType: "..", orgName: "acme", projName: "repo", wantErr: true},
+		{name: "dot orgName", vcsType: "github", orgName: ".", projName: "repo", wantErr: true},
+		{name: "dot-dot orgName", vcsType: "github", orgName: "..", projName: "repo", wantErr: true},
+		{name: "dot projectName", vcsType: "github", orgName: "acme", projName: ".", wantErr: true},
+		{name: "dot-dot projectName", vcsType: "github", orgName: "acme", projName: "..", wantErr: true},
+		{name: "ordinary arguments", vcsType: "github", orgName: "acme", projName: "repo", wantErr: false},
+		{name: "argument merely containing a dot", vcsType: "github", orgName: "acme", projName: "my.repo", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := c.GetProjectSettings(context.Background(), tt.vcsType, tt.orgName, tt.projName)
+			if tt.wantErr && err == nil {
+				t.Errorf("GetProjectSettings(%q, %q, %q) returned no error, want one", tt.vcsType, tt.orgName, tt.projName)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("GetProjectSettings(%q, %q, %q) returned error: %v, want none", tt.vcsType, tt.orgName, tt.projName, err)
+			}
+
+			_, err = c.UpdateProjectSettings(context.Background(), tt.vcsType, tt.orgName, tt.projName, circleci.ProjectSettings{})
+			if tt.wantErr && err == nil {
+				t.Errorf("UpdateProjectSettings(%q, %q, %q) returned no error, want one", tt.vcsType, tt.orgName, tt.projName)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("UpdateProjectSettings(%q, %q, %q) returned error: %v, want none", tt.vcsType, tt.orgName, tt.projName, err)
+			}
+		})
+	}
+
+	// Sanity check the legitimate requests actually reached the server, so a
+	// mistake that also broke the happy path wouldn't be masked by an
+	// error-only assertion.
+	if len(*calls) != 4 {
+		t.Fatalf("made %d calls, want 4 (get+update for each of the two legitimate argument sets): %+v", len(*calls), *calls)
+	}
+}

@@ -117,6 +117,25 @@ func (c *Client) DeleteProject(ctx context.Context, slug string) error {
 	return c.DeleteV2(ctx, "/project/"+path)
 }
 
+// isDotSegment reports whether segment is exactly "." or "..".
+//
+// url.PathEscape leaves both forms untouched, and url.Parse does not clean
+// dot-segments out of a path, so either one lets a single route-parameter
+// value put a literal "./" or "../" into a request path and retarget it at a
+// different route. Every place in this package that interpolates a raw
+// segment into a route — projectSlugPath below, checkoutKeyProjectPath in
+// checkout_key.go, insightsSlugPath in insights.go, and the vcsType/orgName/
+// projectName trio project_settings.go passes through RouteParams — checks
+// its segments against this before they are escaped or handed off.
+//
+// This is defence in depth rather than a fix for a reachable bug: a slug or
+// name reaching any of those functions comes from Terraform configuration or
+// from CircleCI's own API responses, never from a third party. Rejecting it
+// here costs nothing and keeps each function's escaping guarantee honest.
+func isDotSegment(segment string) bool {
+	return segment == "." || segment == ".."
+}
+
 // projectSlugPath escapes a project slug for use in a route.
 //
 // Each segment is escaped separately and joined with literal slashes: escaping the
@@ -124,13 +143,7 @@ func (c *Client) DeleteProject(ctx context.Context, slug string) error {
 // match the route. The result is interpolated into the path directly rather than
 // through a format string, since it may now contain % sequences.
 //
-// A segment that is exactly "." or ".." is rejected outright: url.PathEscape does
-// not touch dots, and url.Parse does not clean dot-segments out of a path, so
-// either one would put a literal "./" or "../" into the request path and
-// retarget it at a different route. This is defence in depth rather than a fix
-// for a reachable bug — a slug comes from Terraform configuration or from
-// CircleCI's own API responses, never from a third party — but rejecting it here
-// costs nothing and keeps the escaping's guarantee honest.
+// A segment that is exactly "." or ".." is rejected outright — see isDotSegment.
 func projectSlugPath(slug string) (string, error) {
 	segments := strings.Split(slug, "/")
 	if len(segments) != projectSlugSegments {
@@ -145,7 +158,7 @@ func projectSlugPath(slug string) (string, error) {
 		if segment == "" {
 			return "", fmt.Errorf("invalid project slug %q: it has an empty segment", slug)
 		}
-		if segment == "." || segment == ".." {
+		if isDotSegment(segment) {
 			return "", fmt.Errorf("invalid project slug %q: segment %q is not allowed", slug, segment)
 		}
 
