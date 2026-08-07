@@ -5,9 +5,6 @@ package provider
 
 import (
 	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
 	"sort"
 	"strings"
 	"testing"
@@ -176,24 +173,13 @@ func bodySkips(body *ast.BlockStmt, skipping map[string]bool) bool {
 func parseTestFiles(t *testing.T) []*ast.File {
 	t.Helper()
 
-	fset := token.NewFileSet()
+	parsed := parsePackageGoFiles(t, func(fileName string) bool {
+		return strings.HasSuffix(fileName, "_test.go")
+	})
 
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parsing test files: %v", err)
-	}
-
-	var files []*ast.File
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			files = append(files, file)
-		}
-	}
-
-	if len(files) == 0 {
-		t.Fatal("parsed no _test.go files; the AST walk is broken, not the tests")
+	files := make([]*ast.File, 0, len(parsed))
+	for _, file := range parsed {
+		files = append(files, file)
 	}
 
 	return files
