@@ -110,6 +110,7 @@ resource "circleci_context_restriction" "build" {
 | Move off a community provider | [Migrating from community providers](guides/migrating-from-community-providers) |
 | Replace a legacy scheduled pipeline | [Migrating scheduled pipelines](guides/migrating-scheduled-pipelines) |
 | Update names deprecated in 0.5.0 | [Renaming pipeline resources and data sources](guides/renaming-pipeline-types) |
+| Upgrade an existing v0.4.0 configuration | [Upgrading from v0.4.0](guides/upgrading-from-v0-4-0) |
 
 -> **The one distinction worth learning first.** A pipeline **definition** is
 configuration — where to check out, where the config file is. A pipeline **run**
