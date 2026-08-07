@@ -94,16 +94,21 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 	})
 }
 
+// CIRCLECI_TEST_GITHUB_ORG_ID/_SLUG are documented (README.md, TESTING.md) as
+// set only in the GitHub OAuth context, so testGithubOrgID/testGithubOrgSlug
+// already gate this test to that one integration; it needs no separate
+// testRequireVCSType call, and build_fork_prs = true is confirmed there (see
+// TestAccCircleCiProjectResource above).
 func TestAccGithubProjectResource(t *testing.T) {
-	t.Skip()
-	//projectName := "terraform-provider-test".
-	//orgId := testGithubOrgID(t).
+	projectName := rand.Text()
+	orgId := testGithubOrgID(t)
+	orgSlug := testGithubOrgSlug(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create and Read testing
-			/*{
+			{
 				Config: testAccProjectResourceConfig(
 					projectName,
 					orgId,
@@ -119,7 +124,7 @@ func TestAccGithubProjectResource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("organization_slug"),
-						knownvalue.StringExact(testGithubOrgSlug(t)),
+						knownvalue.StringExact(orgSlug),
 					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
@@ -132,7 +137,7 @@ func TestAccGithubProjectResource(t *testing.T) {
 						knownvalue.Bool(true),
 					),
 				},
-			},*/
+			},
 			// ImportState testing
 			{
 				ResourceName:      "circleci_project.test_project",
@@ -151,8 +156,15 @@ func TestAccGithubProjectResource(t *testing.T) {
 	})
 }
 
+// This test's Create step asserts build_fork_prs = true against the primary
+// test organization, the same fixture and the same assertion as
+// TestAccCircleCiProjectResource above, so it needs the same gate for the
+// same reason: that value is only confirmed on GitHub OAuth and Bitbucket
+// Cloud, and organizationID is set in every context regardless of which VCS
+// integration it actually is.
 func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
-	t.Skip()
+	testRequireVCSType(t, "github_oauth", "bitbucket")
+
 	organizationID := testOrgID(t)
 	organizationSlug := testOrgSlug(t)
 	altOrganizationID := testAltOrgID(t)
@@ -231,13 +243,11 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 						tfjsonpath.New("auto_cancel_builds"),
 						knownvalue.Bool(true),
 					),
-					/*
-						statecheck.ExpectKnownValue(
-							"circleci_project.build_fork_prs",
-							tfjsonpath.New("build_fork_prs"),
-							knownvalue.Bool(false),
-						),
-					*/
+					statecheck.ExpectKnownValue(
+						"circleci_project.test_project",
+						tfjsonpath.New("build_fork_prs"),
+						knownvalue.Bool(false),
+					),
 					statecheck.ExpectKnownValue(
 						"circleci_project.test_project",
 						tfjsonpath.New("pr_only_branch_overrides"),
@@ -263,8 +273,14 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 	})
 }
 
+// CIRCLECI_TEST_GITHUB_ORG_ID/_SLUG are documented as set only in the GitHub
+// OAuth context (see TestAccGithubProjectResource above), so this test needs
+// no separate testRequireVCSType call either. Unlike the CircleCI-VCS org
+// update test above, this one keeps the same organization across both steps
+// and only flips build_fork_prs from true to false: the suite has no second
+// GitHub OAuth organization fixture to move between, so an org move is not
+// what this test exercises.
 func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
-	t.Skip()
 	projectName := rand.Text()
 	orgId := testGithubOrgID(t)
 	orgSlug := testGithubOrgSlug(t)
