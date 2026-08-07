@@ -189,6 +189,67 @@ func TestProjectSlugValidation(t *testing.T) {
 	}
 }
 
+// TestProjectSlugRejectsDotSegments is the regression test for issue #7: a slug
+// whose segment is exactly "." or ".." survives url.PathEscape unchanged (it
+// doesn't touch dots) and url.Parse doesn't clean dot-segments out of a path
+// either, so either one would put a literal "./" or "../" into the outbound
+// request path and retarget it at a different route. This is defence in depth,
+// not a fix for a reachable bug: a slug comes from Terraform configuration or
+// from CircleCI's own API responses, never from a third party.
+//
+// It also checks the legitimate cases still parse, including a segment that
+// merely contains a dot (a repository named "my.repo"), which must remain
+// valid — rejecting that would break real configurations.
+func TestProjectSlugRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	srv, recorded := newProjectAPI(t, "gh/acme/repo", "GitHub")
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	tests := []struct {
+		name    string
+		slug    string
+		wantErr bool
+	}{
+		{name: "dot in first segment", slug: "./acme/repo", wantErr: true},
+		{name: "dot-dot in first segment", slug: "../acme/repo", wantErr: true},
+		{name: "dot in middle segment", slug: "gh/./repo", wantErr: true},
+		{name: "dot-dot in middle segment", slug: "gh/../repo", wantErr: true},
+		{name: "dot in last segment", slug: "gh/acme/.", wantErr: true},
+		{name: "dot-dot in last segment", slug: "gh/acme/..", wantErr: true},
+		{name: "ordinary slug", slug: "gh/acme/repo", wantErr: false},
+		{name: "segment merely containing a dot", slug: "gh/acme/my.repo", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := c.GetProject(context.Background(), tt.slug)
+			if tt.wantErr && err == nil {
+				t.Errorf("GetProject(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("GetProject(%q) returned error: %v, want none", tt.slug, err)
+			}
+
+			err = c.DeleteProject(context.Background(), tt.slug)
+			if tt.wantErr && err == nil {
+				t.Errorf("DeleteProject(%q) returned no error, want one", tt.slug)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("DeleteProject(%q) returned error: %v, want none", tt.slug, err)
+			}
+		})
+	}
+
+	// Sanity check the legitimate requests actually reached the server, so a
+	// mistake that also broke the happy path wouldn't be masked by an early
+	// error-only assertion.
+	calls := recorded()
+	if len(calls) != 4 {
+		t.Fatalf("made %d requests, want 4 (get+delete for each of the two legitimate slugs): %+v", len(calls), calls)
+	}
+}
+
 func TestDeleteProjectPath(t *testing.T) {
 	t.Parallel()
 
