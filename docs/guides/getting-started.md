@@ -49,13 +49,10 @@ Columns: **GH App** = GitHub App · **GH OAuth** = classic GitHub OAuth ·
 | 2 `circleci_organization` | yes | yes | yes | yes | yes | yes |
 | 3 `circleci_project` | yes | yes | yes | yes | yes | yes |
 | 4 `circleci_github_app_repository` | yes | n/a | n/a | n/a | **no** | **no** |
-| 5 `circleci_pipeline_definition` (create) | yes | **no** [^readonly] | **no** [^readonly] | **no** [^readonly] | yes | **no** |
-| 6 `circleci_trigger` | yes | yes [^oauth] | **no** | **no** | yes | **no** |
+| 5 `circleci_pipeline_definition` (create) | yes | [**no**](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#the-getting-started-guide-skips-the-pipeline-definition-step-where-there-is-nothing-to-create) | [**no**](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#the-getting-started-guide-skips-the-pipeline-definition-step-where-there-is-nothing-to-create) | [**no**](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#the-getting-started-guide-skips-the-pipeline-definition-step-where-there-is-nothing-to-create) | yes | **no** |
+| 6 `circleci_trigger` | yes | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#the-getting-started-guides-github-oauth-trigger-step-uses-a-narrower-contract) | **no** | **no** | yes | **no** |
 | 7 context and its environment variables | yes | yes | yes | yes | yes | yes |
 | 8 `circleci_context_restriction` (`project`) | yes | yes | yes | yes | yes | yes |
-
-[^readonly]: These integrations have no stored pipeline-definition object — CircleCI derives a synthetic one from the project's ID — so `circleci_pipeline_definition` can *read* them but never create or update them. Step 5 does not apply; the project builds from the `.circleci/config.yml` in the branch that was pushed, as it did before Terraform was involved.
-[^oauth]: Same endpoint, a narrower contract. `event_preset` is required and limited to `all-pushes` or `only-build-prs`, and `disabled` is unsupported.
 
 Reading that as a route through the guide:
 

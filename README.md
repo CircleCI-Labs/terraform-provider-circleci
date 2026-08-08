@@ -158,31 +158,31 @@ write genuinely differ, the row is split — see `circleci_pipeline_definition`.
 
 | Terraform type | GH App | GH OAuth | GitLab | GitLab SM | BB | GHES | Server |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| `circleci_context` | yes | yes | yes | yes | yes | yes | yes [^ctxowner] |
+| `circleci_context` | yes | yes | yes | yes | yes | yes | [yes](COMPATIBILITY.md#context-owners-on-circleci-server-are-identified-by-account-id-not-slug) |
 | `circleci_context_environment_variable` | yes | yes | yes | yes | yes | yes | yes |
 | `circleci_context_restriction` (`project`, `expression`) | yes | yes | yes | yes | yes | yes | yes |
-| `circleci_context_restriction` (`group`) | ? [^grouptype] | ? [^grouptype] | ? [^grouptype] | ? [^grouptype] | **no** [^bbrestrict] | ? [^grouptype] | ? [^grouptype] |
-| `circleci_project` | yes | yes | yes | yes | yes | yes | yes [^v11follow] |
-| `circleci_project_settings` / `circleci_project` settings | yes | yes | yes [^glslug] | yes [^glslug] | yes | yes [^glslug] | yes |
-| ├ `build_fork_prs`, `forks_receive_secret_env_vars` | **no** | yes | ? [^forkprs] | **no** | yes | **no** | yes |
+| `circleci_context_restriction` (`group`) | [?](COMPATIBILITY.md#circleci-has-two-unrelated-concepts-called-a-group) | [?](COMPATIBILITY.md#circleci-has-two-unrelated-concepts-called-a-group) | [?](COMPATIBILITY.md#circleci-has-two-unrelated-concepts-called-a-group) | [?](COMPATIBILITY.md#circleci-has-two-unrelated-concepts-called-a-group) | [**no**](COMPATIBILITY.md#bitbucket-cannot-restrict-a-context-by-group) | [?](COMPATIBILITY.md#circleci-has-two-unrelated-concepts-called-a-group) | [?](COMPATIBILITY.md#circleci-has-two-unrelated-concepts-called-a-group) |
+| `circleci_project` | yes | yes | yes | yes | yes | yes | [yes](COMPATIBILITY.md#classic-organizations-still-need-one-v11-api-call-to-follow-a-project) |
+| `circleci_project_settings` / `circleci_project` settings | yes | yes | [yes](COMPATIBILITY.md#gitlab-github-app-and-ghes-projects-use-a-uuid-slug-not-a-name) | [yes](COMPATIBILITY.md#gitlab-github-app-and-ghes-projects-use-a-uuid-slug-not-a-name) | yes | [yes](COMPATIBILITY.md#gitlab-github-app-and-ghes-projects-use-a-uuid-slug-not-a-name) | yes |
+| ├ `build_fork_prs`, `forks_receive_secret_env_vars` | **no** | yes | [?](COMPATIBILITY.md#circlecis-own-documentation-disagrees-with-itself-about-gitlab-and-fork-pull-requests) | **no** | yes | **no** | yes |
 | ├ `oss` | ? | yes | ? | ? | yes | ? | ? |
-| ├ `set_github_status` | yes | yes | yes [^vcsstatus] | yes [^vcsstatus] | yes [^vcsstatus] | yes | yes |
+| ├ `set_github_status` | yes | yes | [yes](COMPATIBILITY.md#set_github_status-controls-vcs-status-updates-everywhere-not-just-github-checks) | [yes](COMPATIBILITY.md#set_github_status-controls-vcs-status-updates-everywhere-not-just-github-checks) | [yes](COMPATIBILITY.md#set_github_status-controls-vcs-status-updates-everywhere-not-just-github-checks) | yes | yes |
 | `circleci_project_environment_variable` | yes | yes | yes | yes | yes | yes | yes |
-| `circleci_checkout_key` | **no** [^ckey] | yes | **no** [^ckey] | **no** [^ckey] | yes | **no** [^ckey] | yes |
-| `circleci_pipeline_definition` (read) | yes | yes | yes | yes | yes | yes | **no** [^nopdserver] |
-| `circleci_pipeline_definition` (create/update/delete) | yes | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | **no** [^synthpd] | yes | **no** [^nopdserver] |
-| `circleci_trigger` | yes | yes [^oauthtrig] | **no** | **no** | **no** [^bbtrig] | yes | **no** [^nopdserver] |
+| `circleci_checkout_key` | [**no**](COMPATIBILITY.md#checkout-keys-need-a-vcs-that-checks-out-over-ssh) | yes | [**no**](COMPATIBILITY.md#checkout-keys-need-a-vcs-that-checks-out-over-ssh) | [**no**](COMPATIBILITY.md#checkout-keys-need-a-vcs-that-checks-out-over-ssh) | yes | [**no**](COMPATIBILITY.md#checkout-keys-need-a-vcs-that-checks-out-over-ssh) | yes |
+| `circleci_pipeline_definition` (read) | yes | yes | yes | yes | yes | yes | [**no**](COMPATIBILITY.md#pipeline-definitions-and-triggers-are-v2-routes-server-still-does-not-forward) |
+| `circleci_pipeline_definition` (create/update/delete) | yes | [**no**](COMPATIBILITY.md#github-oauth-gitlab-and-bitbucket-cloud-have-no-stored-pipeline-definition) | [**no**](COMPATIBILITY.md#github-oauth-gitlab-and-bitbucket-cloud-have-no-stored-pipeline-definition) | [**no**](COMPATIBILITY.md#github-oauth-gitlab-and-bitbucket-cloud-have-no-stored-pipeline-definition) | [**no**](COMPATIBILITY.md#github-oauth-gitlab-and-bitbucket-cloud-have-no-stored-pipeline-definition) | yes | [**no**](COMPATIBILITY.md#pipeline-definitions-and-triggers-are-v2-routes-server-still-does-not-forward) |
+| `circleci_trigger` | yes | [yes](COMPATIBILITY.md#github-oauth-triggers-use-the-same-endpoint-under-a-narrower-contract) | **no** | **no** | [**no**](COMPATIBILITY.md#bitbucket-cloud-triggers-have-no-schedule-event-source) | yes | [**no**](COMPATIBILITY.md#pipeline-definitions-and-triggers-are-v2-routes-server-still-does-not-forward) |
 | `circleci_webhook` | yes | yes | yes | yes | yes | yes | yes |
-| `circleci_runner_resource_class`, `circleci_runner_token` | yes | yes | yes | yes | yes | yes | yes [^runnerhost] |
-| `circleci_group` | yes [^standalone] | **no** [^standalone] | yes | yes | **no** [^standalone] | yes [^standalone] | **no** [^standalone] |
-| `circleci_project_group` | yes [^standalone] | **no** | yes | yes | **no** | yes | **no** [^pgroute] |
-| `circleci_organization_settings` | yes | yes | yes | yes | yes | yes | **no** [^nov3] |
-| `circleci_orb_namespace`, `circleci_orb`, `circleci_orb_version` | yes | yes | yes | yes | yes | yes | **no** [^nov3] |
-| `circleci_config_policy_bundle`, `circleci_config_policy_settings` | yes | yes | yes | yes | yes | yes | yes [^policyserver] |
-| `circleci_oidc_custom_claims` | yes | yes | yes | yes | yes | yes | yes [^oidcserver] |
-| `circleci_url_orb_allow_list_entry` | yes | yes | yes [^glorbauth] | yes [^glorbauth] | yes | yes | ? [^weakroute] |
-| `circleci_otel_exporter` | yes | yes | yes | yes | yes | yes | ? [^weakroute] |
-| `circleci_github_app_installation`, `circleci_github_app_repository`, `circleci_github_app_repositories` (read-only) | yes | **no** [^ghaonly] | **no** [^ghaonly] | **no** [^ghaonly] | **no** [^ghaonly] | ? [^ghesapp] | **no** [^ghaonly] |
+| `circleci_runner_resource_class`, `circleci_runner_token` | yes | yes | yes | yes | yes | yes | [yes](COMPATIBILITY.md#self-hosted-runners-on-server-need-runner_host-pointed-at-the-installation) |
+| `circleci_group` | [yes](COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | [**no**](COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | yes | yes | [**no**](COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | [yes](COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | [**no**](COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) |
+| `circleci_project_group` | [yes](COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | **no** | yes | yes | **no** | yes | [**no**](COMPATIBILITY.md#project-group-grants-are-not-exposed-on-circleci-server) |
+| `circleci_organization_settings` | yes | yes | yes | yes | yes | yes | [**no**](COMPATIBILITY.md#circleci-server-does-not-route-the-v3-api-at-all) |
+| `circleci_orb_namespace`, `circleci_orb`, `circleci_orb_version` | yes | yes | yes | yes | yes | yes | [**no**](COMPATIBILITY.md#circleci-server-does-not-route-the-v3-api-at-all) |
+| `circleci_config_policy_bundle`, `circleci_config_policy_settings` | yes | yes | yes | yes | yes | yes | [yes](COMPATIBILITY.md#config-policies-need-the-scale-plan-on-cloud-or-circleci-server-42-or-later) |
+| `circleci_oidc_custom_claims` | yes | yes | yes | yes | yes | yes | [yes](COMPATIBILITY.md#oidc-custom-claims-need-circleci-server-44-or-later-and-are-unavailable-air-gapped) |
+| `circleci_url_orb_allow_list_entry` | yes | yes | [yes](COMPATIBILITY.md#the-url-orb-allow-list-cannot-authenticate-against-gitlab) | [yes](COMPATIBILITY.md#the-url-orb-allow-list-cannot-authenticate-against-gitlab) | yes | yes | [?](COMPATIBILITY.md#some-v2-routes-are-owned-by-a-backend-a-server-installation-may-not-forward) |
+| `circleci_otel_exporter` | yes | yes | yes | yes | yes | yes | [?](COMPATIBILITY.md#some-v2-routes-are-owned-by-a-backend-a-server-installation-may-not-forward) |
+| `circleci_github_app_installation`, `circleci_github_app_repository`, `circleci_github_app_repositories` (read-only) | yes | [**no**](COMPATIBILITY.md#github-app-discovery-has-nothing-to-report-without-an-actual-github-app-connection) | [**no**](COMPATIBILITY.md#github-app-discovery-has-nothing-to-report-without-an-actual-github-app-connection) | [**no**](COMPATIBILITY.md#github-app-discovery-has-nothing-to-report-without-an-actual-github-app-connection) | [**no**](COMPATIBILITY.md#github-app-discovery-has-nothing-to-report-without-an-actual-github-app-connection) | [?](COMPATIBILITY.md#whether-github-enterprise-server-reports-as-a-github-app-installation-is-unchecked) | [**no**](COMPATIBILITY.md#github-app-discovery-has-nothing-to-report-without-an-actual-github-app-connection) |
 
 ### Implemented, and the same on every VCS integration
 
@@ -195,19 +195,27 @@ Read-only entries are data sources; ephemeral entries never enter state at all.
 
 | Terraform type | Cloud | Server | Note |
 |---|:--:|:--:|---|
-| `circleci_organization` | yes | ? [^orgcreate] | Create is find-or-create for VCS-backed organizations |
-| `circleci_pipeline_run`, `circleci_pipeline_run_config`, `circleci_pipeline_run_values`, `circleci_pipeline_run_workflows` (read-only) | yes | yes [^v2api] | A *run*, not a definition. See the object model guide |
-| `circleci_workflow`, `circleci_workflow_jobs`, `circleci_job` (read-only) | yes | yes [^v2api] | |
-| `circleci_user`, `circleci_user_collaborations` (read-only) | yes | yes [^v2api] | Needs a personal token, not a project token |
-| `circleci_runner_task_counts`, `circleci_runners` (read-only) | yes | yes [^runnerhost] | |
-| `circleci_usage_export`, `circleci_ephemeral_runner_token` (ephemeral) | yes | yes [^ephemeralserver] | |
-| `circleci_insights_summary`, `circleci_insights_workflows`, `circleci_insights_flaky_tests` (read-only) | yes | depends [^insightsserver] | Approximate, recomputed daily, unusable for cost reporting |
-| `circleci_notification_channel_config`, `circleci_notification_preferences`, `circleci_notification_integration_status` | yes | **no** [^nov3] | Plus `circleci_notification_integrations` and `circleci_notification_links` (read-only) |
-| `circleci_ios_signing_certificate`, `circleci_ios_signing_config` | yes | **no** [^nov3] | Only usable by a macOS executor. Both take write-only credentials [^writeonly] |
-| `circleci_deploy_component`, `circleci_deploy_components`, `circleci_deploy_environment`, `circleci_deploy_environments`, `circleci_deploy_settings` (read-only) | yes | **no** [^reltracker] | |
-| `circleci_catalog_offerings` (read-only) | yes | **no** [^nov3] | The resource classes an organization may use |
-| `circleci_audit_log_config` | yes [^scaleplan] | **no** [^scaleplan] | Plus `circleci_audit_log_access` and `circleci_audit_log_configs` (read-only) |
-| `circleci_budget` | yes [^privateroute] | **no** [^privateroute] | An undocumented private route. Plus `circleci_budgets` (read-only) |
+| `circleci_organization` | yes | [?](COMPATIBILITY.md#creating-an-organization-on-circleci-server-is-untested) | Create is find-or-create for VCS-backed organizations |
+| `circleci_pipeline_run`, `circleci_pipeline_run_config`, `circleci_pipeline_run_values`, `circleci_pipeline_run_workflows` (read-only) | yes | [yes](COMPATIBILITY.md#the-v2-api-is-forwarded-on-circleci-server-by-default) | A *run*, not a definition. See the object model guide |
+| `circleci_workflow`, `circleci_workflow_jobs`, `circleci_job` (read-only) | yes | [yes](COMPATIBILITY.md#the-v2-api-is-forwarded-on-circleci-server-by-default) | |
+| `circleci_user`, `circleci_user_collaborations` (read-only) | yes | [yes](COMPATIBILITY.md#the-v2-api-is-forwarded-on-circleci-server-by-default) | Needs a personal token, not a project token |
+| `circleci_runner_task_counts`, `circleci_runners` (read-only) | yes | [yes](COMPATIBILITY.md#self-hosted-runners-on-server-need-runner_host-pointed-at-the-installation) | |
+| `circleci_usage_export`, `circleci_ephemeral_runner_token` (ephemeral) | yes | [yes](COMPATIBILITY.md#usage-export-and-ephemeral-runner-tokens-work-the-same-on-cloud-and-server) | |
+| `circleci_insights_summary`, `circleci_insights_workflows`, `circleci_insights_flaky_tests` (read-only) | yes | [depends](COMPATIBILITY.md#insights-on-server-depends-on-whether-that-installation-runs-the-insights-service) | Approximate, recomputed daily, unusable for cost reporting |
+| `circleci_notification_channel_config`, `circleci_notification_preferences`, `circleci_notification_integration_status` | yes | [**no**](COMPATIBILITY.md#circleci-server-does-not-route-the-v3-api-at-all) | Plus `circleci_notification_integrations` and `circleci_notification_links` (read-only) |
+| `circleci_ios_signing_certificate`, `circleci_ios_signing_config` | yes | [**no**](COMPATIBILITY.md#circleci-server-does-not-route-the-v3-api-at-all) | Only usable by a macOS executor. Both take [write-only credentials](COMPATIBILITY.md#six-resources-accept-a-secret-as-write-only-and-never-store-it) |
+| `circleci_deploy_component`, `circleci_deploy_components`, `circleci_deploy_environment`, `circleci_deploy_environments`, `circleci_deploy_settings` (read-only) | yes | [**no**](COMPATIBILITY.md#deploy-and-release-tracking-routes-are-absent-from-servers-gateway) | |
+| `circleci_catalog_offerings` (read-only) | yes | [**no**](COMPATIBILITY.md#circleci-server-does-not-route-the-v3-api-at-all) | The resource classes an organization may use |
+| `circleci_audit_log_config` | [yes](COMPATIBILITY.md#audit-log-streaming-is-gated-on-the-scale-plan-out-of-caution-not-confirmed-routing) | [**no**](COMPATIBILITY.md#audit-log-streaming-is-gated-on-the-scale-plan-out-of-caution-not-confirmed-routing) | Plus `circleci_audit_log_access` and `circleci_audit_log_configs` (read-only) |
+| `circleci_budget` | [yes](COMPATIBILITY.md#spend-budgets-are-served-on-an-undocumented-fixed-address) | [**no**](COMPATIBILITY.md#spend-budgets-are-served-on-an-undocumented-fixed-address) | An undocumented private route. Plus `circleci_budgets` (read-only) |
+
+A few caveats surprise people more than the rest: checkout keys are unavailable on
+GitHub App, GitHub Enterprise Server, GitLab.com and GitLab self-managed projects, because
+those integrations check out over HTTPS and never need one; and CircleCI Server does not
+route the `/api/v3` API at all, so anything built on it — organization settings, orbs,
+notifications, iOS signing and more — reports an explicit error there rather than working.
+[`COMPATIBILITY.md`](./COMPATIBILITY.md) has the reasoning behind every other cell above,
+organised by why the limitation exists rather than by which resource it affects.
 
 Two deprecated type names are still registered so existing configurations keep
 working: `circleci_pipeline` for both the resource and the data source now called
@@ -256,37 +264,6 @@ auth, a deliberate privilege boundary) · SSO/SAML configuration · audit log
 
 The account and VCS steps are browser consent flows by design, which is the structural
 reason a CircleCI organization cannot be stood up end to end from Terraform alone.
-
-[^ctxowner]: On CircleCI Server a context owner must be given as `owner.type: "account"` with an id; owner slugs are not supported, and context names must be unique across all organizations in the account.
-[^grouptype]: CircleCI has two unrelated concepts called "group". *VCS security groups* are documented as available for `github` type organizations only and require the GitHub OAuth integration. *CircleCI RBAC groups* require a `circleci` type organization. Those requirements are mutually exclusive, and the API does not document which one `restriction_type = "group"` expects. Verify against your organization.
-[^bbrestrict]: "Bitbucket repositories do not provide an API that allows CircleCI contexts to be restricted."
-[^v11follow]: Project creation issues a `POST /api/v1.1/project/.../follow`, because no v2 route follows a project and an unfollowed project never runs. `circleci-sdk-go` sent this to a hardcoded `https://circleci.com` regardless of the configured host, so it could not work against CircleCI Server; the provider now uses its own client and honours `host`. Only classic (`github`/`bitbucket`) organizations need it — a standalone `circleci/<uuid>` organization follows the project as part of creating it. This is the provider's one remaining v1.1 dependency, and v1.1 is the only API version with an active deprecation initiative.
-[^glslug]: GitLab, GitHub App and GHES projects use the `circleci/<orgUUID>/<projectUUID>` slug form. The settings endpoint's `provider` path segment has no `gitlab` value.
-[^forkprs]: CircleCI's own documentation contradicts itself here — the VCS overview says GitLab.com supports it, while the pipelines and OSS pages say it is unsupported for GitLab and GitHub App pipelines. Unresolved.
-[^vcsstatus]: Misleadingly named. This is really "VCS status updates" and controls Bitbucket and GitLab commit statuses too. It is *not* GitHub Checks, which is GitHub-only.
-[^ckey]: "Not available to projects that use GitLab or GitHub App." GitHub App and GHES check out over HTTPS and need no keys. Note a read/write asymmetry: only `POST` carries the restriction, so a `GET` on GitLab succeeds and returns the auto-provisioned key — a resource will read fine and fail only on create. `user-key` additionally requires a *user* API token.
-[^synthpd]: For GitHub OAuth, GitLab and Bitbucket Cloud there is no stored pipeline-definition entity: CircleCI generates a synthetic UUID from the project ID. They can be read but never created or updated.
-[^oauthtrig]: Same endpoint, different contract. `event_preset` is required and limited to `all-pushes` or `only-build-prs`; `disabled` is unsupported.
-[^bbtrig]: Bitbucket Cloud supports schedule triggers as a feature but has no value in the trigger API's `event_source.provider` enum, so they cannot be created through it.
-[^runnerhost]: Set `runner_host` to your Server installation: it serves the runner API itself rather than delegating to `runner.circleci.com`.
-[^standalone]: Requires a `circleci` type (standalone) organization. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud, and a CircleCI Server installation is always a `github` type organization.
-[^pgroute]: The project-group route sits under a different path prefix that a CircleCI Server installation does not expose.
-[^policyserver]: CircleCI Server 4.2 and later. Requires the Scale plan on Cloud.
-[^oidcserver]: CircleCI Server 4.4 and later. Not available in air-gapped installations.
-[^glorbauth]: Entries can be managed, but the `auth` value cannot be GitLab: "GitLab authentication is not currently supported. Only use public GitLab repositories with the `None` auth type."
-[^nov3]: A CircleCI Server installation does not route `/api/v3` at all. Set `deployment = "server"` and these resources report an explicit error rather than a confusing HTTP 404.
-[^nopdserver]: Unavailable on Server for a *different* reason to `[^nov3]`, worth distinguishing because it changes what would fix it. `pipeline-definitions` and `triggers` are **v2** routes, not v3 — but a Server installation's gateway does not forward them at all. v3 arriving on Server would therefore not make these work; the missing piece is the route, not the API version. Set `deployment = "server"` and these resources fail at plan time with an explicit error.
-[^weakroute]: Not served by the same part of the API as most v2 routes, and a Server installation forwards only a subset of those paths. The provider does not gate these, so it will attempt the request against a Server installation; whether it succeeds is unknown. Being v2 is not evidence on its own — see `[^nopdserver]`.
-[^ghaonly]: These read the organization's GitHub App installation, so an organization that has none has nothing to report: any `github`/`bitbucket` (OAuth) organization, and any standalone organization connected to GitLab rather than GitHub. The provider additionally requires a `circleci` type organization, which is why Server is a definite **no**.
-[^ghesapp]: A GitHub Enterprise Server connection is also a GitHub App, but whether this route reports it has not been checked.
-[^orgcreate]: *Reading* an organization is a plain v2 route and should work on Server. *Creating* one is a different question: a Server installation's organizations come from its VCS and are always `github` type, so a create there likely has nothing to do. Untested either way. Note that destroy deliberately mirrors create — an adopted organization is released from state, only a genuinely created one is deleted.
-[^v2api]: Served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. That is evidence from the route configuration rather than merely "it is v2" — but still reasoned, not measured.
-[^ephemeralserver]: Usage export is served on both Cloud and Server. Ephemeral runner tokens follow `runner_host`, which on Server is the installation itself.
-[^insightsserver]: The routes are v2, but Insights is a separate service a given Server installation may not run. The provider does not block `deployment = "server"`; without Insights the request fails as not-found.
-[^reltracker]: Deploy and release tracking is not available on CircleCI Server, and its routes are absent from a Server installation's gateway entirely. Set `deployment = "server"` and these data sources report an explicit error.
-[^scaleplan]: Requires the Scale plan, a CircleCI Cloud billing concept a Server installation has no equivalent of. This is the provider's one Cloud-only gate that is **not** about the v3 API: the routes are v2 and might well be routed on Server, but nobody has been able to check, so `deployment = "server"` is refused out of caution rather than from a confirmed absent route. If that is wrong for some installation, the fix is to drop the gate.
-[^writeonly]: Six resources accept their secret as a write-only argument that is never persisted to state: `circleci_context_environment_variable` and `circleci_project_environment_variable` (`value_wo`), `circleci_webhook` (`signing_secret_wo`), `circleci_otel_exporter` (`headers_wo`), `circleci_ios_signing_certificate` (`certificate_blob_wo`, `certificate_password_wo`) and `circleci_ios_signing_config` (`provisioning_profiles_wo`). See the "Managing secrets" guide.
-[^privateroute]: Served on a CircleCI origin that carries no published specification, at a fixed address independent of `host` and `deployment`. A Server installation's gateway never routes to it, so `deployment = "server"` reports an explicit error rather than a confusing failure.
 
 ## Acknowledgments
 This repository was created following the Terraform plugin framework defined by Hashicorp [here](https://developer.hashicorp.com/terraform/plugin/framework).

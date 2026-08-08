@@ -207,21 +207,21 @@ this one is a bug — please report it.
 |---|---|---|
 | Contexts, context restrictions, context environment variables | yes | yes |
 | Projects, project settings, project environment variables | yes | yes |
-| Organizations | yes | unverified[^orgserver] |
-| Checkout keys | yes[^ckeyvcs] | yes |
-| Groups, group membership, project role grants | yes[^standalone] | **no** |
-| GitHub App installation and repository discovery | yes[^standalone] | **no** |
+| Organizations | yes | [unverified](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#creating-an-organization-on-circleci-server-is-untested) |
+| Checkout keys | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#checkout-keys-need-a-vcs-that-checks-out-over-ssh) | yes |
+| Groups, group membership, project role grants | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | **no** |
+| GitHub App installation and repository discovery | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#groups-and-github-app-discovery-need-a-standalone-organization) | **no** |
 | Webhooks | yes | yes |
 | Plural list data sources (contexts, webhooks, env vars) | yes | yes |
 | Self-hosted runner resource classes and tokens | yes | yes (set `runner_host`) |
-| Usage export and ephemeral runner tokens | yes | yes[^ephemeral] |
+| Usage export and ephemeral runner tokens | yes | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#usage-export-and-ephemeral-runner-tokens-work-the-same-on-cloud-and-server) |
 | Pipeline runs, workflows and jobs (read-only) | yes | yes |
 | Users and collaborations (read-only) | yes | yes |
-| Insights (read-only) | yes | depends[^insights] |
-| URL orb allow list | yes | unverified[^weakroute] |
-| OpenTelemetry exporters | yes | unverified[^weakroute] |
-| Config policies | yes[^policyplan] | yes[^policyplan] |
-| OIDC custom claims | yes | yes[^oidcserver2] |
+| Insights (read-only) | yes | [depends](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#insights-on-server-depends-on-whether-that-installation-runs-the-insights-service) |
+| URL orb allow list | yes | [unverified](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#some-v2-routes-are-owned-by-a-backend-a-server-installation-may-not-forward) |
+| OpenTelemetry exporters | yes | [unverified](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#some-v2-routes-are-owned-by-a-backend-a-server-installation-may-not-forward) |
+| Config policies | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#config-policies-need-the-scale-plan-on-cloud-or-circleci-server-42-or-later) | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#config-policies-need-the-scale-plan-on-cloud-or-circleci-server-42-or-later) |
+| OIDC custom claims | yes | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#oidc-custom-claims-need-circleci-server-44-or-later-and-are-unavailable-air-gapped) |
 | Pipeline definitions and triggers | yes | **no** |
 | Organization settings | yes | **no** |
 | Orb namespaces, orbs, orb versions | yes | **no** |
@@ -229,8 +229,8 @@ this one is a bug — please report it.
 | iOS code signing certificates and configurations | yes | **no** |
 | Deploy and release tracking (read-only) | yes | **no** |
 | Execution catalog (read-only) | yes | **no** |
-| Audit log streaming | yes[^scaleplan] | **no**[^scaleplan] |
-| Spend budgets | yes[^privateroute] | **no**[^privateroute] |
+| Audit log streaming | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#audit-log-streaming-is-gated-on-the-scale-plan-out-of-caution-not-confirmed-routing) | [**no**](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#audit-log-streaming-is-gated-on-the-scale-plan-out-of-caution-not-confirmed-routing) |
+| Spend budgets | [yes](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#spend-budgets-are-served-on-an-undocumented-fixed-address) | [**no**](https://github.com/CircleCI-Labs/terraform-provider-circleci/blob/HEAD/COMPATIBILITY.md#spend-budgets-are-served-on-an-undocumented-fixed-address) |
 
 The three [provider functions](https://registry.terraform.io/providers/CircleCI-Labs/circleci/latest/docs)
 are pure string handling and make no API call, so `deployment` does not affect
@@ -294,22 +294,3 @@ This selects the API version used for each resource. CircleCI Server does not ro
 A trailing `/api/v2` is accepted and stripped, for compatibility with provider versions that documented the host that way.
 - `key` (String, Sensitive) CircleCI API token (a personal access token). May also be set with the `CIRCLE_TOKEN` environment variable.
 - `runner_host` (String) Host serving the self-hosted runner API. On CircleCI Cloud this API lives on a separate origin and defaults to `https://runner.circleci.com`. On CircleCI Server it is served by your installation, so set this to your Server hostname. May also be set with the `CIRCLE_RUNNER_HOST` environment variable.
-
-[^standalone]: Requires a `circleci` type (standalone) organization, so `github` and `bitbucket` organizations cannot use these even on CircleCI Cloud. The provider holds an organization UUID rather than a slug and cannot tell the type without an extra lookup, so it rules out `deployment = "server"` — always a `github` type organization — and leaves the Cloud half to the API. GitHub App discovery additionally needs an actual GitHub App installation, so a standalone organization connected to GitLab has nothing to report.
-
-[^ckeyvcs]: Not available to projects that use the GitHub App, GitHub Enterprise Server, GitLab.com or GitLab self-managed; those check out over HTTPS and need no keys. GitHub OAuth and Bitbucket Cloud projects can use them. Note a read/write asymmetry: only `POST` carries the restriction, so a `GET` on GitLab succeeds and returns the auto-provisioned key — a resource reads fine and fails only on create. See the compatibility table in the README.
-
-[^policyplan]: Requires the Scale plan on CircleCI Cloud, or CircleCI Server 4.2 and later.
-[^oidcserver2]: CircleCI Server 4.4 and later. Not available in air-gapped installations.
-
-[^weakroute]: Owned by a separate backend behind the API gateway, of which a Server installation forwards only a subset of paths. The provider does not gate these, so it will attempt the request; whether it succeeds is unknown. See the type's own page.
-
-[^orgserver]: *Reading* an organization is a v2 route served directly by CircleCI's API and should work. *Creating* one is a different question: a Server installation's organizations come from its VCS and are always `github` type, so a create there likely has nothing to do. Untested either way.
-
-[^ephemeral]: Usage export is a v2 route served on both. Ephemeral runner tokens follow `runner_host`, which on Server is the installation itself.
-
-[^insights]: The routes are v2, but Insights is a separate service a given Server installation may not run. The provider does not block `deployment = "server"`; without Insights the request fails as not-found.
-
-[^scaleplan]: Requires the Scale plan, which is a CircleCI Cloud billing concept a Server installation has no equivalent of. This is the provider's one Cloud-only gate that is *not* about the v3 API, and it is applied out of caution rather than from a confirmed absent route — see `circleci_audit_log_config`.
-
-[^privateroute]: Served on a CircleCI origin that carries no published specification, a fixed address independent of `host` and `deployment` and carrying no published specification. A CircleCI Server installation's gateway never routes to it, so `deployment = "server"` reports an explicit error rather than a confusing failure.
