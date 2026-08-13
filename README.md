@@ -30,7 +30,7 @@ terraform {
   required_providers {
     circleci = {
       source  = "CircleCI-Labs/circleci"
-      version = "~> 0.5"
+      version = "~> 0.6"
     }
   }
 }
@@ -50,7 +50,7 @@ terraform {
   required_providers {
     circleci = {
       source = "CircleCI-Labs/circleci"
-      version = "~> 0.5"
+      version = "~> 0.6"
     }
   }
 }
