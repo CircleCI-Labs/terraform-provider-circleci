@@ -218,7 +218,7 @@ workflows:
                 - "1.13.5"
                 - "1.14.9"
                 # renovate: terraform
-                - "1.15.8"
+                - "1.15.9"
 
   release:
     jobs:
