@@ -94,8 +94,8 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 	})
 }
 
-// CIRCLECI_TEST_GITHUB_ORG_ID/_SLUG are documented (README.md, TESTING.md) as
-// set only in the GitHub OAuth context, so testGithubOrgID/testGithubOrgSlug
+// CIRCLECI_TEST_GH_OAUTH_ORG_ID/_SLUG are documented (README.md, TESTING.md)
+// as static GitHub OAuth fixtures, so testGithubOrgID/testGithubOrgSlug
 // already gate this test to that one integration; it needs no separate
 // testRequireVCSType call, and build_fork_prs = true is confirmed there (see
 // TestAccCircleCiProjectResource above).
@@ -273,8 +273,8 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 	})
 }
 
-// CIRCLECI_TEST_GITHUB_ORG_ID/_SLUG are documented as set only in the GitHub
-// OAuth context (see TestAccGithubProjectResource above), so this test needs
+// CIRCLECI_TEST_GH_OAUTH_ORG_ID/_SLUG are documented as static GitHub OAuth
+// fixtures (see TestAccGithubProjectResource above), so this test needs
 // no separate testRequireVCSType call either. Unlike the CircleCI-VCS org
 // update test above, this one keeps the same organization across both steps
 // and only flips build_fork_prs from true to false: the suite has no second

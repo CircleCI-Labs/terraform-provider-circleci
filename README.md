@@ -313,9 +313,9 @@ The acceptance tests in `internal/provider` run against a real CircleCI
 installation. They only execute when `TF_ACC=1` is set, and every fixture they
 touch (organization, project, pipeline, context, trigger, webhook, runner
 namespace) has to already exist in the account the token belongs to. Those
-identifiers are read from environment variables — **any test whose variables are
-unset skips instead of failing**, so a clean checkout with no credentials still
-passes `go test ./...`.
+identifiers are read from environment variables — **any test whose variable is
+unset, or set to a placeholder (see below), skips instead of failing**, so a
+clean checkout with no credentials still passes `go test ./...`.
 
 Authentication:
 
@@ -323,38 +323,84 @@ Authentication:
 | --- | --- |
 | `CIRCLE_TOKEN` | CircleCI personal access token. Tests skip without it. |
 
-Fixture identifiers:
+### Fixture identifiers
+
+`CIRCLECI_TEST_VCS_TYPE` picks which integration is active for this run: one
+of `github_app`, `github_oauth`, `gitlab`, `gitlab_selfmanaged`, `bitbucket`,
+`github_server`. Every other fixture variable is named
+`CIRCLECI_TEST_<KEY>_<SUFFIX>`, where `KEY` comes from the table below and
+`SUFFIX` is the identical set for every key. That uniformity is what lets most
+helpers (`testOrgID`, `testProjectID`, ...) resolve the active integration's
+fixtures dynamically, with no VCS branching of their own — the same call
+reads a GitHub App fixture in one run and a Bitbucket fixture in another.
+
+| `CIRCLECI_TEST_VCS_TYPE` value | Key |
+| --- | --- |
+| `github_app` | `GH_APP` |
+| `github_oauth` | `GH_OAUTH` |
+| `github_server` | `GH_SERVER` |
+| `gitlab` | `GL_CLOUD` |
+| `gitlab_selfmanaged` | `GL_SM` |
+| `bitbucket` | `BB_CLOUD` |
+
+Suffixes, and what each identifies:
+
+| Suffix | Description |
+| --- | --- |
+| `TOKEN` | Reserved for a future per-integration credential. Not read by any helper today — `CIRCLE_TOKEN` above is still the only token the tests use. |
+| `ORG_ID` | UUID of the primary test organization. |
+| `ORG_SLUG` | Slug of that organization, e.g. `circleci/<id>` or `gh/<org>`. |
+| `ORG_NAME` | Display name of that organization. |
+| `ALT_ORG_ID` | UUID of a second organization (project-move tests). |
+| `ALT_ORG_SLUG` | Slug of that second organization. |
+| `PROJECT_ID` | UUID of a writable project; pipelines, triggers, webhooks and context restrictions are created against it. |
+| `PROJECT_SLUG` | Slug of a writable project, used for project environment variables. |
+| `STATIC_PROJECT_ID` | UUID of a pre-existing project that is only read. |
+| `STATIC_PROJECT_SLUG` | Slug of that project. |
+| `STATIC_PROJECT_NAME` | Name of that project. |
+| `PIPELINE_ID` | UUID of a pre-existing pipeline in the `PROJECT_ID` project. |
+| `TRIGGER_ID` | UUID of a pre-existing trigger. |
+| `TRIGGER_PROJECT_ID` | UUID of the project owning that trigger. |
+| `SCHEDULED_TRIGGER_ID` | UUID of a pre-existing scheduled trigger in the `STATIC_PROJECT_ID` project. |
+| `CONTEXT_ID` | UUID of a pre-existing context in the primary organization. |
+| `CONTEXT_NAME` | Name of that context. |
+| `CONTEXT_ENV_VAR_NAME` | Name of an environment variable that already exists on that context. |
+| `WEBHOOK_ID` | UUID of a pre-existing webhook scoped to the `PROJECT_ID` project. |
+| `WEBHOOK_NAME` | Name of that webhook. |
+| `WEBHOOK_URL` | Receiver URL of that webhook. |
+| `RUNNER_NAMESPACE` | Runner namespace of the primary organization; resource classes are named `<namespace>/<class>`. |
+| `REPO_NAME` | Full name (`owner/repo`) of a repository reachable through the integration. |
+| `REPO_EXTERNAL_ID` | External (VCS-side) ID of that repository. |
+
+For example, with `CIRCLECI_TEST_VCS_TYPE=github_app` the primary
+organization's UUID is read from `CIRCLECI_TEST_GH_APP_ORG_ID`; switch to
+`bitbucket` and the same helper reads `CIRCLECI_TEST_BB_CLOUD_ORG_ID` instead —
+no code change needed.
+
+A few variables are **static** rather than tied to the active integration,
+because the test that reads them specifically needs that one integration no
+matter what else is configured:
 
 | Variable | Description |
 | --- | --- |
-| `CIRCLECI_TEST_ORG_ID` | UUID of the primary CircleCI-VCS test organization. |
-| `CIRCLECI_TEST_ORG_SLUG` | Slug of that organization, e.g. `circleci/<id>`. |
-| `CIRCLECI_TEST_ORG_NAME` | Display name of that organization. |
-| `CIRCLECI_TEST_ALT_ORG_ID` | UUID of a second CircleCI-VCS organization (project-move tests). |
-| `CIRCLECI_TEST_ALT_ORG_SLUG` | Slug of that second organization. |
-| `CIRCLECI_TEST_GITHUB_ORG_ID` | UUID of a GitHub-backed organization. |
-| `CIRCLECI_TEST_GITHUB_ORG_SLUG` | Slug of that organization, e.g. `gh/<org>`. |
-| `CIRCLECI_TEST_PROJECT_ID` | UUID of a writable project; pipelines, triggers, webhooks and context restrictions are created against it. |
-| `CIRCLECI_TEST_PROJECT_SLUG` | Slug of a writable project used for project environment variables. |
-| `CIRCLECI_TEST_STATIC_PROJECT_ID` | UUID of a pre-existing project that is only read. |
-| `CIRCLECI_TEST_STATIC_PROJECT_SLUG` | Slug of that project. |
-| `CIRCLECI_TEST_STATIC_PROJECT_NAME` | Name of that project. |
-| `CIRCLECI_TEST_PIPELINE_ID` | UUID of a pre-existing pipeline in `CIRCLECI_TEST_PROJECT_ID`. |
-| `CIRCLECI_TEST_GITHUB_APP_REPO_EXTERNAL_ID` | External ID of a repository reachable via the GitHub App integration. |
-| `CIRCLECI_TEST_GITHUB_APP_REPO_NAME` | Full name (`owner/repo`) of that repository. |
-| `CIRCLECI_TEST_GITHUB_SERVER_PROJECT_ID` | UUID of a GitHub Server backed project. |
-| `CIRCLECI_TEST_GITHUB_SERVER_PIPELINE_ID` | UUID of a pipeline in that project. |
-| `CIRCLECI_TEST_GITHUB_SERVER_REPO_EXTERNAL_ID` | External ID of the GitHub Server repository. |
-| `CIRCLECI_TEST_CONTEXT_ID` | UUID of a pre-existing context in the primary organization. |
-| `CIRCLECI_TEST_CONTEXT_NAME` | Name of that context. |
-| `CIRCLECI_TEST_CONTEXT_ENV_VAR_NAME` | Name of an environment variable that already exists on that context. |
-| `CIRCLECI_TEST_TRIGGER_ID` | UUID of a pre-existing `github_app` trigger. |
-| `CIRCLECI_TEST_TRIGGER_PROJECT_ID` | UUID of the project owning that trigger. |
-| `CIRCLECI_TEST_SCHEDULED_TRIGGER_ID` | UUID of a pre-existing scheduled trigger in `CIRCLECI_TEST_STATIC_PROJECT_ID`. |
-| `CIRCLECI_TEST_WEBHOOK_ID` | UUID of a pre-existing webhook scoped to `CIRCLECI_TEST_PROJECT_ID`. |
-| `CIRCLECI_TEST_WEBHOOK_NAME` | Name of that webhook. |
-| `CIRCLECI_TEST_WEBHOOK_URL` | Receiver URL of that webhook. |
-| `CIRCLECI_TEST_RUNNER_NAMESPACE` | Runner namespace of the primary organization; resource classes are named `<namespace>/<class>`. |
+| `CIRCLECI_TEST_GH_OAUTH_ORG_ID` | UUID of a GitHub OAuth-backed organization. |
+| `CIRCLECI_TEST_GH_OAUTH_ORG_SLUG` | Slug of that organization, e.g. `gh/<org>`. |
+| `CIRCLECI_TEST_GH_APP_REPO_EXTERNAL_ID` | External ID of a repository reachable via the GitHub App integration. |
+| `CIRCLECI_TEST_GH_APP_REPO_NAME` | Full name (`owner/repo`) of that repository. |
+| `CIRCLECI_TEST_GH_SERVER_PROJECT_ID` | UUID of a GitHub Server backed project. |
+| `CIRCLECI_TEST_GH_SERVER_PIPELINE_ID` | UUID of a pipeline in that project. |
+| `CIRCLECI_TEST_GH_SERVER_REPO_EXTERNAL_ID` | External ID of the GitHub Server repository. |
+
+### Placeholder values skip cleanly
+
+A variable set to `REPLACE_ME`, `TODO`, or `CHANGEME` (compared
+case-insensitively, after trimming whitespace) is treated exactly like an
+unset variable: the test skips, and the skip message says the value was a
+placeholder rather than simply missing. This lets a maintainer seed every
+`CIRCLECI_TEST_*` name into a shared CI context with a dummy value — so the
+full list is visible and fillable in one place — without those dummy values
+making tests run and fail against a nonsense organization.
 
 CI must define these for the acceptance tests to contribute coverage; without
-them the suite reports skips rather than failures.
+them (or with only placeholders in place) the suite reports skips rather than
+failures.
