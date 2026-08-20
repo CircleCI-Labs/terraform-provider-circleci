@@ -68,56 +68,72 @@ installation, and is the one that needs the most lead time.
 
 ## Credentials layout in CircleCI
 
-One context per integration type, so the same variable names resolve differently
-per context and the test suite needs no per-VCS branching:
+Every per-integration fixture variable is named `CIRCLECI_TEST_<KEY>_<SUFFIX>`
+— see the key table and the suffix list in README.md's "Fixture identifiers"
+section, which is the canonical reference for the naming scheme. Because the
+integration is baked into the variable *name* rather than into which context
+supplies it, all six integrations' fixtures can live side by side in a single
+context:
 
 ```
-tfprovider-acc-github-app
-tfprovider-acc-github-oauth
-tfprovider-acc-gitlab-cloud
-tfprovider-acc-gitlab-selfmanaged
-tfprovider-acc-bitbucket-cloud
-tfprovider-acc-github-server
+tfprovider-acc
+```
+
+Restrict it to this project only (`circleci_context_restriction`, or the web
+UI) so an unrelated project cannot read the tokens. CircleCI Server is a
+separate axis (deployment, not VCS integration — see "Accounts required"
+above) and keeps its own context, since its variables (`CIRCLE_HOST`,
+`CIRCLE_DEPLOYMENT`, `CIRCLE_RUNNER_HOST`) are not part of this per-integration
+scheme at all:
+
+```
 tfprovider-acc-circleci-server
 ```
 
-Restrict each context to this project only (`circleci_context_restriction`, or
-the web UI) so an unrelated project cannot read the tokens.
+### Seeding `tfprovider-acc`
 
-### Variables in every context
+Populate every `CIRCLECI_TEST_<KEY>_<SUFFIX>` name up front, even for
+integrations without a provisioned account yet — set those to a placeholder
+(`REPLACE_ME`, `TODO`, or `CHANGEME`; see README.md's "Placeholder values skip
+cleanly"). A placeholder is treated exactly like an unset variable, so the
+full variable list is visible in the context UI and fillable incrementally,
+without ever making a test run against a nonsense organization. `CIRCLECI_TEST_VCS_TYPE`
+then picks, per CI job, which one of the (possibly still-placeholder) integrations that job's
+tests actually exercise.
+
+### Variables in the shared context
 
 | Variable | Notes |
 |---|---|
 | `CIRCLE_TOKEN` | Org-admin personal API token |
-| `CIRCLECI_TEST_VCS_TYPE` | One of `github_app`, `github_oauth`, `gitlab`, `gitlab_selfmanaged`, `bitbucket`, `github_server`. **Tests use this to skip combinations the integration does not support** — see below |
-| `CIRCLECI_TEST_ORG_ID` | Organization UUID |
-| `CIRCLECI_TEST_ORG_SLUG` | e.g. `circleci/<uuid>` or `gh/<org>` |
-| `CIRCLECI_TEST_ORG_NAME` | Display name |
-| `CIRCLECI_TEST_ALT_ORG_ID` / `_SLUG` | A second org, for the org-move test |
-| `CIRCLECI_TEST_PROJECT_ID` / `_SLUG` | The writable throwaway project |
-| `CIRCLECI_TEST_STATIC_PROJECT_ID` / `_SLUG` / `_NAME` | The read-only project |
-| `CIRCLECI_TEST_PIPELINE_ID` | A pipeline definition on the writable project |
-| `CIRCLECI_TEST_TRIGGER_ID` / `_PROJECT_ID` | An existing trigger |
-| `CIRCLECI_TEST_SCHEDULED_TRIGGER_ID` | A `schedule` event-source trigger |
-| `CIRCLECI_TEST_CONTEXT_ID` / `_NAME` / `_ENV_VAR_NAME` | A pre-existing context to read |
-| `CIRCLECI_TEST_WEBHOOK_ID` / `_NAME` / `_URL` | A pre-existing webhook |
-| `CIRCLECI_TEST_RUNNER_NAMESPACE` | Namespace for runner resource classes |
+| `CIRCLECI_TEST_VCS_TYPE` | One of `github_app`, `github_oauth`, `gitlab`, `gitlab_selfmanaged`, `bitbucket`, `github_server`. **Tests use this to select which integration's variables to read, and to skip combinations the integration does not support** — see below |
+| `CIRCLECI_TEST_<KEY>_ORG_ID` / `_ORG_SLUG` / `_ORG_NAME` | The primary organization for that integration |
+| `CIRCLECI_TEST_<KEY>_ALT_ORG_ID` / `_ALT_ORG_SLUG` | A second org, for the org-move test |
+| `CIRCLECI_TEST_<KEY>_PROJECT_ID` / `_PROJECT_SLUG` | The writable throwaway project |
+| `CIRCLECI_TEST_<KEY>_STATIC_PROJECT_ID` / `_STATIC_PROJECT_SLUG` / `_STATIC_PROJECT_NAME` | The read-only project |
+| `CIRCLECI_TEST_<KEY>_PIPELINE_ID` | A pipeline definition on the writable project |
+| `CIRCLECI_TEST_<KEY>_TRIGGER_ID` / `_TRIGGER_PROJECT_ID` | An existing trigger |
+| `CIRCLECI_TEST_<KEY>_SCHEDULED_TRIGGER_ID` | A `schedule` event-source trigger |
+| `CIRCLECI_TEST_<KEY>_CONTEXT_ID` / `_CONTEXT_NAME` / `_CONTEXT_ENV_VAR_NAME` | A pre-existing context to read |
+| `CIRCLECI_TEST_<KEY>_WEBHOOK_ID` / `_WEBHOOK_NAME` / `_WEBHOOK_URL` | A pre-existing webhook |
+| `CIRCLECI_TEST_<KEY>_RUNNER_NAMESPACE` | Namespace for runner resource classes |
 
-### Only in the GitHub App context
+`<KEY>` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or
+`BB_CLOUD` — fill in the row for every integration you have an account for.
+
+### Static, single-integration variables
+
+These are not keyed by the active integration — the test that reads one
+specifically needs that integration, regardless of `CIRCLECI_TEST_VCS_TYPE`:
 
 | Variable | Notes |
 |---|---|
-| `CIRCLECI_TEST_GITHUB_APP_REPO_EXTERNAL_ID` | Numeric GitHub repo id |
-| `CIRCLECI_TEST_GITHUB_APP_REPO_NAME` | `owner/repo` |
-
-### Only in the GitHub OAuth context
-
-`CIRCLECI_TEST_GITHUB_ORG_ID`, `CIRCLECI_TEST_GITHUB_ORG_SLUG`.
-
-### Only in the GitHub Enterprise Server context
-
-`CIRCLECI_TEST_GITHUB_SERVER_PROJECT_ID`, `CIRCLECI_TEST_GITHUB_SERVER_PIPELINE_ID`,
-`CIRCLECI_TEST_GITHUB_SERVER_REPO_EXTERNAL_ID`.
+| `CIRCLECI_TEST_GH_OAUTH_ORG_ID` / `_ORG_SLUG` | A GitHub OAuth org, for tests that assert on GitHub-OAuth-only behaviour |
+| `CIRCLECI_TEST_GH_APP_REPO_EXTERNAL_ID` | Numeric GitHub repo id, GitHub App integration |
+| `CIRCLECI_TEST_GH_APP_REPO_NAME` | `owner/repo`, GitHub App integration |
+| `CIRCLECI_TEST_GH_SERVER_PROJECT_ID` | UUID of a GitHub Server backed project |
+| `CIRCLECI_TEST_GH_SERVER_PIPELINE_ID` | UUID of a pipeline in that project |
+| `CIRCLECI_TEST_GH_SERVER_REPO_EXTERNAL_ID` | External ID of the GitHub Server repository |
 
 ### Only in the CircleCI Server context
 
@@ -132,11 +148,12 @@ the web UI) so an unrelated project cannot read the tokens.
 ```sh
 export CIRCLE_TOKEN=...
 export CIRCLECI_TEST_VCS_TYPE=github_app
-export CIRCLECI_TEST_ORG_ID=...   # and the rest
+export CIRCLECI_TEST_GH_APP_ORG_ID=...   # and the rest of CIRCLECI_TEST_GH_APP_*
 TF_ACC=1 task test
 ```
 
-Any variable left unset skips the tests that need it, naming it in the skip
+Any variable left unset, or left at a placeholder value, skips the tests that
+need it, naming both which variable and which of the two it was in the skip
 message. There is no way to make a test silently pass without its fixture.
 
 ## What a run covers, and how to tell
@@ -163,10 +180,10 @@ read like regressions. Currently gated this way:
 | `TestAccScheduledTriggerDataSource` | `github_app`, `github_oauth` or `github_server` — a scheduled trigger is a `circleci_trigger` |
 
 Every other acceptance test either behaves the same everywhere, or already
-depends on a fixture variable TESTING.md documents as set in one context only
-(`CIRCLECI_TEST_GITHUB_APP_REPO_EXTERNAL_ID`, `CIRCLECI_TEST_GITHUB_SERVER_*`,
-...) — those skip on an unrelated integration for free, with no VCS check
-needed, because the variable itself is simply unset there.
+depends on a static, single-integration fixture variable documented above
+(`CIRCLECI_TEST_GH_APP_REPO_EXTERNAL_ID`, `CIRCLECI_TEST_GH_SERVER_*`, ...) —
+those skip on an unrelated integration for free, with no VCS check needed,
+because the variable itself is simply unset there.
 
 At the end of a run, `TestMain` prints which of the VCS-gated tests above ran
 against the configured integration and which skipped because the fixture was

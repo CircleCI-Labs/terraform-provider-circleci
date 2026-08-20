@@ -51,8 +51,8 @@ var vcsCoverage = struct {
 // test whose resource is not available — or not available with the same
 // contract — on every VCS integration. Tests that only reach fixtures already
 // scoped to one integration (for example testGithubAppRepoExternalID) do not
-// need this: CIRCLECI_TEST_GITHUB_APP_REPO_EXTERNAL_ID is documented as set
-// in the GitHub App context only, so those already skip cleanly elsewhere.
+// need this: CIRCLECI_TEST_GH_APP_REPO_EXTERNAL_ID is documented as set only
+// for the GitHub App integration, so those already skip cleanly elsewhere.
 func testRequireVCSType(t *testing.T, supported ...string) {
 	t.Helper()
 

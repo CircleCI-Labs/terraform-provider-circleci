@@ -89,10 +89,12 @@ func TestAccTriggerDataSource(t *testing.T) {
 
 // A scheduled trigger is a circleci_trigger, which does not exist at all on
 // GitLab, GitLab self-managed or Bitbucket Cloud (README.md's compatibility
-// matrix). This test's fixtures (CIRCLECI_TEST_SCHEDULED_TRIGGER_ID,
-// CIRCLECI_TEST_STATIC_PROJECT_ID) are documented as set in every context, so
-// without this gate the test would read against the real API on those
-// integrations rather than skip.
+// matrix). This test's fixtures (testScheduledTriggerID, testStaticProjectID)
+// resolve dynamically from whichever integration is active
+// (CIRCLECI_TEST_<key>_SCHEDULED_TRIGGER_ID, CIRCLECI_TEST_<key>_STATIC_PROJECT_ID)
+// and are documented as set for every integration, so without this gate the
+// test would read against the real API on those integrations rather than
+// skip.
 func TestAccScheduledTriggerDataSource(t *testing.T) {
 	testRequireVCSType(t, "github_app", "github_oauth", "github_server")
 

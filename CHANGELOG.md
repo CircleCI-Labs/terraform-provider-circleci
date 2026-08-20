@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+This entry affects contributors running the acceptance test suite against a real CircleCI
+installation, not provider users — nothing here changes provider behaviour.
+
+### NOTES
+
+* **Acceptance-test environment variables are now named per integration**, and a placeholder
+  value skips cleanly instead of failing. Every fixture variable is `CIRCLECI_TEST_<KEY>_<SUFFIX>`,
+  where `KEY` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or `BB_CLOUD` and the
+  suffix set (`ORG_ID`, `PROJECT_ID`, `WEBHOOK_URL`, ...) is identical across every key. Most
+  helpers (`testOrgID`, `testProjectID`, ...) resolve the active integration's variable
+  dynamically from `CIRCLECI_TEST_VCS_TYPE`; a few that are deliberately about one named
+  integration (`testGithubOrgID`, `testGithubAppRepoName`, ...) resolve statically regardless of
+  which integration is otherwise active. `REPLACE_ME`, `TODO` and `CHANGEME` (compared
+  case-insensitively, after trimming whitespace) are now treated exactly like an unset variable,
+  so a shared CI context can be seeded with every variable name up front — real values filled in
+  as accounts become available — without a stray placeholder turning into a live-API failure
+  that reads like a regression. See README.md's "Fixture identifiers" and TESTING.md's
+  "Credentials layout in CircleCI" for the full naming scheme.
+
 ## 0.6.0 (2026-08-13)
 
 ### SECURITY
