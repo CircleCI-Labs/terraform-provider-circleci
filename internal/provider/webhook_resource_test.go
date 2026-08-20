@@ -73,10 +73,16 @@ func TestAccWebhookResource(t *testing.T) {
 			},
 			// ImportState testing
 			{
-				ResourceName:            "circleci_webhook.test_webhook",
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"signing_secret", "verify_tls"},
+				ResourceName:      "circleci_webhook.test_webhook",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// signing_secret only. verify_tls used to be ignored here too, from
+				// the days when it did not survive the round trip: the request sent
+				// a key the API ignores, the API stored its default of false, and an
+				// import of a webhook configured with `verify_tls = true` read back
+				// false. Now that the request carries the hyphenated `verify-tls`
+				// the API reads, the round trip holds and is worth asserting.
+				ImportStateVerifyIgnore: []string{"signing_secret"},
 				ImportStateIdFunc: func(s *terraform.State) (string, error) {
 					webhookId, found := s.RootModule().Resources["circleci_webhook.test_webhook"].Primary.Attributes["id"]
 					if !found {

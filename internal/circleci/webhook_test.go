@@ -185,15 +185,65 @@ const storedWebhook = `{
 	"updated_at": "2024-07-01T00:00:00.000Z"
 }`
 
-// TestCreateWebhookSendsSnakeCaseSecretAndVerifyTLS is the client-level regression
-// test for the shipped security bug.
+// TestWebhookInputMarshalsHyphenatedRequestKeys is the wire-format test, and it
+// needs no server at all: it serialises the request body and looks at the keys.
 //
-// circleci-sdk-go tagged these two fields `json:"signing-secret"` and
-// `json:"verify-tls"`. The API reads snake_case and ignores keys it does not
-// recognize, so every webhook this provider created had NO signing secret, whatever
-// was configured. Asserting the hyphenated keys are absent matters as much as
-// asserting the correct ones are present.
-func TestCreateWebhookSendsSnakeCaseSecretAndVerifyTLS(t *testing.T) {
+// The webhook routes read `verify-tls` and `signing-secret` on the way in and
+// answer in snake_case on the way out. The request side ignores unrecognized
+// keys, so `verify_tls`/`signing_secret` in a request body is a 2xx with both
+// values silently discarded — no signing secret stored and TLS verification off.
+// See circleci.WebhookInput for the live-API evidence.
+//
+// Asserting the snake_case keys are ABSENT matters as much as asserting the
+// hyphenated ones are present: an input type carrying both spellings would pass
+// a presence-only check while still telling the reader the wrong thing.
+func TestWebhookInputMarshalsHyphenatedRequestKeys(t *testing.T) {
+	t.Parallel()
+
+	body, err := json.Marshal(circleci.WebhookInput{
+		Name:          "hook-1",
+		URL:           "https://example.com/hook",
+		Events:        []string{"workflow-completed"},
+		VerifyTLS:     true,
+		SigningSecret: "s3cr3t",
+		Scope:         circleci.WebhookScope{ID: testWebhookScopeID, Type: circleci.WebhookScopeTypeProject},
+	})
+	if err != nil {
+		t.Fatalf("marshalling WebhookInput: %v", err)
+	}
+
+	var keys map[string]any
+	if err := json.Unmarshal(body, &keys); err != nil {
+		t.Fatalf("serialised WebhookInput is not a JSON object: %v (%s)", err, body)
+	}
+
+	if keys["signing-secret"] != "s3cr3t" {
+		t.Errorf(`serialised body["signing-secret"] = %v, want "s3cr3t" — the request key is `+
+			`hyphenated, and a webhook created without its secret cannot be authenticated by `+
+			`its receiver (%s)`, keys["signing-secret"], body)
+	}
+	if keys["verify-tls"] != true {
+		t.Errorf(`serialised body["verify-tls"] = %v, want true — the request key is hyphenated, `+
+			`and verify_tls is dropped, leaving TLS verification off (%s)`, keys["verify-tls"], body)
+	}
+
+	// The response spellings. Present here means dropped there.
+	for _, wrong := range []string{"signing_secret", "verify_tls"} {
+		if _, present := keys[wrong]; present {
+			t.Errorf("serialised body carries %q; that is the RESPONSE spelling and the request "+
+				"side ignores it, so the value would be silently discarded (%s)", wrong, body)
+		}
+	}
+
+	// The keys that are single words are spelled the same in both directions.
+	if keys["name"] != "hook-1" || keys["url"] != "https://example.com/hook" {
+		t.Errorf("serialised body name/url = %v/%v, want them unchanged", keys["name"], keys["url"])
+	}
+}
+
+// TestCreateWebhookSendsHyphenatedSecretAndVerifyTLS is the same assertion one
+// level up: through the client, over HTTP, on the route the provider really calls.
+func TestCreateWebhookSendsHyphenatedSecretAndVerifyTLS(t *testing.T) {
 	t.Parallel()
 
 	client, calls := newWebhookServer(t, http.StatusOK, storedWebhook)
@@ -221,17 +271,17 @@ func TestCreateWebhookSendsSnakeCaseSecretAndVerifyTLS(t *testing.T) {
 	if call.method != http.MethodPost || call.path != "/api/v2/webhook" {
 		t.Errorf("request = %s %s, want POST /api/v2/webhook", call.method, call.path)
 	}
-	if call.body["signing_secret"] != "s3cr3t" {
-		t.Errorf("signing_secret = %v, want s3cr3t — a webhook created without its secret "+
-			"cannot be authenticated by its receiver", call.body["signing_secret"])
+	if call.body["signing-secret"] != "s3cr3t" {
+		t.Errorf("signing-secret = %v, want s3cr3t — a webhook created without its secret "+
+			"cannot be authenticated by its receiver", call.body["signing-secret"])
 	}
-	if call.body["verify_tls"] != true {
-		t.Errorf("verify_tls = %v, want true", call.body["verify_tls"])
+	if call.body["verify-tls"] != true {
+		t.Errorf("verify-tls = %v, want true", call.body["verify-tls"])
 	}
-	for _, wrong := range []string{"signing-secret", "verify-tls"} {
+	for _, wrong := range []string{"signing_secret", "verify_tls"} {
 		if _, present := call.body[wrong]; present {
-			t.Errorf("body carries %q, which the API does not read — the SDK's tags appear to "+
-				"have come back", wrong)
+			t.Errorf("body carries %q, which is the response spelling and is ignored on a "+
+				"request — the snake_case tags appear to have come back", wrong)
 		}
 	}
 
@@ -274,15 +324,23 @@ func TestUpdateWebhookOmitsScope(t *testing.T) {
 		t.Errorf("update body carries a scope (%v); it is not updatable and must be omitted",
 			call.body["scope"])
 	}
-	// A rotated secret must reach the wire, or the practitioner believes they have
-	// revoked the old one when they have not.
-	if call.body["signing_secret"] != "rotated" {
-		t.Errorf("signing_secret = %v, want rotated", call.body["signing_secret"])
+	// A rotated secret must reach the wire under the key the update route reads, or
+	// the practitioner believes they have revoked the old one when they have not.
+	// The PUT route is asymmetric in exactly the same way the POST route is: it
+	// reads signing-secret and verify-tls and answers in snake_case.
+	if call.body["signing-secret"] != "rotated" {
+		t.Errorf("signing-secret = %v, want rotated", call.body["signing-secret"])
 	}
 	// false must be sent, not omitted: omitempty on a bool would make "disable TLS
 	// verification" unexpressible.
-	if call.body["verify_tls"] != false {
-		t.Errorf("verify_tls = %v, want false to be sent explicitly", call.body["verify_tls"])
+	if call.body["verify-tls"] != false {
+		t.Errorf("verify-tls = %v, want false to be sent explicitly", call.body["verify-tls"])
+	}
+	for _, wrong := range []string{"signing_secret", "verify_tls"} {
+		if _, present := call.body[wrong]; present {
+			t.Errorf("update body carries %q, the response spelling, which the update route "+
+				"ignores — a rotation sent under it leaves the old secret live", wrong)
+		}
 	}
 }
 

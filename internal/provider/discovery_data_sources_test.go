@@ -249,23 +249,27 @@ func (m *mockDiscoveryAPI) serveUser(w http.ResponseWriter, userID string) {
 // items/next_page_token envelope, and not paginated. The second entry has a null
 // id, which is what an organization CircleCI does not know yet looks like.
 //
-// The VCS key is "vcs-type", hyphenated, because that is the key this route
-// really sends — it is the only one in the v2 surface that does. See
-// circleci.Collaboration.VCSType. Spelling it "vcs_type" here made the fake agree
-// with a wrong struct tag instead of with production, so the resulting empty
-// vcs_type attribute passed every assertion below.
+// The VCS key is "vcs_type", because that is what the route really sends —
+// verified against Cloud across 38 collaborations, github and circleci alike, with
+// no hyphenated key in the payload. The published OpenAPI document declares
+// "vcs-type" instead, this fake was written from the document, and the client's
+// struct tag was written from the document too, so the two agreed and the
+// resulting empty vcs_type attribute passed every assertion below. The tolerated
+// hyphenated spelling is covered at the client level by
+// TestCollaborationAcceptsBothVCSTypeSpellings; see
+// circleci.Collaboration.UnmarshalJSON.
 func (m *mockDiscoveryAPI) serveCollaborations(w http.ResponseWriter) {
 	_, _ = w.Write([]byte(`[
   {
     "id": "11111111-1111-1111-1111-111111111111",
-    "vcs-type": "circleci",
+    "vcs_type": "circleci",
     "name": "acme",
     "slug": "circleci/11111111-1111-1111-1111-111111111111",
     "avatar_url": "https://avatars.example.com/u/2"
   },
   {
     "id": null,
-    "vcs-type": "github",
+    "vcs_type": "github",
     "name": "not-onboarded",
     "slug": "gh/not-onboarded",
     "avatar_url": "https://avatars.example.com/u/3"

@@ -47,9 +47,18 @@ import (
 //
 // WHAT IS DIFFERENT HERE, AND WHY IT MATTERS MORE
 //
-// The webhook update route is a full-replace PUT: UpdateWebhook sends a complete
-// WebhookInput, so every field absent from the body is cleared server-side. That
-// makes one otherwise-tempting optimization actively dangerous.
+// UpdateWebhook always sends a complete WebhookInput: name, url, events,
+// verify-tls and signing-secret, every time, with nothing omitted. That makes one
+// otherwise-tempting optimization actively dangerous.
+//
+// A caveat on how the route itself behaves, since several comments in this
+// resource lean on it. Verified against the live API: the PUT select-keys the body,
+// so a field ABSENT from a request is left as stored rather than cleared — a PUT
+// carrying only `verify-tls` answers with `signing_secret` still `"****"`. An
+// *empty* `signing-secret` is treated the same way, as "leave it alone", so the API
+// offers no way to remove a secret, only to replace it. None of that is documented
+// as a guarantee, and the cost of it changing is a silently deleted credential, so
+// this file does not rely on it: the secret goes into every request body.
 //
 // The obvious-looking pattern — send the write-only secret only when
 // `signing_secret_wo_version` has changed — is the shipped bug
@@ -147,13 +156,15 @@ func webhookSigningSecretConfigValidator() resource.ConfigValidator {
 //
 // It is called unconditionally by both Create and Update, and its result always
 // goes into the request body. See the top of this file: gating the body on the
-// version is vault#2900, and this route is full-replace.
+// version is vault#2900.
 //
 // config, not plan. A write-only attribute is null in the plan by design — the
 // framework nullifies it there and in state — so req.Plan would hand back an
-// empty string, and an empty string in a full-replace PUT deletes the live
-// secret. Configuration is the only place the value exists, and Terraform
-// supplies it on every apply, whatever triggered the update.
+// empty string, and an empty string is not a secret: on a create it stores a
+// webhook with none at all, and on an update the route discards it, so the apply
+// would report a secret that was never set. Configuration is the only place the
+// value exists, and Terraform supplies it on every apply, whatever triggered the
+// update.
 //
 // version is used only to explain the failure: it is persisted, so its presence
 // identifies a webhook already being managed through `signing_secret_wo`.
@@ -180,9 +191,10 @@ func resolveWebhookSigningSecret(
 		// Erroring out is the whole point of this branch, and there is no
 		// read-modify-write alternative to fall back on: the API returns the secret
 		// only as a mask, so it cannot be read back and re-sent. Carrying on would
-		// PUT an empty signing_secret, and the route is full-replace — the live
-		// secret would be deleted, leaving a webhook whose deliveries can no longer
-		// be authenticated by their receiver.
+		// send an empty signing-secret, which on a create stores a webhook with no
+		// secret at all — deliveries no receiver can authenticate — and on an update
+		// is discarded by the route, so the apply would claim to have set a secret
+		// that nothing set.
 		detail := "Neither `signing_secret` nor `signing_secret_wo` has a value at apply time, " +
 			"so there is nothing to send to CircleCI."
 		if !version.IsNull() {

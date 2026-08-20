@@ -5,6 +5,7 @@ package circleci_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -176,21 +177,23 @@ func TestUserServiceListCollaborations(t *testing.T) {
 	// entry has a null id, which is the documented case for an organization that
 	// exists on the VCS but has never been used on CircleCI.
 	//
-	// The VCS key is written "vcs-type", hyphenated, because that is what this one
-	// route actually sends — see Collaboration.VCSType. A fixture spelled
-	// "vcs_type" agreed with the client's own struct tag rather than with
-	// production and could never have caught the field being empty.
+	// The VCS key is written "vcs_type", because that is what production sends —
+	// checked against Cloud over 38 collaborations, github and circleci alike, with
+	// no hyphenated key anywhere in the payload. The published OpenAPI document
+	// declares "vcs-type" instead; TestCollaborationAcceptsBothVCSTypeSpellings
+	// covers that spelling, which the client still accepts as a fallback. See
+	// Collaboration.UnmarshalJSON.
 	const body = `[
       {
         "id": "11111111-1111-1111-1111-111111111111",
-        "vcs-type": "circleci",
+        "vcs_type": "circleci",
         "name": "acme",
         "slug": "circleci/11111111-1111-1111-1111-111111111111",
         "avatar_url": "https://avatars.example.com/u/2"
       },
       {
         "id": null,
-        "vcs-type": "github",
+        "vcs_type": "github",
         "name": "unknown-to-circleci",
         "slug": "gh/unknown-to-circleci",
         "avatar_url": "https://avatars.example.com/u/3"
@@ -222,11 +225,11 @@ func TestUserServiceListCollaborations(t *testing.T) {
 	if first.ID == nil || *first.ID != "11111111-1111-1111-1111-111111111111" {
 		t.Errorf("first id = %v, want the UUID", first.ID)
 	}
-	// The key is vcs-type, hyphenated. This assertion is the whole point of the
-	// fixture above: with the tag spelled vcs_type the field decodes as "" and
-	// circleci_user_collaborations reports no VCS type for any organization.
+	// This assertion is the whole point of the fixture above: with the key decoded
+	// under the wrong spelling the field is "" and circleci_user_collaborations
+	// reports no VCS type for any organization.
 	if first.VCSType != "circleci" {
-		t.Errorf("first vcs type = %q, want %q (decoded from vcs-type)", first.VCSType, "circleci")
+		t.Errorf("first vcs type = %q, want %q (decoded from vcs_type)", first.VCSType, "circleci")
 	}
 	if first.Slug != "circleci/11111111-1111-1111-1111-111111111111" {
 		t.Errorf("first slug = %q, want the standalone slug", first.Slug)
@@ -241,26 +244,52 @@ func TestUserServiceListCollaborations(t *testing.T) {
 	}
 }
 
-// TestCollaborationVCSTypeTagIsHyphenated pins the one hyphenated key in the v2
-// surface, independently of any fixture.
+// TestCollaborationAcceptsBothVCSTypeSpellings covers the one key in the v2
+// surface whose published spelling and real spelling differ.
 //
-// GET /api/v2/me/collaborations sends "vcs-type"; GET /api/v2/organization/{id}
-// sends "vcs_type". The two are one letter apart and describe the same concept,
-// so the tags are easy to "tidy" into agreement — and because the API simply
-// ignores a key it does not recognize on the way in and the client silently
-// leaves a field zero on the way out, doing so is invisible to any test whose
-// fixture was written from the struct rather than from the service. Asserting on
-// the tags directly means the fixture and the struct cannot drift together.
-func TestCollaborationVCSTypeTagIsHyphenated(t *testing.T) {
+// The OpenAPI document for GET /api/v2/me/collaborations declares a required
+// "vcs-type"; Cloud sends "vcs_type", verified across 38 collaborations. This test
+// pins production as the primary and the document as a tolerated fallback, so
+// neither belief can leave the field empty. It also pins the surrounding fields,
+// because the fallback is implemented in an UnmarshalJSON and a field added to
+// Collaboration without a thought for it would otherwise stop decoding silently.
+//
+// Organization.VCSType is asserted alongside because the two are one letter apart
+// and describe the same concept, so the tags invite being "tidied" into agreement.
+func TestCollaborationAcceptsBothVCSTypeSpellings(t *testing.T) {
 	t.Parallel()
 
-	collaborationField, ok := reflect.TypeOf(circleci.Collaboration{}).FieldByName("VCSType")
-	if !ok {
-		t.Fatal("Collaboration has no VCSType field")
-	}
-	if got := collaborationField.Tag.Get("json"); got != "vcs-type" {
-		t.Errorf("Collaboration.VCSType json tag = %q, want %q: /me/collaborations sends the "+
-			"hyphenated key, so any other spelling leaves the field permanently empty", got, "vcs-type")
+	for name, body := range map[string]string{
+		"vcs_type, what production sends": `{"id":"11111111-1111-1111-1111-111111111111",
+			"vcs_type":"github","name":"acme","slug":"gh/acme",
+			"avatar_url":"https://avatars.example.com/u/2"}`,
+		"vcs-type, what the published document declares": `{"id":"11111111-1111-1111-1111-111111111111",
+			"vcs-type":"github","name":"acme","slug":"gh/acme",
+			"avatar_url":"https://avatars.example.com/u/2"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var collaboration circleci.Collaboration
+			if err := json.Unmarshal([]byte(body), &collaboration); err != nil {
+				t.Fatalf("decoding a collaboration: %v", err)
+			}
+
+			if collaboration.VCSType != "github" {
+				t.Errorf("vcs type = %q, want %q — the field is empty and "+
+					"circleci_user_collaborations reports no VCS type for any organization",
+					collaboration.VCSType, "github")
+			}
+			// Every other field must survive the custom decoder.
+			if collaboration.ID == nil || *collaboration.ID != "11111111-1111-1111-1111-111111111111" {
+				t.Errorf("id = %v, want the UUID", collaboration.ID)
+			}
+			if collaboration.Name != "acme" || collaboration.Slug != "gh/acme" ||
+				collaboration.AvatarURL != "https://avatars.example.com/u/2" {
+				t.Errorf("name/slug/avatar = %q/%q/%q, want them decoded from their own tags",
+					collaboration.Name, collaboration.Slug, collaboration.AvatarURL)
+			}
+		})
 	}
 
 	organizationField, ok := reflect.TypeOf(circleci.Organization{}).FieldByName("VCSType")
@@ -268,8 +297,8 @@ func TestCollaborationVCSTypeTagIsHyphenated(t *testing.T) {
 		t.Fatal("Organization has no VCSType field")
 	}
 	if got := organizationField.Tag.Get("json"); got != "vcs_type" {
-		t.Errorf("Organization.VCSType json tag = %q, want %q: the organization routes really do "+
-			"use snake_case, and only /me/collaborations does not", got, "vcs_type")
+		t.Errorf("Organization.VCSType json tag = %q, want %q: the organization routes use "+
+			"snake_case, as /me/collaborations turns out to as well", got, "vcs_type")
 	}
 }
 

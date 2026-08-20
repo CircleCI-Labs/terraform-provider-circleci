@@ -137,9 +137,12 @@ func TestWebhookWriteOnly_SameRequestAsSigningSecret(t *testing.T) {
 		})
 	}
 
-	if observed["signing_secret"]["signing_secret"] != secret {
-		t.Fatalf(`signing_secret path sent signing_secret = %v, want %q`,
-			observed["signing_secret"]["signing_secret"], secret)
+	// The wire key is "signing-secret", hyphenated: the request side of the webhook
+	// routes reads that spelling and ignores the snake_case one it answers with.
+	// See circleci.WebhookInput.
+	if observed["signing_secret"]["signing-secret"] != secret {
+		t.Fatalf(`signing_secret path sent signing-secret = %v, want %q`,
+			observed["signing_secret"]["signing-secret"], secret)
 	}
 	if fmt.Sprint(observed["signing_secret_wo"]) != fmt.Sprint(observed["signing_secret"]) {
 		t.Errorf("signing_secret_wo reached the API differently from signing_secret:\n  signing_secret_wo: %v\n  signing_secret:    %v",
@@ -172,10 +175,16 @@ func TestWebhookWriteOnly_SigningSecretIsNullInState(t *testing.T) {
 // TestWebhookWriteOnly_UnrelatedUpdateStillSendsTheSecret is the most important
 // test in this file.
 //
-// The webhook update route is a full-replace PUT: a body without
-// `signing_secret` clears the secret server-side. So an update triggered by an
-// unrelated field — here a rename, with `signing_secret_wo` and its version
-// untouched — must still carry the secret.
+// An update triggered by an unrelated field — here a rename, with
+// `signing_secret_wo` and its version untouched — must still carry the secret.
+//
+// CircleCI's update route happens to select-keys the body rather than
+// full-replace it, so omitting the secret leaves the stored one in place today
+// (verified against production: a PUT carrying only `verify-tls` answers with
+// signing_secret still "****"). That is a property of the server, not of this
+// provider, it is nowhere documented as a guarantee, and the failure mode if it
+// ever changes is a silently deleted secret with the apply reporting success. So
+// the provider sends the secret on every update and this test holds it to that.
 //
 // This is a shipped bug in another provider, not a hypothetical.
 // hashicorp/terraform-provider-vault#2900: the write-only value was sent only
@@ -230,15 +239,19 @@ func TestWebhookWriteOnly_UnrelatedUpdateStillSendsTheSecret(t *testing.T) {
 		t.Fatalf(`update body["name"] = %v, want "hook-renamed" — the rename is what was supposed to trigger this update`,
 			update.Body["name"])
 	}
-	if update.Body["signing_secret"] != secret {
-		t.Errorf(`update body["signing_secret"] = %v, want %q — the update route replaces every field, `+
-			`so an update triggered by an unrelated change must still send the write-only secret. `+
-			`Omitting it deletes the live secret server-side (vault#2900).`,
-			update.Body["signing_secret"], secret)
+	// "signing-secret", hyphenated: the request spelling. Sending the snake_case
+	// one is the same as sending nothing — see circleci.WebhookInput.
+	if update.Body["signing-secret"] != secret {
+		t.Errorf(`update body["signing-secret"] = %v, want %q — an update triggered by an unrelated `+
+			`change must still send the write-only secret; a version-gated implementation is what `+
+			`deleted a live credential in hashicorp/terraform-provider-vault#2900.`,
+			update.Body["signing-secret"], secret)
 	}
 
-	// And the consequence at the API, which is the thing that actually hurts: the
-	// fake stores the mask when the body carried a secret and "" when it did not.
+	// And the state at the API. The fake, like production, keeps the stored secret
+	// when a PUT omits it, so this cannot fail on its own any more — it is here to
+	// catch a body that carried an EMPTY secret, which is what a resolved-to-nothing
+	// write-only value would send.
 	if stored != "****" {
 		t.Errorf("the webhook at the API has signing_secret = %q, want the %q mask — the rename cleared the secret",
 			stored, "****")
@@ -260,8 +273,8 @@ func TestWebhookWriteOnly_UnrelatedUpdateOnTheStatefulPathToo(t *testing.T) {
 		},
 	})
 
-	if update := api.lastRequest(t, "PUT", firstFakeWebhookPath); update.Body["signing_secret"] != "s3cr3t" {
-		t.Errorf(`update body["signing_secret"] = %v, want "s3cr3t"`, update.Body["signing_secret"])
+	if update := api.lastRequest(t, "PUT", firstFakeWebhookPath); update.Body["signing-secret"] != "s3cr3t" {
+		t.Errorf(`update body["signing-secret"] = %v, want "s3cr3t"`, update.Body["signing-secret"])
 	}
 }
 
@@ -317,9 +330,9 @@ func TestWebhookWriteOnly_RotationNeedsAVersionBump(t *testing.T) {
 		t.Fatalf("the provider sent %d PUT(s), want 1 (only the version bump; the unbumped change must not be sent): %+v",
 			len(puts), puts)
 	}
-	if puts[0].Body["signing_secret"] != "rotated" {
-		t.Errorf(`the rotation sent signing_secret = %v, want "rotated" — a rotation that does not reach `+
-			`the wire leaves the old secret live while state claims otherwise`, puts[0].Body["signing_secret"])
+	if puts[0].Body["signing-secret"] != "rotated" {
+		t.Errorf(`the rotation sent signing-secret = %v, want "rotated" — a rotation that does not reach `+
+			`the wire leaves the old secret live while state claims otherwise`, puts[0].Body["signing-secret"])
 	}
 }
 
@@ -406,9 +419,11 @@ resource "circleci_webhook" "test" {
 // directly, because a plan cannot reach this state: the ExactlyOneOf validator
 // rejects a configuration with neither secret at validation time. The guard
 // exists for the gap after that — a write-only value that resolved to nothing by
-// apply — where the alternative is a full-replace PUT with an empty
-// signing_secret, which deletes the live one. There is nothing to fall back on:
-// the API returns the secret only as a mask, so it cannot be read and re-sent.
+// apply — where the alternative is a request carrying an empty signing-secret,
+// which stores no secret on a create and is discarded on an update, either way
+// leaving an apply that reports a secret nothing set. There is nothing to fall
+// back on: the API returns the secret only as a mask, so it cannot be read and
+// re-sent.
 func TestWebhookWriteOnly_GuardsAgainstAMissingSecret(t *testing.T) {
 	t.Parallel()
 

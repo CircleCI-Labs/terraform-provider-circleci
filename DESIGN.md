@@ -33,7 +33,7 @@ distinct class of bug:
 
 | SDK property | What it caused |
 |---|---|
-| Hyphenated JSON tags against a snake_case API that ignores unknown keys | Fields silently never sent, or permanently empty. **Three separate instances**: `signing-secret`/`verify-tls` (the security bug), `public-key`/`created-at` on checkout keys, `created-at` on project environment variables |
+| Hyphenated JSON tags against a snake_case API that ignores unknown keys | Fields permanently empty. **Two instances**: `public-key`/`created-at` on checkout keys, `created-at` on project environment variables. A third, `signing-secret`/`verify-tls` on webhooks, turned out to be the opposite mistake — see "The webhook routes are asymmetric" below |
 | Untyped errors — every failure is `fmt.Errorf("%s: %s", status, body)` | Drift detection by `strings.Contains(err.Error(), "404")`, which also matches a 5xx whose body mentions 404, **silently dropping live resources from state** |
 | Version baked into the client's base URL | "v3 on Cloud, v2 on Server" inexpressible; also a hardcoded `https://circleci.com` that made project creation impossible on Server |
 | `Configure` receiving a narrow service (`*pipeline.PipelineService`) rather than a client | `circleci_pipeline_definition` could not be deployment-gated **at all** — the service carried no deployment information |
@@ -197,32 +197,51 @@ what the API actually sends and accepts — not against the spec, and not agains
 what the client already assumes. Write the fixture in the real wire shape so a
 struct-tag regression fails even if a mock is changed to match it.
 
-**Eighth bug, and the third of exactly the same kind.** `circleci-sdk-go`'s
+**Eighth bug, and the second of exactly the same kind.** `circleci-sdk-go`'s
 `envproject.EnvVariable` tagged the creation timestamp `json:"created-at"` against the
 API's `created_at`, so `circleci_project_environment_variable.created_at` was always
-empty. That is the third hyphenated-tag bug from the same dependency, after the checkout
-key (`public-key`/`created-at`) and the webhook (`signing-secret`/`verify-tls`).
+empty. That is the second hyphenated-tag bug from the same dependency, after the checkout
+key (`public-key`/`created-at`). Both re-verified against the live API since: those
+responses really are snake_case, and neither field is ever sent, so neither has a request
+side to get wrong.
 
-Three instances of one mistake in one library is the strongest single argument for the
+Two instances of one mistake in one library is still the strongest single argument for the
 removal: it is not a bug to be fixed but a habit encoded in a codebase nobody maintains.
+The third instance everyone assumed was the same — the webhook — was not, and assuming it
+was is what cost two releases.
 
-**Seventh bug, found by applying the rule to a resource that predated it.**
-`circleci-sdk-go` tags the webhook fields `json:"verify-tls"` and
-`json:"signing-secret"`; the service reads `verify_tls` and `signing_secret`. Since
-the API ignores unrecognized keys, **every webhook `circleci_webhook` created had no
-signing secret at all**, whatever was configured, and TLS verification fell back to
-the server default. Shipped in v0.4.0.
+**Seventh bug — and the one this rule was applied to backwards.** The webhook routes
+are **asymmetric**: the request side reads `verify-tls` and `signing-secret`
+(hyphenated) while responses report `verify_tls` and `signing_secret` (snake_case).
+The published OpenAPI document says so, and the live API agrees — a create sending the
+hyphenated keys stores the secret and honours the flag; the same create sending
+snake_case answers `201` with both values discarded.
 
-This one was security-relevant rather than cosmetic: the signing secret is the only
-thing that lets a receiver tell a genuine delivery from a forged POST. It is also the
-clearest argument for the rule — the bug is invisible to any test whose fake was
-written from the client's own structs, and instantly visible to one written from the
-service's schema.
+So `circleci-sdk-go`'s hyphenated tags were right for the request and wrong for the
+response, and "make them snake_case like everything else in v2" fixed the read and broke
+the write. **Every webhook `circleci_webhook` created had no signing secret at all** —
+first in v0.4.0 because the SDK's tags were also used to decode, then again in v0.5.0 and
+v0.6.0 because the request keys were changed to the spelling the request side ignores.
+Security-relevant rather than cosmetic both times: the signing secret is the only thing
+that lets a receiver tell a genuine delivery from a forged POST.
 
-`WebhookInput` is deliberately a separate type from `Webhook` rather than the same
-struct reused for reads and writes. `Webhook.SigningSecret` only ever holds the
-`"****"` mask, and one struct doing both jobs is exactly how a masked value gets
-written back as a literal secret.
+Two lessons, and the second is the expensive one:
+
+1. The bug is invisible to any test whose fake was written from the client's own structs,
+   and instantly visible to one written from the service's schema. That is the rule above.
+2. "The API is snake_case everywhere" is a generalisation, and a fake written from a
+   generalisation is a fake written from the client again. The webhook fake read snake_case
+   request keys, so it agreed with the broken client and the whole suite stayed green
+   through two releases. Fakes must be pinned to the route, and the wire shape must be
+   confirmed by a real request when the two directions disagree.
+
+`WebhookInput` is deliberately a separate type from `Webhook` rather than the same struct
+reused for reads and writes, and the asymmetric keys are now the strongest reason: plain
+struct tags cannot spell one field two ways. It is also why the difference is not hidden
+in a `MarshalJSON` — tags are what people read and grep, and a method body is where a
+convention like this goes to die. `Webhook.SigningSecret` only ever holds the `"****"`
+mask, and one struct doing both jobs is also exactly how a masked value gets written back
+as a literal secret.
 
 ### Characterization tests state the bug in the assertion
 
