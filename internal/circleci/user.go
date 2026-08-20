@@ -3,7 +3,10 @@
 
 package circleci
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // User routes.
 //
@@ -47,18 +50,14 @@ type Collaboration struct {
 	// VCSType is the VCS backing the organization, for example "github",
 	// "bitbucket" or "circleci".
 	//
-	// The wire key is vcs-type, hyphenated — not vcs_type. This is the one place
-	// in the v2 surface that spells it that way, and it is not a typo in the
-	// spec: the published schema for GET /api/v2/me/collaborations lists a
-	// required "vcs-type" property while its four siblings (id, name, avatar_url,
-	// slug) are unchanged.
+	// The wire key is vcs_type, like every other organization-shaped response and
+	// like this object's four siblings (id, name, avatar_url, slug).
 	//
-	// Every other organization-shaped response really is vcs_type, including
-	// GET /api/v2/organization/{org-slug-or-id}. Copying the tag across from
-	// Organization is exactly how this field came to be permanently empty, which
-	// is why the fixture in user_test.go is written in the hyphenated production
-	// shape.
-	VCSType string `json:"vcs-type"`
+	// The published OpenAPI document says otherwise — it declares a required
+	// "vcs-type" — and believing it is how this field came to be permanently
+	// empty. UnmarshalJSON below records what production actually sends and still
+	// accepts the hyphenated spelling, so both fixtures in user_test.go decode.
+	VCSType string `json:"vcs_type"`
 	// Name is the organization name.
 	Name string `json:"name"`
 	// Slug is the organization slug, for example "gh/acme" or
@@ -66,6 +65,46 @@ type Collaboration struct {
 	Slug string `json:"slug"`
 	// AvatarURL is the organization's avatar on its VCS.
 	AvatarURL string `json:"avatar_url"`
+}
+
+// UnmarshalJSON decodes a collaboration, accepting the VCS type under either
+// spelling.
+//
+// This route is the one place in v2 where the published OpenAPI document and the
+// live API disagree. The document declares a required "vcs-type" property,
+// hyphenated, and every sibling in snake_case; production sends "vcs_type".
+// Checked against Cloud on 2026-08-20 over 38 collaborations spanning github and
+// circleci (standalone) organizations — every one of them snake_case, and no
+// "vcs-type" key present anywhere in the payload.
+//
+// Taking the document's word for it is what made this field permanently empty, so
+// `vcs_type` is the tag and the hyphenated spelling is a fallback rather than a
+// second guess: a deployment that really does send it (an older CircleCI Server,
+// or Cloud reverting to its own spec) still decodes, and neither reader of
+// Collaboration.VCSType has to care which one arrived.
+//
+// The alias type keeps the struct tags authoritative for every other field, so a
+// field added above still decodes without being repeated here.
+func (c *Collaboration) UnmarshalJSON(data []byte) error {
+	type collaboration Collaboration
+
+	var wire struct {
+		collaboration
+
+		// The published spec's spelling. Never seen from Cloud.
+		VCSTypeHyphenated string `json:"vcs-type"`
+	}
+
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+
+	*c = Collaboration(wire.collaboration)
+	if c.VCSType == "" {
+		c.VCSType = wire.VCSTypeHyphenated
+	}
+
+	return nil
 }
 
 // UserService reads CircleCI user accounts.

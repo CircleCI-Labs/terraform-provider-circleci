@@ -213,11 +213,12 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 
 	// Build the webhook request.
 	//
-	// This goes through the provider's own client rather than circleci-sdk-go
-	// because the SDK tags verify_tls and signing_secret as "verify-tls" and
-	// "signing-secret". The API ignores unrecognized keys, so every webhook
-	// created through the SDK silently had NO signing secret and took the
-	// server-side default for TLS verification, however they were configured.
+	// circleci.WebhookInput serialises verify_tls and signing_secret as the
+	// hyphenated verify-tls and signing-secret, which is what the request side of
+	// these routes reads — the response side answers in snake_case. The API
+	// ignores unrecognized keys, so sending the response spelling stores a
+	// webhook with NO signing secret and TLS verification off, whatever was
+	// configured. See circleci.WebhookInput.
 	newWebhook := circleci.WebhookInput{
 		Name:          plan.Name.ValueString(),
 		URL:           plan.Url.ValueString(),
@@ -384,11 +385,10 @@ func (r *webhookResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	// The signing secret is resolved and sent on EVERY update, whatever triggered
 	// it, and nothing here is conditional on `signing_secret_wo_version` having
-	// changed. That is not an oversight — see webhook_write_only.go. UpdateWebhook
-	// is a full-replace PUT, so a body with no signing_secret deletes the live
-	// secret; gating the send on the version is
-	// hashicorp/terraform-provider-vault#2900, where exactly that silently wiped a
-	// credential whenever an unrelated field changed.
+	// changed. That is not an oversight — see webhook_write_only.go, which also
+	// records what the route does with an omitted field. Gating the send on the
+	// version is hashicorp/terraform-provider-vault#2900, where exactly that
+	// silently wiped a credential whenever an unrelated field changed.
 	signingSecret, ok := resolveWebhookSigningSecret(
 		ctx, req.Config, plan.SigningSecret, plan.SigningSecretWOVersion, &resp.Diagnostics,
 	)
@@ -539,7 +539,7 @@ func (r *webhookResource) ImportState(ctx context.Context, req resource.ImportSt
 			"unset. Set 'signing_secret' (or 'signing_secret_wo' plus 'signing_secret_wo_version', to "+
 			"keep the secret out of state) in your Terraform configuration before running plan or "+
 			"apply: the resource requires exactly one of the two, and there is nothing to fall back "+
-			"on. UpdateWebhook is a full-replace PUT, so whatever value your configuration sets is "+
+			"on. Every apply sends the whole webhook, so whatever value your configuration sets is "+
 			"written back on the very next apply, even one triggered by an unrelated field — a "+
 			"configuration whose secret differs from the one actually in use silently overwrites it, "+
 			"with no read able to catch the mismatch first. Source the value from wherever the real "+

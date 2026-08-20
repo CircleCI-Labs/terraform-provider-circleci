@@ -36,23 +36,31 @@ import (
 // rather than being hidden by a fake that was written to match the client
 // instead of the server.
 //
-// The real wire shape is verified against the API's own OpenAPI schema,
-// which documents "verify_tls" and "signing_secret" (both snake_case) as the
-// webhook object's field names — matching internal/circleci/webhook.go in
-// this repository.
+// THE REQUEST KEYS ARE HYPHENATED AND THE RESPONSE KEYS ARE SNAKE_CASE, and this
+// fake models that asymmetry deliberately. The webhook routes read `verify-tls`
+// and `signing-secret` on the way in and report `verify_tls` and `signing_secret`
+// on the way out; the request side ignores keys it does not recognize, so the
+// snake_case spellings are accepted with a 2xx and silently discarded. The
+// published OpenAPI document says so, and circleci.WebhookInput records the
+// live-API transcript that proves it.
 //
-// github.com/CircleCI-Public/circleci-sdk-go/webhook.Webhook instead tags those
-// two fields `json:"verify-tls"` and `json:"signing-secret"` (hyphenated). Because
-// the API ignores keys it does not recognize, every request the SDK sent silently
-// dropped both: a webhook created through this resource had NO signing secret
-// whatever was configured. That was a shipped security bug.
+// This fake previously read the snake_case spellings on the request, which is the
+// whole reason a client sending them shipped: the fake agreed with the client, so
+// every mocked test passed while every real webhook was created with no signing
+// secret and TLS verification off. A fake that cannot be wrong in the way the API
+// is wrong cannot catch the bug the API causes.
 //
-// webhook_resource.go has been migrated to internal/circleci, whose tags match the
-// API, and TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire now asserts both
-// that the correct keys are sent and that the hyphenated ones are absent.
+// So buildRecord below reads ONLY the hyphenated keys, defaults verify_tls to
+// false when the hyphenated key is absent (which is what the API stores, proven
+// against production), and shouts if a request carries the snake_case spelling.
+// A client sending snake_case now fails here three ways over: the explicit
+// complaint, the wire assertion in
+// TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire, and
+// "Provider produced inconsistent result after apply: .verify_tls: was cty.True,
+// but now cty.False" out of TestWebhookResourceUnit_CRUD — the same error the
+// real API produces.
 //
-// webhook_data_source.go is migrated too, so it now reads the API's real
-// signing_secret value rather than the SDK's mistagged (and always-empty) field.
+// webhook_data_source.go reads the API's real signing_secret response value.
 // That value is only ever the "****" mask or "" — the API never discloses a real
 // secret — so the data source still does not surface it as a Sensitive string:
 // TestWebhookDataSourceUnit_SigningSecretIsAlwaysNull asserts it comes back null
@@ -190,65 +198,120 @@ func reorderedLikeTheAPI(collection any) any {
 	return reordered
 }
 
-// buildRecord answers exactly like the real API would: verify_tls defaults to
-// true when absent, and signing_secret is stored only when the REAL key
-// ("signing_secret") is present in the body — never the SDK's misspelled
-// "signing-secret".
+// webhookRequestOnlyKeys are the two request keys the webhook routes spell with a
+// hyphen, mapped to the snake_case key the response spells them with. Nothing
+// else in the body differs between the two directions: name, url, events and
+// scope are single words.
+var webhookRequestOnlyKeys = map[string]string{
+	"verify-tls":     "verify_tls",
+	"signing-secret": "signing_secret",
+}
+
+// rejectResponseSpellings fails the test when a request body carries the
+// snake_case spelling of a key the request side reads with a hyphen.
 //
-// The stored events are deliberately in a different order from the submitted
-// ones; see reorderedLikeTheAPI.
-func (a *fakeWebhookAPI) buildRecord(id string, body map[string]any) map[string]any {
-	verifyTLS := true
-	if v, ok := body["verify_tls"].(bool); ok {
-		verifyTLS = v
-	}
-
-	secret := ""
-	if v, ok := body["signing_secret"].(string); ok {
-		secret = v
-	}
-	masked := ""
-	if secret != "" {
-		masked = "****"
-	}
-
-	// Not body["events"] as submitted: the API returns the events in an order of
-	// its own. See reorderedLikeTheAPI.
-	events := reorderedLikeTheAPI(body["events"])
-
-	scope := map[string]any{"id": "", "type": ""}
-	if s, ok := body["scope"].(map[string]any); ok {
-		scope = map[string]any{"id": s["id"], "type": s["type"]}
-	}
-
-	return map[string]any{
-		"id":             id,
-		"name":           body["name"],
-		"url":            body["url"],
-		"verify_tls":     verifyTLS,
-		"signing_secret": masked,
-		"scope":          scope,
-		"events":         events,
-		"created_at":     "2024-07-01T00:00:00.000Z",
-		"updated_at":     "2024-07-01T00:00:00.000Z",
+// The real API would answer 2xx and drop the value, and this fake drops it too —
+// see buildRecord, which reads only the hyphenated keys. But "dropped" surfaces
+// downstream as an inconsistent-result error about verify_tls, or (for the signing
+// secret, which is never read back into state) as nothing at all. Naming the cause
+// where it happens is worth one assertion in the handler.
+func (a *fakeWebhookAPI) rejectResponseSpellings(body map[string]any) {
+	for hyphenated, snake := range webhookRequestOnlyKeys {
+		if _, present := body[snake]; present {
+			a.t.Errorf("request body carries %q; the webhook routes read %q on the way in and "+
+				"only report %q on the way out, so this value is silently discarded. See "+
+				"circleci.WebhookInput", snake, hyphenated, snake)
+		}
 	}
 }
 
-// createWebhookRequiredFields are the keys the create route's own request spec
-// marks required: name, events, url, verify_tls, signing_secret and a nested
-// scope. Every one of them is `:req-un`, so a body missing any is a 400 and never
-// reaches the service behind it — a webhook cannot be created "without" a signing
-// secret, only with an empty one.
+// buildRecord answers exactly like the real API would.
 //
-// The update route is the opposite: every field is optional there, and the
-// handler select-keys the body, so an absent key leaves the stored value alone.
-// That asymmetry is why validation lives in create rather than in buildRecord,
-// which both routes share.
-var createWebhookRequiredFields = []string{"name", "events", "url", "verify_tls", "signing_secret", "scope"}
+// The two hyphenated request keys are read under their REQUEST spelling and
+// echoed under their RESPONSE spelling. Verified against production:
+//
+//	POST {"verify-tls":true,"signing-secret":"x"}  -> {"verify_tls":true,"signing_secret":"****"}
+//	POST {"verify_tls":true,"signing_secret":"x"}  -> {"verify_tls":false}
+//	POST (neither key at all)                      -> {"verify_tls":false}
+//
+// So verify_tls defaults to FALSE, not true, when the hyphenated key is absent —
+// which is precisely what makes a client sending snake_case fail here the way it
+// fails in production rather than passing.
+//
+// A webhook with no signing secret has no signing_secret key in the response at
+// all, rather than an empty one; both decode to "" in Go, and this fake omits it
+// the way production does. An EMPTY signing-secret in a request means "leave it
+// alone", not "clear it" — also verified against production:
+//
+//	POST {"signing-secret":""}     -> no signing_secret key: none stored
+//	PUT  {"signing-secret":"x"}    -> {"signing_secret":"****"}
+//	PUT  {"signing-secret":""}     -> {"signing_secret":"****"} still there
+//
+// so a webhook's secret cannot be removed through this API, only replaced.
+//
+// existing is the stored record on an update and nil on a create. The update route
+// select-keys the body, so a key absent from a PUT leaves the stored value alone
+// rather than resetting it to a default.
+//
+// The stored events are deliberately in a different order from the submitted
+// ones; see reorderedLikeTheAPI.
+func (a *fakeWebhookAPI) buildRecord(id string, body, existing map[string]any) map[string]any {
+	record := map[string]any{
+		"id":         id,
+		"created_at": "2024-07-01T00:00:00.000Z",
+		"updated_at": "2024-07-01T00:00:00.000Z",
+		"verify_tls": false,
+		"scope":      map[string]any{"id": "", "type": ""},
+	}
+	// An update starts from what is stored: an absent key is "leave alone".
+	for key, value := range existing {
+		record[key] = value
+	}
+
+	for _, key := range []string{"name", "url"} {
+		if value, present := body[key]; present {
+			record[key] = value
+		}
+	}
+	// Not body["events"] as submitted: the API returns the events in an order of
+	// its own. See reorderedLikeTheAPI.
+	if events, present := body["events"]; present {
+		record["events"] = reorderedLikeTheAPI(events)
+	}
+	if scope, ok := body["scope"].(map[string]any); ok {
+		record["scope"] = map[string]any{"id": scope["id"], "type": scope["type"]}
+	}
+
+	// The hyphenated request key, never the snake_case one.
+	if verifyTLS, ok := body["verify-tls"].(bool); ok {
+		record["verify_tls"] = verifyTLS
+	}
+	if secret, ok := body["signing-secret"].(string); ok && secret != "" {
+		record["signing_secret"] = "****"
+	}
+
+	return record
+}
+
+// createWebhookRequiredFields are the keys the create route rejects a body for
+// omitting: name, events, url and a nested scope. Verified one at a time against
+// production — dropping any one of the four is a 400 "Invalid request body."
+//
+// verify-tls and signing-secret are NOT in this list, and that is not an
+// oversight. A create carrying neither is a 201 whose stored verify_tls is false
+// and which has no signing secret, which is exactly the shape a client sending the
+// snake_case spellings produces. A fake that 400'd instead would turn the quiet
+// failure this bug is made of into a loud one and stop reproducing it.
+//
+// The update route requires nothing at all: the handler select-keys the body, so
+// an absent key leaves the stored value alone. That asymmetry is why validation
+// lives in create rather than in buildRecord, which both routes share.
+var createWebhookRequiredFields = []string{"name", "events", "url", "scope"}
 
 func (a *fakeWebhookAPI) create(w http.ResponseWriter, r *http.Request) {
 	body := decodeBody(a.t, r)
 	a.record(r, body)
+	a.rejectResponseSpellings(body)
 
 	w.Header().Set("Content-Type", "application/json")
 
@@ -264,7 +327,7 @@ func (a *fakeWebhookAPI) create(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.nextID++
 	id := fmt.Sprintf("33333333-4444-5555-6666-%012d", a.nextID)
-	record := a.buildRecord(id, body)
+	record := a.buildRecord(id, body, nil)
 	a.webhooks[id] = record
 	a.mu.Unlock()
 
@@ -300,6 +363,7 @@ func (a *fakeWebhookAPI) get(w http.ResponseWriter, r *http.Request) {
 func (a *fakeWebhookAPI) update(w http.ResponseWriter, r *http.Request) {
 	body := decodeBody(a.t, r)
 	a.record(r, body)
+	a.rejectResponseSpellings(body)
 
 	w.Header().Set("Content-Type", "application/json")
 
@@ -316,9 +380,10 @@ func (a *fakeWebhookAPI) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated := a.buildRecord(id, body)
+	updated := a.buildRecord(id, body, existing)
 	// The scope cannot be updated (see webhook.go's UpdateWebhook comment);
-	// keep the original.
+	// keep the original. Verified against production: a PUT carrying a different
+	// scope answers 200 with the original scope unchanged.
 	updated["scope"] = existing["scope"]
 	updated["created_at"] = existing["created_at"]
 
@@ -567,7 +632,7 @@ func TestFakeAPIsDoNotEchoCollectionOrder(t *testing.T) {
 		api, _ := newFakeWebhookAPI(t)
 
 		submitted := []any{"workflow-completed", "job-completed"}
-		record := api.buildRecord("id", map[string]any{"events": submitted})
+		record := api.buildRecord("id", map[string]any{"events": submitted}, nil)
 
 		stored, ok := record["events"].([]any)
 		if !ok {
@@ -655,25 +720,23 @@ func TestWebhookResourceUnit_RejectsUnknownEventName(t *testing.T) {
 }
 
 // TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire is the money test for
-// this file: it proves signing_secret and verify_tls actually reach the API under
-// the field names the API reads.
+// this file: it proves the signing secret and the TLS-verification flag actually
+// reach the API under the keys the REQUEST side reads, which are hyphenated —
+// `signing-secret` and `verify-tls` — even though the response reports them as
+// `signing_secret` and `verify_tls`.
 //
-// It is a regression test for a shipped security bug.
-// github.com/CircleCI-Public/circleci-sdk-go/webhook.Webhook tags these two fields
-// `json:"verify-tls"` and `json:"signing-secret"` — hyphenated — while the API
-// documents and reads `verify_tls` and `signing_secret`. The
-// API ignores keys it does not recognize, so while the resource was built on the
-// SDK every webhook it created had **no signing secret at all**, no matter what the
-// practitioner configured, and TLS verification silently took the server default.
+// It is a regression test for a shipped security bug, twice over. The keys were
+// first hyphenated by accident (inherited from a third-party SDK), then "fixed" to
+// snake_case to match the response — and snake_case is the spelling the request
+// side ignores. Either way the effect is the same and silent: no signing secret is
+// stored, and TLS verification falls to the server-side default of off.
 //
 // That is a security bug, not a cosmetic one: the signing secret is the only thing
 // letting a receiver tell a genuine CircleCI delivery from a forged POST. A
 // practitioner who set one had every reason to believe it was in force.
 //
-// The resource now goes through the provider's own client
-// (internal/circleci/webhook.go), whose tags match the API. Asserting the absence
-// of the hyphenated keys matters as much as the presence of the correct ones — if
-// anything reintroduces the SDK types, the extra keys come back and this fails.
+// Asserting the ABSENCE of the snake_case keys matters as much as the presence of
+// the hyphenated ones. circleci.WebhookInput carries the live-API transcript.
 func TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire(t *testing.T) {
 	api, host := newFakeWebhookAPI(t)
 
@@ -694,26 +757,34 @@ func TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire(t *testing.T) {
 
 	create := api.lastRequest(t, "POST", "/api/v2/webhook")
 
-	if create.Body["signing_secret"] != "s3cr3t" {
-		t.Errorf(`create body["signing_secret"] = %v, want "s3cr3t" — a webhook created without its `+
-			`signing secret cannot be authenticated by its receiver`, create.Body["signing_secret"])
+	if create.Body["signing-secret"] != "s3cr3t" {
+		t.Errorf(`create body["signing-secret"] = %v, want "s3cr3t" — a webhook created without its `+
+			`signing secret cannot be authenticated by its receiver`, create.Body["signing-secret"])
 	}
-	if create.Body["verify_tls"] != true {
-		t.Errorf(`create body["verify_tls"] = %v, want true`, create.Body["verify_tls"])
+	if create.Body["verify-tls"] != true {
+		t.Errorf(`create body["verify-tls"] = %v, want true`, create.Body["verify-tls"])
 	}
 
-	// The SDK's misspellings must not be present at all.
-	for _, wrong := range []string{"signing-secret", "verify-tls"} {
+	// The response spellings must not be present at all: the request side ignores
+	// them, so a body carrying them is a 2xx with the values discarded.
+	for _, wrong := range []string{"signing_secret", "verify_tls"} {
 		if _, present := create.Body[wrong]; present {
-			t.Errorf("create body carries %q, which the API does not read — the SDK types appear to have "+
-				"been reintroduced, and the signing secret is being silently discarded again", wrong)
+			t.Errorf("create body carries %q, which is the RESPONSE spelling and is ignored on a "+
+				"request — the signing secret is being silently discarded again", wrong)
 		}
 	}
 
 	update := api.lastRequest(t, "PUT", "/api/v2/webhook/33333333-4444-5555-6666-000000000001")
-	if update.Body["signing_secret"] != "rotated-s3cr3t" {
-		t.Errorf(`update body["signing_secret"] = %v, want "rotated-s3cr3t" — a rotation that does not `+
-			`reach the wire leaves the old secret live while state claims otherwise`, update.Body["signing_secret"])
+	if update.Body["signing-secret"] != "rotated-s3cr3t" {
+		t.Errorf(`update body["signing-secret"] = %v, want "rotated-s3cr3t" — a rotation that does not `+
+			`reach the wire leaves the old secret live while state claims otherwise`, update.Body["signing-secret"])
+	}
+	// The update route is asymmetric in the same way the create route is.
+	for _, wrong := range []string{"signing_secret", "verify_tls"} {
+		if _, present := update.Body[wrong]; present {
+			t.Errorf("update body carries %q, the response spelling, which the update route "+
+				"ignores — the rotation never happens and state claims it did", wrong)
+		}
 	}
 }
 
