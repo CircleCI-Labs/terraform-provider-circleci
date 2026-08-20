@@ -3,6 +3,16 @@
 
 version: 2.1
 
+# The only way to turn the acceptance workflow on. It defaults to false, so an
+# ordinary push or pull request never even compiles those jobs into its
+# pipeline — see the `acceptance` workflow at the bottom of this file for why
+# that separation matters, and the setup note below it for how the nightly
+# schedule sets this to true.
+parameters:
+  run-acceptance-tests:
+    type: boolean
+    default: false
+
 orbs:
   go: circleci/go@4.0.0
   terraform: circleci/terraform@3.7.0
@@ -36,6 +46,186 @@ commands:
       # runs `terraform fmt` over examples/.
       - terraform/install:
           terraform_version: <<parameters.terraform-version>>
+
+  # Every step of an acceptance-test job. The four jobs below differ only in
+  # their `environment` block, and that is deliberate: which organization a job
+  # writes to is then the entire diff when it changes, rather than something
+  # buried in a shared parameter list. Nothing secret appears there — the
+  # fixture identifiers are org and project UUIDs and slugs, and the one actual
+  # credential (CIRCLE_TOKEN) comes from the context.
+  acceptance_test:
+    steps:
+      - run:
+          name: Refuse to run anywhere but the labs branch of this repository
+          command: |
+            set -euo pipefail
+
+            # Defence in depth, not the primary control. The primary controls
+            # are the branch filter on each job in the `acceptance` workflow
+            # and the fact that the terraform-provider-acc-token context is
+            # restricted to this project *and* to the labs branch, which
+            # CircleCI enforces before the job starts.
+            #
+            # This step exists anyway because a pull request from a fork builds
+            # under *this* project, with a branch name this config does not
+            # choose, so "our config only lists labs" is an argument about
+            # intent rather than a guarantee. It fails in three lines and names
+            # the reason, which beats discovering it from an API call made with
+            # our token on behalf of a branch nobody reviewed.
+            if [ "${CIRCLE_BRANCH:-}" != "labs" ]; then
+              echo "CIRCLE_BRANCH=${CIRCLE_BRANCH:-<unset>}: the acceptance jobs only run on labs." >&2
+              exit 1
+            fi
+
+            if [ -n "${CIRCLE_PULL_REQUEST:-}" ]; then
+              echo "This is a pull-request build ($CIRCLE_PULL_REQUEST): the acceptance jobs never run on one." >&2
+              exit 1
+            fi
+      - setup:
+          # One Terraform version rather than the matrix. These jobs measure
+          # the provider against a live API; build-and-test above already
+          # measures it against three Terraform lines, and multiplying the two
+          # would quadruple the writes to four real organizations to learn
+          # nothing new. Keep this in step with the newest matrix entry by hand
+          # — Renovate only tracks the entry marked in that matrix.
+          terraform-version: "1.15.8"
+      - run: task build
+      - go/with-cache:
+          steps:
+            - run:
+                name: task ci:test (internal/provider only)
+                environment:
+                  # gotestsum's default `pkgname` format prints one line per
+                  # package and discards a *passing* package's own stdout —
+                  # which is exactly where TestMain writes the VCS coverage
+                  # block (internal/provider/vcs_gating_test.go). Checked by
+                  # running both formats against this suite: under the default
+                  # the block never appears at all, so the summary step below
+                  # would have nothing to find and the one question these jobs
+                  # exist to answer would be unanswerable. standard-quiet keeps
+                  # package output and still omits the per-test PASS lines.
+                  GOTESTSUM_FORMAT: standard-quiet
+                # Looser than build-and-test's 30m, for that reason plus one
+                # more: every step here waits on the real API rather than on an
+                # httptest server, and terraform-plugin-testing drives a full
+                # plan/apply/destroy per step. Still well inside `ci:test`'s own
+                # -timeout of 120m, which is what actually bounds the run.
+                no_output_timeout: 45m
+                command: |
+                  set -euo pipefail
+
+                  mkdir -p test-reports
+
+                  # Only internal/provider. Every acceptance test lives there,
+                  # and internal/circleci and internal/httpcl are httptest-only
+                  # — build-and-test already runs them three times over, so
+                  # running them again here would cost four more copies of the
+                  # same evidence.
+                  task ci:test -- ./internal/provider/... 2>&1 | tee test-reports/acceptance.log
+      - run:
+          name: What this run actually exercised
+          when: always
+          command: |
+            set -euo pipefail
+
+            log=test-reports/acceptance.log
+            xml=test-reports/tests.xml
+            out=test-reports/vcs-coverage.txt
+
+            if [ ! -s "$log" ]; then
+              echo "No $log, so the test step did not get far enough to produce one." >&2
+              echo "Read that step's failure instead; there is nothing to summarize here." >&2
+              exit 0
+            fi
+
+            # The block TestMain prints once every test has finished. It ends
+            # where `go test` prints the package's own ok/FAIL line.
+            block="$(awk '/^=== VCS integration coverage/ { inside = 1 }
+                          inside && /^(ok|FAIL|---)/       { inside = 0 }
+                          inside                           { print }' "$log")"
+
+            # gotestsum's JUnit report puts one <testcase> per line and marks a
+            # skipped one with a <skipped> child on the next line, so the two
+            # counts need nothing but grep.
+            total=0
+            skipped=0
+            if [ -s "$xml" ]; then
+              total="$(grep -c 'name="TestAcc' "$xml" || true)"
+              skipped="$(grep -A 1 'name="TestAcc' "$xml" | grep -c '<skipped' || true)"
+            fi
+
+            # Why each test skipped, counted by the message the helper printed.
+            # These three are the whole vocabulary: acctest_test.go's testAccEnv
+            # has one message for unset and one for a placeholder, and
+            # provider_test.go's testAccPreCheck has one for a missing token.
+            no_token="$(grep -c 'no API token for acceptance tests' "$log" || true)"
+            no_fixture="$(grep -c 'must be set for this acceptance test' "$log" || true)"
+            placeholder="$(grep -c 'is set to a placeholder value' "$log" || true)"
+
+            {
+              if [ -n "$block" ]; then
+                printf '%s\n' "$block"
+              else
+                echo "=== VCS integration coverage ==="
+                echo "  (never printed: no VCS-gated test reached testRequireVCSType)"
+              fi
+
+              echo
+              echo "=== Acceptance tests (TestAcc*) in internal/provider ==="
+              printf '  not skipped: %s\n' "$((total - skipped))"
+              printf '  skipped:     %s\n' "$skipped"
+              printf '  total:       %s\n' "$total"
+              echo
+              echo "=== Skips by cause ==="
+              printf '  no API token:            %s\n' "$no_token"
+              printf '  fixture variable unset:  %s\n' "$no_fixture"
+              printf '  fixture is placeholder:  %s\n' "$placeholder"
+              echo
+              echo "=== Every skip, with its reason ==="
+              echo "(each reason names the CIRCLECI_TEST_* variable that was missing)"
+              grep -E -A 1 '^=== SKIP: .*TestAcc' "$log" || echo "  (none)"
+            } | tee "$out"
+
+            # The checks below are the reason this step is not decoration. A job
+            # that talks to no organization at all still passes every assertion
+            # it makes, so without them "green" and "did nothing" look identical
+            # from the outside — which is the failure mode this whole
+            # arrangement exists to rule out.
+            #
+            # Note which check is doing the work. "Every TestAcc test skipped"
+            # is nearly useless on its own: most TestAcc tests in this package
+            # are mock-backed and run without any credential at all — a
+            # credential-less run of ./internal/provider/... reports 391 tests
+            # with 38 skipped, and would sail past a count-based guard.
+            if [ -z "$block" ]; then
+              echo >&2
+              echo "FAIL: no VCS integration coverage block was printed, so no VCS-gated test ever" >&2
+              echo "resolved CIRCLECI_TEST_VCS_TYPE. Either it is unset for this job or the suite" >&2
+              echo "did not reach the gate; either way this job proved nothing about the" >&2
+              echo "integration it claims to cover." >&2
+              exit 1
+            fi
+
+            # This is the one that catches a detached context. Every fixture
+            # variable is set in this job's own environment, so a test can only
+            # get as far as the token check by having found its fixtures — and
+            # then skip because CIRCLE_TOKEN is absent. Without this check that
+            # is a green job that created nothing.
+            if [ "$no_token" -gt 0 ]; then
+              echo >&2
+              echo "FAIL: tests skipped for a missing API token ($no_token of them), so CIRCLE_TOKEN" >&2
+              echo "never reached this job. The terraform-provider-acc-token context is not" >&2
+              echo "attached, or its restriction excludes this branch." >&2
+              exit 1
+            fi
+
+            if [ "$total" -gt 0 ] && [ "$((total - skipped))" -eq 0 ]; then
+              echo >&2
+              echo "FAIL: every one of the $total acceptance tests skipped. Even the mock-backed" >&2
+              echo "ones did not run, so this is not a fixture problem — read the test step." >&2
+              exit 1
+            fi
+      - store_results
 
 jobs:
   lint:
@@ -118,6 +308,108 @@ jobs:
               | tee test-reports/coverage.txt \
               | tail -1
       - store_results
+
+  # The acceptance-test jobs. One per test organization; all four share
+  # `acceptance_test` above and differ only in the environment below.
+  #
+  # Three things are true of every one of them:
+  #
+  #   * TF_ACC is not set here. `task ci:test` sets it (see Taskfile.yml), so
+  #     the acceptance tests are attempted in every job in this file. What
+  #     separates these four from build-and-test is the credential and the
+  #     fixtures, not the flag.
+  #   * Only the identifiers these organizations were provisioned with are set:
+  #     the organization and the writable project. Everything else the suite
+  #     reads — PROJECT_SLUG, STATIC_PROJECT_*, PIPELINE_ID, TRIGGER_*,
+  #     SCHEDULED_TRIGGER_ID, CONTEXT_*, WEBHOOK_*, RUNNER_NAMESPACE, and the
+  #     static GH_APP_REPO_* and GH_SERVER_* pairs — is deliberately left unset,
+  #     because an unset variable skips with a message naming itself while a
+  #     guessed one fails against a nonsense identifier in a way that reads
+  #     exactly like a regression. The summary step prints every such skip;
+  #     filling them in is a matter of adding lines here as each fixture is
+  #     actually created.
+  #   * CIRCLECI_TEST_GH_OAUTH_ORG_ID/_ORG_SLUG are set in exactly one job,
+  #     acceptance-gh-oauth. They are static fixtures — testGithubOrgID reads
+  #     them whatever CIRCLECI_TEST_VCS_TYPE says — and the tests that read them
+  #     create and delete real projects (TestAccGithubProjectResource). Setting
+  #     them in the GitHub App, hybrid or GitLab job would make that job write
+  #     to the OAuth organization, which would force all four jobs into one
+  #     serial group to buy two tests acceptance-gh-oauth already runs. Left
+  #     unset, they skip by name.
+  acceptance-gh-app:
+    executor: go
+    environment:
+      CIRCLECI_TEST_VCS_TYPE: github_app
+      # gh-app-cci-1. Slug is circleci/<identifier> because a GitHub App
+      # organization is standalone rather than named after the VCS org.
+      CIRCLECI_TEST_GH_APP_ORG_ID: e75c804e-7f5c-4506-9dad-03fc86af39d1
+      CIRCLECI_TEST_GH_APP_ORG_SLUG: circleci/Va2k7FVcHE7EyFDbRioifr
+      CIRCLECI_TEST_GH_APP_ORG_NAME: gh-app-cci-1
+      CIRCLECI_TEST_GH_APP_PROJECT_ID: 18ae5fa4-d11c-4fe1-a1a7-fbcae4d037de
+    steps:
+      - acceptance_test
+
+  acceptance-gh-oauth:
+    executor: go
+    environment:
+      CIRCLECI_TEST_VCS_TYPE: github_oauth
+      # gh-oauth-cci-1.
+      CIRCLECI_TEST_GH_OAUTH_ORG_ID: 9b55d3de-16b2-445a-882f-a4ca5c8bbafc
+      CIRCLECI_TEST_GH_OAUTH_ORG_SLUG: gh/gh-oauth-cci-1
+      CIRCLECI_TEST_GH_OAUTH_ORG_NAME: gh-oauth-cci-1
+      CIRCLECI_TEST_GH_OAUTH_PROJECT_ID: d8fc5b21-353a-4743-9969-6a24a189527a
+      # The org-move test (TestAccCircleCiProjectOrgUpdateResource) creates a
+      # project in ORG_ID and moves it to ALT_ORG_ID. It is gated to
+      # github_oauth/bitbucket, so of the four jobs here this is the only one
+      # that can run it at all, and it needs a second OAuth-connected
+      # organization to move into. gh-oauth-cci-2 is one: a hybrid org's
+      # connection is GitHub OAuth (TESTING.md, account #3), the App
+      # installation it also carries being irrelevant to a project move.
+      #
+      # This is why this job and acceptance-gh-hybrid share a serial group
+      # below — the move writes a project into the organization that job owns.
+      CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID: 11047c98-2415-4410-98dc-899c86f8d0e5
+      CIRCLECI_TEST_GH_OAUTH_ALT_ORG_SLUG: gh/gh-oauth-cci-2
+    steps:
+      - acceptance_test
+
+  # gh-oauth-cci-2: OAuth-connected and *also* carrying a GitHub App
+  # installation. github_hybrid is its own integration key rather than an alias
+  # for github_oauth — see TESTING.md, which records the API evidence for the
+  # distinction and why none of the four VCS-gated tests names it yet. Expect
+  # "Exercised by this run (0)" here for that reason, as in the GitLab job.
+  #
+  # No ALT_ORG pair. testAltOrgID resolves CIRCLECI_TEST_GH_HYBRID_ALT_ORG_ID
+  # under this integration, and a second *hybrid* organization is not something
+  # we have; pointing it at an OAuth-only org would be an org move across two
+  # different integrations, which is not what the test is measuring. It skips,
+  # by name, which is the honest answer.
+  acceptance-gh-hybrid:
+    executor: go
+    environment:
+      CIRCLECI_TEST_VCS_TYPE: github_hybrid
+      CIRCLECI_TEST_GH_HYBRID_ORG_ID: 11047c98-2415-4410-98dc-899c86f8d0e5
+      CIRCLECI_TEST_GH_HYBRID_ORG_SLUG: gh/gh-oauth-cci-2
+      CIRCLECI_TEST_GH_HYBRID_ORG_NAME: gh-oauth-cci-2
+      CIRCLECI_TEST_GH_HYBRID_PROJECT_ID: 7ffb1015-ec6b-4ac4-b3ec-8a2d1f68944b
+    steps:
+      - acceptance_test
+
+  acceptance-gl-cloud:
+    executor: go
+    environment:
+      CIRCLECI_TEST_VCS_TYPE: gitlab
+      # gitlab-test. Expect "Exercised by this run (0)" in this job's summary
+      # and do not read it as a misconfiguration: all four VCS-gated tests
+      # require a GitHub or Bitbucket integration (see TESTING.md's table), so
+      # zero of them can run against GitLab. The ungated majority of the suite
+      # still does, which is what the ran/skipped counts underneath are for.
+      CIRCLECI_TEST_GL_CLOUD_ORG_ID: eea3a305-6eb2-4a6b-b011-9bd71b88c8d2
+      CIRCLECI_TEST_GL_CLOUD_ORG_SLUG: circleci/WU9ypMiQgrZYrbiHJUGT13
+      CIRCLECI_TEST_GL_CLOUD_ORG_NAME: gitlab-test
+      CIRCLECI_TEST_GL_CLOUD_PROJECT_ID: f8a56969-9788-4a89-a73a-f17793625c7f
+    steps:
+      - acceptance_test
 
   # Runs GoReleaser against a `v*` tag: builds the cross-platform archives,
   # signs the checksum file, and creates the GitHub release the Terraform
@@ -230,6 +522,84 @@ workflows:
             branches:
               ignore: /.*/
 
+  # The acceptance suite, against four real organizations.
+  #
+  # WHY THIS IS NOT PART OF build-and-test, in either position. These jobs talk
+  # to a live installation, so they fail for reasons that have nothing to do
+  # with the commit under test: an API blip, a rate limit, an object a killed
+  # earlier run never destroyed. Putting that failure rate in front of every
+  # push — whether chained after `lint` or run beside it — makes a red build
+  # ambiguous, and a red build nobody trusts is worse than no build. There is
+  # also a hard reason: the context these jobs need is restricted to the labs
+  # branch, so on a pull request they would not skip, they would fail on a
+  # missing credential.
+  #
+  # So they get their own workflow, on its own pipeline, compiled in only when
+  # `run-acceptance-tests` is true. A push cannot set it; a scheduled trigger
+  # or an authenticated API call can (see the setup note at the end of this
+  # file). Nightly is the intended cadence: a live-API regression that appears
+  # without a commit is worth catching within a day, and per-commit precision
+  # is not something these jobs can offer anyway. The same parameter is how a
+  # maintainer runs them on demand after touching a resource — which is the
+  # case that matters most, because it is the one where the failure is
+  # attributable.
+  #
+  # WHY THREE SERIAL GROUPS FOR FOUR JOBS, RATHER THAN ONE OR FOUR. A serial
+  # group serializes pipelines against shared state, so the question is what
+  # state is actually shared. It is per organization: every fixture variable set
+  # on these jobs names one organization, and the destructive resources — org
+  # settings, policy bundles, OIDC claims, groups, projects, runner resource
+  # classes — are all org-scoped. Two runs of the *same* job would fight over
+  # one organization and must not overlap; acceptance-gh-app and
+  # acceptance-gl-cloud share nothing, and collapsing them into one group would
+  # serialize four ~40-minute jobs into a ~160-minute nightly for no safety
+  # gained.
+  #
+  # Hence one group per organization — with the two GitHub jobs that share
+  # organizations sharing a group. acceptance-gh-oauth's org-move test moves a
+  # project into gh-oauth-cci-2, which is acceptance-gh-hybrid's primary
+  # organization: two jobs writing to one org is exactly the overlap a serial
+  # group is for, even though only one of them owns it.
+  #
+  # Collapse all four into one group the moment a test starts writing something
+  # account-wide rather than org-scoped — a shared VCS account, the token's own
+  # user, anything not addressed by an org id. Nothing here does today; the
+  # deliberate omission of CIRCLECI_TEST_GH_OAUTH_ORG_ID from the non-OAuth
+  # jobs (see the note above those jobs) is what keeps that true.
+  acceptance:
+    when: << pipeline.parameters.run-acceptance-tests >>
+    jobs:
+      - acceptance-gh-app:
+          # This context holds CIRCLE_TOKEN and nothing else, and is restricted
+          # to this project and the labs branch. No other context is requested
+          # by these jobs: every other value they need is a fixture identifier,
+          # set in plain sight in the job's environment block above.
+          context: terraform-provider-acc-token
+          # Same idiom as the release job above.
+          filters:
+            branches:
+              only: labs
+          serial-group: << pipeline.project.slug >>/acceptance-gh-app
+      - acceptance-gh-oauth:
+          context: terraform-provider-acc-token
+          filters:
+            branches:
+              only: labs
+          # Shared with acceptance-gh-hybrid on purpose — see above.
+          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth-pair
+      - acceptance-gh-hybrid:
+          context: terraform-provider-acc-token
+          filters:
+            branches:
+              only: labs
+          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth-pair
+      - acceptance-gl-cloud:
+          context: terraform-provider-acc-token
+          filters:
+            branches:
+              only: labs
+          serial-group: << pipeline.project.slug >>/acceptance-gl-cloud
+
 # Setting up releases (moved here from GitHub Actions)
 #
 # The `release` job needs a context named `terraform-provider-release`
@@ -265,20 +635,45 @@ workflows:
 #      will attempt to release the same tag; remove those secrets (or the
 #      workflow) rather than leaving both live any longer than step 2 takes.
 
-# Enabling the acceptance tests against a real organization
+# The acceptance tests against real organizations
 #
-# `task ci:test` sets TF_ACC=1, so the acceptance tests are always attempted.
-# Each one skips with a named-variable message unless its fixture is configured,
-# so the build is green without any credentials — but it is also only exercising
-# the mock-backed tests.
+# `task ci:test` sets TF_ACC=1, so the acceptance tests are always attempted,
+# in build-and-test as much as in the acceptance jobs. Each one skips with a
+# named-variable message unless its fixture is configured, which is why
+# build-and-test is green without any credentials — and also why it only ever
+# exercises the mock-backed tests.
 #
-# To run them for real, create a context holding CIRCLE_TOKEN plus the
-# CIRCLECI_TEST_* variables listed in the README, then add it to the
-# build-and-test job:
+# What supplies the difference is split in two, on purpose:
 #
-#   - build-and-test:
-#       context: <your-context-name>
-#       ...
+#   * ONE SECRET, in a context. terraform-provider-acc-token holds CIRCLE_TOKEN
+#     and nothing else, restricted to this project and to the labs branch.
+#   * EVERY FIXTURE IDENTIFIER, in this file, in each job's environment block.
+#     Org and project UUIDs and slugs are not secrets, and keeping them here
+#     means changing which organization gets written to is a reviewable diff
+#     rather than an invisible edit in the context UI.
 #
-# Do not point these at a production organization: the tests create and delete
-# contexts, projects, groups and runner resource classes.
+# Do not point any of this at a production organization: the tests create and
+# delete organizations, projects, groups, contexts and runner resource classes,
+# and replace policy bundles and OIDC claims wholesale. TESTING.md has the full
+# blast radius.
+#
+# One-time setup for the nightly run
+#
+#   1. Create the context and put CIRCLE_TOKEN in it (an org-admin personal API
+#      token that can reach all four organizations). Restrict it to this
+#      project and to the labs branch.
+#   2. In Project Settings -> Triggers, add a scheduled trigger on the labs
+#      branch with the pipeline parameter run-acceptance-tests set to true.
+#      Nightly, off-peak.
+#   3. To run them on demand, trigger a pipeline with the same parameter:
+#
+#        curl -X POST https://circleci.com/api/v2/project/<slug>/pipeline \
+#          -H "Circle-Token: $CIRCLE_TOKEN" -H 'Content-Type: application/json' \
+#          -d '{"branch":"labs","parameters":{"run-acceptance-tests":true}}'
+#
+# Filling in the rest of the fixtures
+#
+# Each job sets only the identifiers that exist today. Every acceptance test
+# whose fixture is missing prints a skip naming the variable, and the summary
+# step collects those skips into test-reports/vcs-coverage.txt as an artifact —
+# so the artifact of a green run is also the to-do list for the next one.

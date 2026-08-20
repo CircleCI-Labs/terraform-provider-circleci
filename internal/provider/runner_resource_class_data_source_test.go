@@ -17,7 +17,7 @@ import (
 
 func TestAccRunnerResourceClassDataSource(t *testing.T) {
 	organizationId := testOrgID(t)
-	resourceClass := fmt.Sprintf("%s/acc-test-runner-ds", testRunnerNamespace(t))
+	resourceClass := testUniqueRunnerResourceClass(t, "acc-test-runner-ds")
 	description := "Acceptance test runner resource class data source"
 	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -60,9 +60,15 @@ func TestAccRunnerResourceClassDataSource(t *testing.T) {
 	})
 }
 
+// The absent resource class is named uniquely per run for the same reason the
+// created ones are, inverted: this test's assertion is that the name is *not*
+// there, and a fixed name is one hand-created resource class away from making
+// the test fail for a reason that has nothing to do with the provider. A
+// random tail makes absence a property of the name rather than of the account's
+// history.
 func TestAccRunnerResourceClassDataSourceNotFound(t *testing.T) {
 	organizationId := testOrgID(t)
-	resourceClass := fmt.Sprintf("%s/does-not-exist-acc", testRunnerNamespace(t))
+	resourceClass := testUniqueRunnerResourceClass(t, "does-not-exist-acc")
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,

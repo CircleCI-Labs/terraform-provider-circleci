@@ -122,7 +122,7 @@ it carries the organization-type requirement instead.
 
 > [!IMPORTANT]
 > **Every column here is reasoned, not measured.** There is no per-integration CI
-> matrix. `TESTING.md` enumerates the seven integration types and what each one
+> matrix. `TESTING.md` enumerates the eight integration types and what each one
 > is for; the tests whose result depends on `CIRCLECI_TEST_VCS_TYPE` now skip by
 > name when it names an unsupported integration (see "What a run covers" in
 > `TESTING.md`), but a single CI job still only ever configures one integration
@@ -326,8 +326,9 @@ Authentication:
 ### Fixture identifiers
 
 `CIRCLECI_TEST_VCS_TYPE` picks which integration is active for this run: one
-of `github_app`, `github_oauth`, `gitlab`, `gitlab_selfmanaged`, `bitbucket`,
-`github_server`. Every other fixture variable is named
+of `github_app`, `github_oauth`, `github_hybrid`, `gitlab`,
+`gitlab_selfmanaged`, `bitbucket`, `github_server`. Every other fixture
+variable is named
 `CIRCLECI_TEST_<KEY>_<SUFFIX>`, where `KEY` comes from the table below and
 `SUFFIX` is the identical set for every key. That uniformity is what lets most
 helpers (`testOrgID`, `testProjectID`, ...) resolve the active integration's
@@ -338,10 +339,20 @@ reads a GitHub App fixture in one run and a Bitbucket fixture in another.
 | --- | --- |
 | `github_app` | `GH_APP` |
 | `github_oauth` | `GH_OAUTH` |
+| `github_hybrid` | `GH_HYBRID` |
 | `github_server` | `GH_SERVER` |
 | `gitlab` | `GL_CLOUD` |
 | `gitlab_selfmanaged` | `GL_SM` |
 | `bitbucket` | `BB_CLOUD` |
+
+`github_hybrid` is a GitHub OAuth organization that *also* has a GitHub App
+installation, and it is a distinct configuration rather than a second
+`github_oauth` fixture: `GET
+/api/v2/github-app/organization/{id}/installation` answers 200 for such an
+organization and 404 for an OAuth-only one. Its projects are still OAuth
+projects (`gh/<org>` slugs), so project-level behaviour matches
+`github_oauth`; what the key buys is the ability to point the GitHub App
+routes at an organization whose projects are not GitHub App projects.
 
 Suffixes, and what each identifies:
 

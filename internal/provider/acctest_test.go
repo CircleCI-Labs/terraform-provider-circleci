@@ -4,6 +4,8 @@
 package provider
 
 import (
+	"crypto/rand"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -80,9 +82,20 @@ func testAccEnv(t *testing.T, name, description string) string {
 // (CIRCLECI_TEST_<KEY>_<SUFFIX>). The suffix set is identical for every key —
 // that uniformity is the point: giving a future integration a row here is
 // the only code change needed for every dynamic helper below to resolve it.
+//
+// github_hybrid is not a duplicate of github_oauth. An organization connected
+// by GitHub OAuth may *also* carry a GitHub App installation, and the two are
+// distinguishable from outside: GET
+// /api/v2/github-app/organization/{id}/installation answers 200 for such an
+// organization and 404 for an OAuth-only one. Every project in it is still an
+// OAuth project — the slug is `gh/<org>`, and project-level behaviour matches
+// github_oauth — so what the extra key buys is a fixture for the github-app
+// routes on an organization whose projects are not GitHub App projects, a
+// combination neither GH_OAUTH nor GH_APP can express.
 var integrationKeys = map[string]string{
 	"github_app":         "GH_APP",
 	"github_oauth":       "GH_OAUTH",
+	"github_hybrid":      "GH_HYBRID",
 	"github_server":      "GH_SERVER",
 	"gitlab":             "GL_CLOUD",
 	"gitlab_selfmanaged": "GL_SM",
@@ -359,15 +372,37 @@ func testRunnerNamespace(t *testing.T) string {
 	return testActiveEnv(t, "RUNNER_NAMESPACE", "runner namespace of the primary test organization for the active integration")
 }
 
+// testUniqueRunnerResourceClass returns a "<namespace>/<prefix>-<random>"
+// resource class name for the active integration's runner namespace, unique to
+// this run.
+//
+// Unique per run, not fixed, because CreateResourceClass answers HTTP 409 for a
+// duplicate (see internal/circleci/runner.go). A resource class left behind by
+// a run that died between create and destroy therefore makes *every* later run
+// of the same test fail on the conflict, and the failure names the API's
+// complaint rather than the leftover object — indistinguishable, from the log,
+// from the provider having broken. The prefix keeps the leftovers identifiable
+// as this suite's; the random tail is what stops them blocking the next run.
+//
+// The random part is rand.Text(), which is [A-Z2-7] and so is accepted by the
+// class half of the resource-class grammar (see runnerResourceClassPattern:
+// mixed case is fine after the "/", and there is no "." in it to trip the
+// no-dots rule).
+func testUniqueRunnerResourceClass(t *testing.T, prefix string) string {
+	t.Helper()
+
+	return fmt.Sprintf("%s/%s-%s", testRunnerNamespace(t), prefix, rand.Text())
+}
+
 // acceptanceVCSTypes lists every value CIRCLECI_TEST_VCS_TYPE may take. It
 // mirrors the "CircleCI org slug shape" table in TESTING.md, and every entry
 // here must have a matching row in integrationKeys above — see
 // TestIntegrationKeysCoversEveryVCSType. CircleCI Server is deliberately not
-// one of these six: it is a separate axis (deployment, selected by
+// one of these seven: it is a separate axis (deployment, selected by
 // CIRCLE_DEPLOYMENT), orthogonal to which VCS an organization is connected
-// to, and every one of these six can in principle run on it.
+// to, and every one of these seven can in principle run on it.
 var acceptanceVCSTypes = []string{
-	"github_app", "github_oauth", "gitlab", "gitlab_selfmanaged", "bitbucket", "github_server",
+	"github_app", "github_oauth", "github_hybrid", "gitlab", "gitlab_selfmanaged", "bitbucket", "github_server",
 }
 
 // testVCSType returns which VCS integration the configured fixtures belong
@@ -414,6 +449,7 @@ func TestActiveIntegrationKey(t *testing.T) {
 	}{
 		{"github_app", "GH_APP", true},
 		{"github_oauth", "GH_OAUTH", true},
+		{"github_hybrid", "GH_HYBRID", true},
 		{"github_server", "GH_SERVER", true},
 		{"gitlab", "GL_CLOUD", true},
 		{"gitlab_selfmanaged", "GL_SM", true},
@@ -459,6 +495,41 @@ func TestActiveEnvResolvesFromActiveIntegration(t *testing.T) {
 		t.Errorf("testOrgID() = %q with CIRCLECI_TEST_VCS_TYPE=github_app, want %q (CIRCLECI_TEST_GH_APP_ORG_ID)",
 			got, "app-org-id")
 	}
+
+	// github_hybrid is the arm most at risk of being "simplified" into an alias
+	// for GH_OAUTH, because a hybrid organization *is* OAuth-connected. It must
+	// resolve to its own fixtures: the whole reason the key exists is that the
+	// two organizations differ (one carries a GitHub App installation, the other
+	// does not), so reading the OAuth org's identifiers under github_hybrid would
+	// silently test the wrong organization.
+	//
+	// The subtest is not decoration. testActiveEnv reports an unrecognised
+	// CIRCLECI_TEST_VCS_TYPE by *skipping*, so calling testOrgID directly here
+	// would make a missing integrationKeys row skip this test rather than fail
+	// it — the assertion below would never run and the run would still be green.
+	// Asserting that code after the call was reached is what turns that skip
+	// into a failure.
+	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_hybrid")
+	t.Setenv("CIRCLECI_TEST_GH_HYBRID_ORG_ID", "hybrid-org-id")
+
+	resolved := ""
+	ranPastTheSkip := false
+
+	t.Run("github_hybrid", func(t *testing.T) {
+		resolved = testOrgID(t)
+		ranPastTheSkip = true
+	})
+
+	if !ranPastTheSkip {
+		t.Error("testOrgID() skipped with CIRCLECI_TEST_VCS_TYPE=github_hybrid, which means " +
+			"integrationKeys has no github_hybrid row and every dynamic helper is unresolvable there")
+	}
+
+	if ranPastTheSkip && resolved != "hybrid-org-id" {
+		t.Errorf("testOrgID() = %q with CIRCLECI_TEST_VCS_TYPE=github_hybrid, want %q "+
+			"(CIRCLECI_TEST_GH_HYBRID_ORG_ID); resolving to the GH_OAUTH value instead would mean "+
+			"github_hybrid is aliased to the OAuth-only organization", resolved, "hybrid-org-id")
+	}
 }
 
 // TestPlaceholderValueSkipsLikeUnset proves the placeholder sentinel: a
@@ -499,5 +570,50 @@ func TestRealValuePassesThroughUnchanged(t *testing.T) {
 
 	if got != "a4f1c2e0-real-uuid" {
 		t.Errorf("testAccEnv() = %q, want the real value unchanged", got)
+	}
+}
+
+// TestUniqueRunnerResourceClassIsUniquePerCallAndValid pins both halves of
+// testUniqueRunnerResourceClass, because both are load-bearing and neither is
+// observable from this repository any other way — every test that uses the
+// helper needs a live CircleCI account with a runner namespace to run at all.
+//
+// Unique: a runner resource class is the one acceptance fixture in this package
+// whose create genuinely conflicts. CreateResourceClass answers HTTP 409 for a
+// duplicate (internal/circleci/runner.go), so the fixed names these tests used
+// to build ("<namespace>/acc-test-runner" and friends) meant that a single run
+// interrupted between create and destroy left every later run failing on a
+// conflict with its own leftover — reported as an API error naming neither the
+// leftover nor the test that leaked it.
+//
+// Valid: the randomised part has to survive the provider's own plan-time check.
+// rand.Text() is [A-Z2-7], which the class half of runnerResourceClassPattern
+// accepts (mixed case is fine after the "/", and there is no "." in it) — but
+// that is a property of an implementation detail of the standard library, so it
+// is asserted rather than assumed. If it ever stopped holding, every runner
+// acceptance test would fail in the plan with "invalid resource_class format"
+// and nothing would say why.
+func TestUniqueRunnerResourceClassIsUniquePerCallAndValid(t *testing.T) {
+	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
+	t.Setenv("CIRCLECI_TEST_GH_APP_RUNNER_NAMESPACE", "acc-ns")
+
+	first := testUniqueRunnerResourceClass(t, "acc-test-runner")
+	second := testUniqueRunnerResourceClass(t, "acc-test-runner")
+
+	if first == second {
+		t.Errorf("testUniqueRunnerResourceClass returned %q twice; a fixed resource class name makes "+
+			"every run after an interrupted one fail with HTTP 409 against its own leftover", first)
+	}
+
+	for _, name := range []string{first, second} {
+		if !strings.HasPrefix(name, "acc-ns/acc-test-runner-") {
+			t.Errorf("testUniqueRunnerResourceClass() = %q, want it in the active integration's "+
+				"namespace with the given prefix, so leftovers are identifiable as this suite's", name)
+		}
+
+		if !runnerResourceClassPattern.MatchString(name) {
+			t.Errorf("testUniqueRunnerResourceClass() = %q, which the provider's own plan-time "+
+				"resource_class check rejects (%s)", name, runnerResourceClassFormatMessage)
+		}
 	}
 }

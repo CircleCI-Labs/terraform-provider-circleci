@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"regexp"
@@ -17,10 +18,21 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
+// The resource class here is unique per run, and no longer the same literal
+// name TestAccRunnerResourceClassResource uses. Those two tests were creating
+// "<namespace>/acc-test-runner" each: they never overlap in a single sequential
+// run, but one of them dying between create and destroy left the other failing
+// on a 409 for a resource class it did not create — a leak in one test
+// surfacing as a permanent failure in another.
+//
+// The nickname is randomised too. A duplicate nickname is not a conflict (a
+// token is keyed on its own id), so this one is about attribution rather than
+// collision: a token left behind by an interrupted run can be told apart from
+// one belonging to a live run.
 func TestAccRunnerTokenResource(t *testing.T) {
 	organizationId := testOrgID(t)
-	resourceClass := fmt.Sprintf("%s/acc-test-runner", testRunnerNamespace(t))
-	nickname := "acc-test-token"
+	resourceClass := testUniqueRunnerResourceClass(t, "acc-test-runner-token")
+	nickname := fmt.Sprintf("acc-test-token-%s", rand.Text())
 	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 	resource.Test(t, resource.TestCase{
