@@ -427,3 +427,170 @@ func TestProjectSettingsRejectsDotSegments(t *testing.T) {
 		t.Fatalf("made %d calls, want 4 (get+update for each of the two legitimate argument sets): %+v", len(*calls), *calls)
 	}
 }
+
+// TestUpdateProjectSettingsRefusesToEnableForkSecretsOnStandalone is the
+// regression test for the second unwritable-but-documented field on this route,
+// and it is worse than oss.
+//
+// MEASURED OVER THE NETWORK against the live API, not through a fake:
+//
+//	PATCH /api/v2/project/circleci/<org>/<project>/settings
+//	      {"advanced":{"forks_receive_secret_env_vars":true}}
+//	→ 403  {"message":"Permission denied."}
+//
+// on three separate standalone organizations — one backed by the GitHub App, one
+// by GitLab, and one repo-less organization created by the token making the
+// request, so it is not a role problem. The identical body against a classic
+// organization ("gh/…" or "github/…") answers 200, measured on two GitHub OAuth
+// organizations.
+//
+// Two measurements make this a pre-flight guard rather than an after-the-fact
+// one, and this test pins both:
+//
+//   - The refusal is of the VALUE, not of a transition: a no-op write of true on
+//     a project whose setting is already true still answers 403.
+//   - The 403 is NOT atomic. A body carrying
+//     {"forks_receive_secret_env_vars":true,"autocancel_builds":true} answered 403
+//     and left autocancel_builds true. So a request that goes out changes the
+//     project and then reports failure, and a Terraform Create that fails writes
+//     no state — leaving those changes behind, untracked and unrecoverable.
+//
+// The assertion is therefore that NO REQUEST IS MADE AT ALL. A test that only
+// checked the error would pass just as well with the guard moved after the
+// request, which is precisely the behaviour that must not ship.
+func TestUpdateProjectSettingsRefusesToEnableForkSecretsOnStandalone(t *testing.T) {
+	t.Parallel()
+
+	srv, calls := newProjectSettingsServer(t, projectSettingsResponse)
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	enabled := true
+	autocancel := true
+
+	_, err := c.UpdateProjectSettings(context.Background(), "circleci", "T4ByWwp8uucrumRKY8wEmp", "B1bv3rjTroryDXCWBp32Y6",
+		circleci.ProjectSettings{
+			ForksReceiveSecretEnvVars: &enabled,
+			AutocancelBuilds:          &autocancel,
+		})
+
+	if err == nil {
+		t.Fatal("UpdateProjectSettings succeeded when asked to enable forks_receive_secret_env_vars on a " +
+			"standalone organization's project; the live API answers 403 after writing the other " +
+			"settings in the same request")
+	}
+	if !errors.Is(err, circleci.ErrCannotEnableForkSecrets) {
+		t.Errorf("error = %v, want it to wrap ErrCannotEnableForkSecrets so a caller can recognise "+
+			"this case without matching on the message", err)
+	}
+	if !strings.Contains(err.Error(), "forks_receive_secret_env_vars") {
+		t.Errorf("error %q does not name the setting that cannot be written", err)
+	}
+
+	// The whole point: nothing reached the wire, so autocancel_builds was not
+	// written on the way to a failure.
+	if len(*calls) != 0 {
+		t.Errorf("made %d requests, want none: the route applies every other field in the body "+
+			"before answering 403, so the only safe place to stop is before the request. Calls: %+v",
+			len(*calls), *calls)
+	}
+}
+
+// TestUpdateProjectSettingsAllowsForkSecretsOffOnStandalone is the other half:
+// the guard must be about the value true, not about the field.
+//
+// Measured: PATCH {"advanced":{"forks_receive_secret_env_vars":false}} against a
+// standalone project answers 200 and the value changes. A guard that rejected the
+// field outright would make the setting unmanageable on exactly the
+// organizations where turning it OFF is the security-relevant direction.
+func TestUpdateProjectSettingsAllowsForkSecretsOffOnStandalone(t *testing.T) {
+	t.Parallel()
+
+	const off = `{"advanced":{"forks_receive_secret_env_vars":false}}`
+
+	srv, calls := newProjectSettingsServer(t, off)
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	disabled := false
+
+	updated, err := c.UpdateProjectSettings(context.Background(), "circleci", "T4ByWwp8uucrumRKY8wEmp", "B1bv3rjTroryDXCWBp32Y6",
+		circleci.ProjectSettings{ForksReceiveSecretEnvVars: &disabled})
+	if err != nil {
+		t.Fatalf("UpdateProjectSettings returned error: %v", err)
+	}
+
+	if updated.ForksReceiveSecretEnvVars == nil || *updated.ForksReceiveSecretEnvVars {
+		t.Errorf("forks_receive_secret_env_vars = %v, want false", updated.ForksReceiveSecretEnvVars)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("made %d requests, want 1", len(*calls))
+	}
+}
+
+// TestUpdateProjectSettingsAllowsForkSecretsOnClassicOrganization keeps the
+// guard from spreading to the organizations where the write works.
+//
+// Measured over the network: the same body that answers 403 on "circleci/…"
+// answers 200 on "gh/…" and on "github/…" — two separate GitHub OAuth
+// organizations. A guard keyed on the field rather than on the slug's VCS
+// segment would break every classic-organization configuration that manages it.
+func TestUpdateProjectSettingsAllowsForkSecretsOnClassicOrganization(t *testing.T) {
+	t.Parallel()
+
+	const on = `{"advanced":{"forks_receive_secret_env_vars":true}}`
+
+	enabled := true
+
+	for _, vcsType := range []string{"gh", "github", "bb", "bitbucket"} {
+		t.Run(vcsType, func(t *testing.T) {
+			t.Parallel()
+
+			srv, calls := newProjectSettingsServer(t, on)
+			c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+			if _, err := c.UpdateProjectSettings(context.Background(), vcsType, "acme", "repo",
+				circleci.ProjectSettings{ForksReceiveSecretEnvVars: &enabled}); err != nil {
+				t.Fatalf("UpdateProjectSettings returned error for a %s project: %v", vcsType, err)
+			}
+			if len(*calls) != 1 {
+				t.Errorf("made %d requests for a %s project, want 1: the write is accepted there",
+					len(*calls), vcsType)
+			}
+		})
+	}
+}
+
+// TestUpdateProjectSettingsExplainsAForbiddenForkSecretsWrite covers the case
+// the pre-flight guard cannot predict: a CLASSIC organization answering 403,
+// which happens for a token that is not an organization administrator on a
+// project with write_settings_requires_admin enabled.
+//
+// Bare "Permission denied." names nothing. The wrapped message has to name the
+// setting and warn that the other settings in the request may already have been
+// written, because on this route they are.
+func TestUpdateProjectSettingsExplainsAForbiddenForkSecretsWrite(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Permission denied."}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	enabled := true
+
+	_, err := c.UpdateProjectSettings(context.Background(), "gh", "acme", "repo",
+		circleci.ProjectSettings{ForksReceiveSecretEnvVars: &enabled})
+	if err == nil {
+		t.Fatal("UpdateProjectSettings returned no error for a 403 response")
+	}
+
+	for _, want := range []string{"forks_receive_secret_env_vars", "already have been written"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q; a bare \"Permission denied.\" gives a "+
+				"practitioner nothing to act on", err, want)
+		}
+	}
+}

@@ -477,13 +477,21 @@ func (a *fakeProjectAPI) handlePatchSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	applySettingsPatch(current, advanced)
+	denied := applySettingsPatchForSlug(slugVCSType(slug), current, advanced)
 
 	if a.branchOverridesResponse != nil {
 		current["pr_only_branch_overrides"] = *a.branchOverridesResponse
 	}
 
 	a.settings[slug] = current
+
+	if denied {
+		// The other settings above are already written. See
+		// applySettingsPatchForSlug.
+		a.write(w, http.StatusForbidden, map[string]any{"message": "Permission denied."})
+
+		return
+	}
 
 	a.write(w, http.StatusOK, map[string]any{"advanced": current})
 }
@@ -535,7 +543,97 @@ func settingsPatchBody(raw map[string]any) (advanced map[string]any, message str
 		}
 	}
 
+	// The branch-override list is capped, and the cap is enforced by the same
+	// schema-validation layer as the unknown-field checks above, so it rejects the
+	// whole request and writes nothing — verified over the network against the
+	// live API:
+	//
+	//	PATCH … {"advanced":{"pr_only_branch_overrides":[ 100 branches ]}}  → 200
+	//	PATCH … {"advanced":{"pr_only_branch_overrides":[ 101 branches ]}}
+	//	→ 400  {"message":"Field 'pr_only_branch_overrides' only supports up to 100 branches."}
+	//
+	// The resource documents the limit but nothing enforced or tested it, so a
+	// configuration over the cap failed only against a real installation.
+	if list, isList := advanced["pr_only_branch_overrides"].([]any); isList && len(list) > settingsBranchOverrideLimit {
+		return advanced, fmt.Sprintf(
+			"Field 'pr_only_branch_overrides' only supports up to %d branches.", settingsBranchOverrideLimit,
+		), false
+	}
+
 	return advanced, "", true
+}
+
+// settingsBranchOverrideLimit is the most branches pr_only_branch_overrides
+// accepts. Network-measured: 100 is accepted, 101 is rejected.
+const settingsBranchOverrideLimit = 100
+
+// forkSecretsSettingKey is the one setting the route refuses to enable on a
+// standalone organization's project.
+const forkSecretsSettingKey = "forks_receive_secret_env_vars"
+
+// standaloneForkSecretsDenied reports whether the settings route refuses this
+// PATCH body with 403 "Permission denied." because it asks to enable
+// forks_receive_secret_env_vars on a project in a standalone organization.
+//
+// Network-measured against the live API, on three separate standalone
+// organizations (GitHub App backed, GitLab backed, and a repo-less one created
+// by the token making the request):
+//
+//	PATCH /api/v2/project/circleci/<org>/<project>/settings
+//	      {"advanced":{"forks_receive_secret_env_vars":true}}
+//	→ 403  {"message":"Permission denied."}
+//
+// Refused even when the current value is already true, so it is the value that
+// is rejected and not the transition. The same body against a classic
+// organization ("gh/…" or "github/…") answers 200 — measured on two GitHub OAuth
+// organizations. Both fakes used to accept it unconditionally, which is exactly
+// the shape of wrong belief that let the oss field ship.
+func standaloneForkSecretsDenied(vcsType string, advanced map[string]any) bool {
+	if vcsType != circleci.StandaloneSlugVCSType {
+		return false
+	}
+
+	enabled, isBool := advanced[forkSecretsSettingKey].(bool)
+
+	return isBool && enabled
+}
+
+// applySettingsPatchForSlug applies a PATCH body the way the route does for a
+// project in the organization class the slug's VCS segment names, and reports
+// whether the route then answers 403 rather than 200.
+//
+// The order matters and is the finding: the 403 is NOT atomic. Every other field
+// in the body is written and keeps its new value; only
+// forks_receive_secret_env_vars is left alone. Measured — a body carrying
+// {"forks_receive_secret_env_vars":true,"autocancel_builds":true} against a
+// standalone project answered 403 and left autocancel_builds true. Modelling it
+// as an ordinary rejection that writes nothing would hide the reason
+// circleci.UpdateProjectSettings refuses to send the field at all.
+func applySettingsPatchForSlug(vcsType string, current, advanced map[string]any) (denied bool) {
+	denied = standaloneForkSecretsDenied(vcsType, advanced)
+
+	if denied {
+		// A copy, so the body a test recorded still shows what was actually sent.
+		applied := make(map[string]any, len(advanced))
+		for key, value := range advanced {
+			if key == forkSecretsSettingKey {
+				continue
+			}
+			applied[key] = value
+		}
+		advanced = applied
+	}
+
+	applySettingsPatch(current, advanced)
+
+	return denied
+}
+
+// slugVCSType returns the VCS segment of a "vcs/org/project" slug.
+func slugVCSType(slug string) string {
+	vcsType, _, _ := strings.Cut(slug, "/")
+
+	return vcsType
 }
 
 // applySettingsPatch merges an "advanced" PATCH body into the settings a fake
@@ -753,4 +851,129 @@ func (a *fakeProjectAPI) onlyPatch(t *testing.T) map[string]any {
 	}
 
 	return patches[0]
+}
+
+// TestSettingsFakesRefuseEnablingForkSecretsOnStandalone guards the guard for the
+// second unwritable field on this route, the way
+// TestSettingsFakesIgnoreAnEmptyBranchOverrideList does for the branch list.
+//
+// Both fakes used to accept forks_receive_secret_env_vars: true from any project
+// and store it, which is a wrong belief about the API: measured over the network,
+// a standalone organization's project answers 403 "Permission denied." for that
+// write and a classic organization's project answers 200. See
+// standaloneForkSecretsDenied for the full measurement.
+//
+// The subtle half is the partial write, and it is the half a fake gets wrong by
+// default: the route applies every OTHER field in the body and only then refuses.
+// A fake that rejected the request wholesale would make
+// circleci.UpdateProjectSettings's pre-flight guard look like an over-reaction
+// instead of the only way to avoid leaving changes behind.
+func TestSettingsFakesRefuseEnablingForkSecretsOnStandalone(t *testing.T) {
+	t.Parallel()
+
+	t.Run("standalone: refused, and every other field in the body is still written", func(t *testing.T) {
+		t.Parallel()
+
+		current := map[string]any{"forks_receive_secret_env_vars": false, "autocancel_builds": false}
+		denied := applySettingsPatchForSlug("circleci", current, map[string]any{
+			"forks_receive_secret_env_vars": true,
+			"autocancel_builds":             true,
+		})
+
+		if !denied {
+			t.Error("applySettingsPatchForSlug accepted forks_receive_secret_env_vars: true on a " +
+				"standalone project; the real route answers 403 Permission denied.")
+		}
+		if current["forks_receive_secret_env_vars"] != false {
+			t.Errorf("forks_receive_secret_env_vars = %v, want it left at false: the route refuses "+
+				"the field and never writes it", current["forks_receive_secret_env_vars"])
+		}
+		if current["autocancel_builds"] != true {
+			t.Errorf("autocancel_builds = %v, want true. The 403 is not atomic — measured: a body "+
+				"carrying both fields answered 403 and left autocancel_builds true. A fake that "+
+				"rolls the whole body back hides why the client refuses to send the request at all",
+				current["autocancel_builds"])
+		}
+	})
+
+	t.Run("standalone: turning it off is accepted", func(t *testing.T) {
+		t.Parallel()
+
+		current := map[string]any{"forks_receive_secret_env_vars": true}
+		if denied := applySettingsPatchForSlug("circleci", current, map[string]any{
+			"forks_receive_secret_env_vars": false,
+		}); denied {
+			t.Error("applySettingsPatchForSlug refused forks_receive_secret_env_vars: false on a " +
+				"standalone project; measured, that write answers 200 and takes effect — which is " +
+				"what makes the setting one-way rather than unwritable")
+		}
+		if current["forks_receive_secret_env_vars"] != false {
+			t.Errorf("forks_receive_secret_env_vars = %v, want false", current["forks_receive_secret_env_vars"])
+		}
+	})
+
+	for _, vcsType := range []string{"gh", "github", "bb", "bitbucket"} {
+		t.Run("classic "+vcsType+": enabling it is accepted", func(t *testing.T) {
+			t.Parallel()
+
+			current := map[string]any{"forks_receive_secret_env_vars": false}
+			if denied := applySettingsPatchForSlug(vcsType, current, map[string]any{
+				"forks_receive_secret_env_vars": true,
+			}); denied {
+				t.Errorf("applySettingsPatchForSlug refused forks_receive_secret_env_vars: true on a "+
+					"%s project; measured over the network, a classic organization answers 200", vcsType)
+			}
+			if current["forks_receive_secret_env_vars"] != true {
+				t.Errorf("forks_receive_secret_env_vars = %v, want true", current["forks_receive_secret_env_vars"])
+			}
+		})
+	}
+}
+
+// TestSettingsFakesEnforceTheBranchOverrideCap keeps both fakes honest about the
+// one numeric limit this route has.
+//
+// Measured over the network: 100 branches answer 200 and 101 answer
+// 400 "Field 'pr_only_branch_overrides' only supports up to 100 branches." The
+// resource's documentation stated the limit and nothing enforced it, so a
+// configuration over the cap passed every test and failed only against a real
+// installation. Rejection is at the schema layer, alongside the unknown-field
+// checks, so nothing in the request is written.
+func TestSettingsFakesEnforceTheBranchOverrideCap(t *testing.T) {
+	t.Parallel()
+
+	branches := func(n int) []any {
+		list := make([]any, 0, n)
+		for i := range n {
+			list = append(list, fmt.Sprintf("branch-%d", i))
+		}
+
+		return list
+	}
+
+	t.Run("100 branches are accepted", func(t *testing.T) {
+		t.Parallel()
+
+		if _, message, ok := settingsPatchBody(map[string]any{
+			"advanced": map[string]any{"pr_only_branch_overrides": branches(settingsBranchOverrideLimit)},
+		}); !ok {
+			t.Errorf("settingsPatchBody rejected %d branches with %q; the live API accepts exactly that many",
+				settingsBranchOverrideLimit, message)
+		}
+	})
+
+	t.Run("101 branches are rejected, naming the limit", func(t *testing.T) {
+		t.Parallel()
+
+		_, message, ok := settingsPatchBody(map[string]any{
+			"advanced": map[string]any{"pr_only_branch_overrides": branches(settingsBranchOverrideLimit + 1)},
+		})
+		if ok {
+			t.Fatalf("settingsPatchBody accepted %d branches; the live API answers 400",
+				settingsBranchOverrideLimit+1)
+		}
+		if !strings.Contains(message, "only supports up to 100 branches") {
+			t.Errorf("rejection message = %q, want the API's own wording so a caller sees the limit", message)
+		}
+	})
 }

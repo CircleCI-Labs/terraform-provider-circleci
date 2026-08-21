@@ -16,7 +16,7 @@ Manages the advanced settings of an existing CircleCI project: the toggles found
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | Yes. The route is served by the long-standing v2 API, which a Server installation's gateway forwards `/api` to by default. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. See the CircleCI Server note on the provider index page. |
 | **API** | `GET` and `PATCH /api/v2/project/{project-slug}/settings` |
-| **Organization type** | Any. GitLab, GitHub App and GitHub Enterprise Server projects address the slug as `circleci/{org-id}/{project-id}`. **Individual toggles vary by VCS integration** — `build_fork_prs`, `oss` and `set_github_status` are not uniformly available; see the compatibility matrix in the README. |
+| **Organization type** | Any. GitLab, GitHub App and GitHub Enterprise Server projects address the slug as `circleci/{org-id}/{project-id}`. Every toggle below except `forks_receive_secret_env_vars` and `oss` was **measured writable in both directions** on four organization classes — a classic GitHub OAuth organization, a standalone organization backed by the GitHub App, a standalone organization backed by GitLab, and a standalone organization with no VCS integration at all. `forks_receive_secret_env_vars` cannot be *enabled* on a standalone organization, and `oss` cannot be written anywhere; see Notes. |
 | **Token** | A personal API token with permission to change the project's settings. |
 
 ## `circleci_project_settings` or `circleci_project`?
@@ -50,9 +50,9 @@ This resource only ever writes what you name, so what a project *starts* from ma
 | `build_fork_prs` | `false` |
 | `build_prs_only` | `false` |
 | `disable_ssh` | `false`, unless an organization-level value says otherwise |
-| `forks_receive_secret_env_vars` | **`true` on a private project**, `false` on a public one |
-| `set_github_status` | **`true`** |
-| `setup_workflows` | **`true`** for projects created after 2023-12-01 |
+| `forks_receive_secret_env_vars` | **`true`** on a private project, `false` on a public one. Measured `true` on a project read moments after it was created, and on every private fixture project checked. |
+| `set_github_status` | **`true`** — measured on a project read moments after it was created, and on four fixture projects across four organization classes |
+| `setup_workflows` | **`true`** — measured the same way; CircleCI documents this as applying to projects created after 2023-12-01 |
 | `write_settings_requires_admin` | `false`, unless an organization-level value says otherwise |
 | `pr_only_branch_overrides` | the repository's default branch, for example `["main"]` |
 | `oss` | derived from the repository, and read-only |
@@ -109,6 +109,8 @@ Leave this unset to let CircleCI manage it; the provider only writes settings th
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
 - `forks_receive_secret_env_vars` (Boolean) Run forked pull requests with this project's configuration, environment variables and secrets. The build cache is also shared between the original repository and all forks, so enabling this exposes both to anyone who can open a pull request.
 
+~> **Cannot be enabled on a standalone organization.** For a project whose slug begins `circleci/`, setting this to `true` is rejected at plan time, because CircleCI's API answers `403 Permission denied.` for that write — even when the setting is already `true` — and applies every other setting in the same request before refusing. A project's default is `true`, so on those organizations the setting is effectively one-way: `false` is accepted and cannot be undone through the API. Classic organizations (`gh/…`, `bb/…`) accept both values.
+
 Leave this unset to let CircleCI manage it; the provider only writes settings that appear in the configuration.
 - `pr_only_branch_overrides` (Set of String) Branches that always trigger a build, even when `build_prs_only` is enabled. The set replaces whatever CircleCI currently holds. Leave it unset to leave the project's existing overrides alone. CircleCI accepts at most 100 branches. Order is not significant: CircleCI does not preserve the order branches are sent in.
 
@@ -143,6 +145,7 @@ The import records only the slug and leaves every setting `null`, so the first p
 
 - **`oss` is read-only.** CircleCI reports it but the settings API does not accept it: a request carrying it answers `400 Unexpected field 'advanced.oss'.` and is rejected in full, so a single unwritable field would fail every write. CircleCI derives the value from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application. This resource reports it and never writes it.
 - **`build_fork_prs = true` requires `forks_receive_secret_env_vars` to be set explicitly.** The provider reports an error at validate time otherwise, because the unset default is **`true`** on a private project: fork pull requests would receive the project's environment variables, secrets and build cache, so anyone who can open one could read them.
-- **`pr_only_branch_overrides` replaces the whole set.** Setting it to `[]` clears every override; leaving it unset leaves the project's existing overrides alone. CircleCI accepts at most 100 branches. It is a set rather than a list because CircleCI does not preserve the order branches are sent in — as a list it produced a plan that never converged.
+- **`pr_only_branch_overrides` replaces the whole set, and cannot be cleared.** Leaving it unset leaves the project's existing overrides alone. Setting it to `[]` is rejected at plan time: CircleCI accepts an empty list with `200` and silently keeps the branches already in force, so there is no request that clears the list. Remove the attribute from the configuration instead. CircleCI accepts at most 100 branches — 101 answers `400 Field 'pr_only_branch_overrides' only supports up to 100 branches.` It is a set rather than a list because CircleCI does not preserve the order branches are sent in — as a list it produced a plan that never converged.
+- **`forks_receive_secret_env_vars` cannot be enabled on a standalone organization.** For a project whose slug begins `circleci/`, asking for `true` is rejected at plan time, because the API answers `403 Permission denied.` for that write — even when the setting is already `true` — and, unlike the `oss` rejection, applies every other setting in the same request before refusing. Since the default is `true`, the setting is effectively one-way there: `false` is accepted and cannot be undone through the API. Classic organizations (`gh/…`, `bb/…`) accept both values.
 - **`write_settings_requires_admin = true` can lock the provider out** of further changes if its token does not belong to an organization administrator.
 - **`terraform destroy` writes nothing.** Settings cannot be deleted or reset, so destroying this resource only drops it from state and the project keeps its current values.
