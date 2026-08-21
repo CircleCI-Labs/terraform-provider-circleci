@@ -81,6 +81,18 @@ func TestAccRunnerResourceClassDataSourceNotFound(t *testing.T) {
 	})
 }
 
+// TestAccRunnerResourceClassDataSourceInvalidFormat used to expect "Invalid
+// resource_class format" — the error Read produces from its own slash check —
+// but that check is unreachable through this data source today. Its
+// resource_class attribute carries runnerResourceClassPattern (see the Schema
+// method's comment: "the stricter, earlier check"), which requires exactly
+// one "/" and so already rejects "noslash" during plan, before Read ever
+// runs. That earlier belief was wrong even against the fake — nothing here
+// needed a live API to find it — see
+// TestRunnerResourceClassFormatIsRejectedEverywhere/no_namespace, which
+// already covers the same input against every resource-class attribute
+// including this one without touching the network. This asserts the real,
+// current behavior: a plan-time validation failure.
 func TestAccRunnerResourceClassDataSourceInvalidFormat(t *testing.T) {
 	organizationId := testOrgID(t)
 	resource.Test(t, resource.TestCase{
@@ -89,7 +101,7 @@ func TestAccRunnerResourceClassDataSourceInvalidFormat(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config:      testAccRunnerResourceClassDataSourceOnlyConfig(organizationId, "noslash"),
-				ExpectError: regexp.MustCompile(`Invalid resource_class format`),
+				ExpectError: regexp.MustCompile(`must be in the format 'namespace/name'`),
 			},
 		},
 	})

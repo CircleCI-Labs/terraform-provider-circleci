@@ -41,34 +41,51 @@ type runnerFakeRequest struct {
 	Body   string
 }
 
+// runnerFakeResponse is what the fake answers for one "METHOD /path" key: a
+// status code and a body. respond (status always 200) covers every route that
+// only ever succeeds in these tests; respondStatus is for the routes that need
+// to answer a real failure, such as the namespace-not-found 404 confirmed
+// live against the runner API (see CreateResourceClass's doc comment in
+// internal/circleci/runner.go).
+type runnerFakeResponse struct {
+	status int
+	body   string
+}
+
 // runnerFakeAPI is a fake of the CircleCI runner admin API.
 type runnerFakeAPI struct {
 	server *httptest.Server
 
 	mu        sync.Mutex
 	requests  []runnerFakeRequest
-	responses map[string]string
+	responses map[string]runnerFakeResponse
 }
 
 // newRunnerFakeAPI starts a fake runner API and stops it when the test ends.
 func newRunnerFakeAPI(t *testing.T) *runnerFakeAPI {
 	t.Helper()
 
-	api := &runnerFakeAPI{responses: map[string]string{}}
+	api := &runnerFakeAPI{responses: map[string]runnerFakeResponse{}}
 	api.server = httptest.NewServer(http.HandlerFunc(api.handle))
 	t.Cleanup(api.server.Close)
 
 	return api
 }
 
-// respond registers the response body for a "METHOD /path" key. Requests with no
-// registered response get an empty 200, which is what the API returns for a
-// delete.
+// respond registers the response body for a "METHOD /path" key, answered with
+// HTTP 200. Requests with no registered response get an empty 200, which is
+// what the API returns for a delete.
 func (a *runnerFakeAPI) respond(method, path, body string) {
+	a.respondStatus(method, path, http.StatusOK, body)
+}
+
+// respondStatus registers the response status and body for a "METHOD /path"
+// key, for the routes that need to answer something other than success.
+func (a *runnerFakeAPI) respondStatus(method, path string, status int, body string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.responses[method+" "+path] = body
+	a.responses[method+" "+path] = runnerFakeResponse{status: status, body: body}
 }
 
 // URL is the fake's origin, for the provider's runner_host attribute.
@@ -99,7 +116,10 @@ func (a *runnerFakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = io.WriteString(w, response)
+	if response.status != 0 && response.status != http.StatusOK {
+		w.WriteHeader(response.status)
+	}
+	_, _ = io.WriteString(w, response.body)
 }
 
 // requests returns every recorded request for a method and path.

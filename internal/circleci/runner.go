@@ -212,6 +212,19 @@ func (c *Client) ListResourceClasses(ctx context.Context, namespace, orgID strin
 // a malformed resource_class HTTP 400
 // "resource class not valid" — which is why the provider checks the format
 // against the service's own rules at plan time.
+//
+// resource_class's namespace half has to already exist (claimed through
+// circleci_orb_namespace or the CLI) before this can succeed, and a namespace
+// that does not exist — confirmed live, not merely undocumented — answers
+// HTTP 404 `{"message":"not found with provided token: check permissions to
+// view or admin self-hosted runners"}`, the same response an unclaimed
+// namespace and a namespace some *other* caller owns both produce. That
+// wording is misleading taken alone (it reads like a token problem even when
+// the token is fine and the namespace is simply missing), but it is the
+// service's only signal here, so the provider surfaces it verbatim via
+// circleci.Detail rather than rewording it into a guess. This is the same
+// absence/permission ambiguity IsUnauthorized's doc comment describes for the
+// main v3 API, on the legacy runner surface's own bare-message error shape.
 func (c *Client) CreateResourceClass(ctx context.Context, input ResourceClassInput) (*ResourceClass, error) {
 	var created ResourceClass
 
