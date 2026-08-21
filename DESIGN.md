@@ -174,6 +174,51 @@ holding `"****"` looks exactly like a credential a configuration could pass to a
 receiver and never is one. Same reasoning excludes `token` from
 `circleci_runner_tokens`.
 
+### A value the API drops for only one scope/type combination is preserved, not nulled
+
+`circleci_notification_channel_config`'s `target` is a plain, non-secret
+`Required` string -- an email address or a Slack channel ID -- and every
+scope/`channel_type` combination echoes it back on create, read and list,
+**except one**: verified against the live API [NET], `scope = "project"` with
+`channel_type = "email"` accepts a `target` on create with no error, and then
+never reports one back, on that create response, on any subsequent read, or
+in a `circleci_notification_channel_configs` listing. The other three
+combinations (`user`/email, `user`/slack, `project`/slack) all round-trip it
+normally.
+
+Copying the API's response straight into state, as every other computed field
+in this provider does, turns that into "provider produced inconsistent result
+after apply" on the very first apply: state's `target` becomes `""`, which
+disagrees with both the configuration and the value Terraform just wrote.
+`applyNotificationChannelConfig` instead leaves the model's `target` alone
+when the API sends none, which for every caller (`plan` on Create/Update,
+`state` on Read) means "keep what the caller already had" -- the same
+preserve-don't-overwrite shape `webhook_resource.go` uses for
+`signing_secret`, applied here to a value that is absent for a
+scope/type-specific reason rather than because it is a secret. The plural
+data source has no prior value to preserve and reports `null`, which is the
+correct answer for "the API told us nothing here" per the rule above.
+
+This is deliberately not filed under "Mocks are derived from..." below: it is
+not a wrong field name or envelope, and it is not one struct doing two jobs.
+It is one specific combination of two enum values where the same route drops
+a field every other combination returns, discovered only by probing all four
+combinations against the real API rather than one.
+
+### Notification channel configs carry no secret to mark `Sensitive`
+
+It would be easy to assume `circleci_notification_channel_config.target`
+needs `Sensitive`, the way a webhook's `signing_secret` does: notification
+channels sound like exactly the place a webhook URL or bearer token would
+live. Checked directly against the API [NET] instead of assumed: `channel_type`
+accepts exactly two values, `email` and `slack` (every other value, including
+`webhook`, answers `400 invalid channel_type`), and `target` is either a
+plain email address or a Slack channel ID such as `C0123456789` — never a URL,
+never a token. There is no field anywhere in this family that is a secret in
+the sense `signing_secret` is, so there is nothing here for `Sensitive` or a
+`_wo` write-only variant to protect, and adding either would misdescribe a
+channel ID as a credential for no benefit.
+
 ### Mocks are derived from what the API actually returns, not from the OpenAPI spec
 
 The highest-leverage decision in the project. An audit of what the API really
