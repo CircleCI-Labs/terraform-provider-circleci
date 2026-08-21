@@ -45,4 +45,22 @@ for the full migration, including `import` blocks under the new name.
 For everything else — arguments, availability, examples — see
 [`circleci_pipeline_definition`](pipeline_definition).
 
+## Drift detection
+
+A definition deleted outside Terraform is detected and recreated on the next plan.
+That is worth calling out because the API makes it awkward: `GET
+.../pipeline-definitions/{id}` returns **400**, not 404, for a definition that no
+longer exists — and it returns the *same* 400, with the same response body, for
+definitions that do exist on GitLab-backed projects, where that route cannot serve
+them at all. The status alone cannot tell the two apart.
+
+The provider therefore confirms the answer against the pipeline-definitions list
+route, which reports correctly on every integration, before concluding anything:
+
+| What the provider finds | What it does |
+| --- | --- |
+| The list carries the definition | Refreshes from it. The resource stays managed — this is the GitLab case. |
+| The list does not carry it | Removes it from state; the next plan recreates it. |
+| The list cannot be read | Nothing. The resource stays in state and the error names both failures. A transient outage never removes a live resource from state. |
+
 {{ .SchemaMarkdown | trimspace }}

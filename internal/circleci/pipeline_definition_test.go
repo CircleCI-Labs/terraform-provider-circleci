@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -293,15 +294,173 @@ func TestGetPipelineDefinitionRequest(t *testing.T) {
 	}
 }
 
-func TestGetPipelineDefinitionNotFound(t *testing.T) {
+// The bodies and statuses in the tests below were measured over the network
+// against circleci.com on 2026-08-21, per project and per integration; see
+// pipelineDefinitionRoute in pipeline_definition.go for the full probe. They are
+// not what this suite used to assert: TestGetPipelineDefinitionNotFound used to
+// serve 404 for a missing definition, a status the singular route never returns
+// for one.
+const (
+	// definitionLookupFailed400 is the ambiguous response: returned for a
+	// definition that is gone, for one that never existed, for a real id under
+	// the wrong project, AND for a live definition on a GitLab project.
+	definitionLookupFailed400 = `{"message":"Failed to get pipeline definition."}`
+	// definitionInvalidID400 is a malformed definition id — a client error, not
+	// an absence, and it must not be mistaken for one.
+	definitionInvalidID400 = `{"message":"Invalid pipeline definition id."}`
+)
+
+// TestGetPipelineDefinitionNotFoundProject covers the ONE case the singular
+// route answers with a 404: a well-formed project id that does not exist.
+func TestGetPipelineDefinitionNotFoundProject(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Pipeline definition not found"}`)
+	srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Pipeline definition not found."}`)
 	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
 	_, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "nope")
 	if !circleci.IsNotFound(err) {
 		t.Errorf("GetPipelineDefinition error = %v, want a not found error", err)
+	}
+}
+
+// TestGetPipelineDefinitionAmbiguous400ConfirmedGoneByList is the deleted case:
+// the singular route answers the ambiguous 400, and the plural list — which the
+// real API keeps answering 200 for a live project — does not carry the id. Only
+// then is the definition reported as gone.
+func TestGetPipelineDefinitionAmbiguous400ConfirmedGoneByList(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newListServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/pipeline-definitions") {
+			writeListJSON(w, `{"items":[{"id":"55555555-5555-5555-5555-555555555555","name":"other"}]}`)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(definitionLookupFailed400))
+	})
+
+	_, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "44444444-4444-4444-4444-444444444444")
+
+	if !circleci.IsNotFound(err) {
+		t.Errorf("GetPipelineDefinition error = %v, want IsNotFound: the singular route answered the "+
+			"ambiguous 400 and the list confirmed the definition is absent, so the caller must be able to "+
+			"drop it from state", err)
+	}
+	if len(*seen) != 2 {
+		t.Errorf("requests = %d (%+v), want 2: the singular GET and the list probe that settles it", len(*seen), *seen)
+	}
+}
+
+// TestGetPipelineDefinitionAmbiguous400StillPresentInList is the GitLab case,
+// and the one that makes "treat 400 as gone" unsafe: the definition EXISTS —
+// measured, its id came straight out of a 200 from the plural route — and the
+// singular route still answers the same 400 a deleted definition gets. The
+// resource must be refreshed from the list, never removed from state.
+func TestGetPipelineDefinitionAmbiguous400StillPresentInList(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newListServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/pipeline-definitions") {
+			// The shape GitLab actually returns: a provider, a file_path, and no
+			// repo on either source.
+			writeListJSON(w, `{"items":[{"id":"44444444-4444-4444-4444-444444444444",
+				"name":"gitlab test-repo-2","created_at":"2026-08-20T19:42:26.663Z",
+				"config_source":{"provider":"gitlab","file_path":".circleci/config.yml"},
+				"checkout_source":{"provider":"gitlab"}}]}`)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(definitionLookupFailed400))
+	})
+
+	found, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "44444444-4444-4444-4444-444444444444")
+	if err != nil {
+		t.Fatalf("GetPipelineDefinition returned error %v, want the definition: it is present in the list, "+
+			"so the 400 meant the route cannot serve it, not that it is gone", err)
+	}
+
+	if circleci.IsNotFound(err) {
+		t.Error("a live definition must never be reported as not found")
+	}
+	if found.Name != "gitlab test-repo-2" {
+		t.Errorf("found.Name = %q, want the list entry's name", found.Name)
+	}
+	if found.ConfigSource.Provider != "gitlab" {
+		t.Errorf("found.ConfigSource.Provider = %q, want gitlab", found.ConfigSource.Provider)
+	}
+}
+
+// TestGetPipelineDefinitionAmbiguous400WithUnusableListIsNotDrift is the
+// fail-safe requirement: when the 400 arrives and the list probe that would
+// settle it ALSO fails, nothing is known. The error must be neither IsNotFound
+// nor a bare pass-through of the 400, so that no caller can read "gone" out of
+// an unconfirmed signal and remove a live resource from state.
+func TestGetPipelineDefinitionAmbiguous400WithUnusableListIsNotDrift(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newListServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/pipeline-definitions") {
+			writeListError(w, http.StatusBadGateway, "upstream unavailable")
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(definitionLookupFailed400))
+	})
+
+	_, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "44444444-4444-4444-4444-444444444444")
+	if err == nil {
+		t.Fatal("GetPipelineDefinition returned no error, want one")
+	}
+
+	if circleci.IsNotFound(err) {
+		t.Error("an unconfirmed 400 must NOT satisfy IsNotFound: that is exactly the signal a caller uses " +
+			"to delete a resource from state, and nothing here established the definition is gone")
+	}
+	if _, isHTTP := circleci.StatusCode(err); isHTTP {
+		t.Error("the unconfirmed error must not carry an HTTP status either: a caller switching on 400 or 502 " +
+			"would be switching on a status that does not mean what it says here")
+	}
+	for _, want := range []string{"does not mean the definition is gone", "upstream unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q; the diagnostic has to explain both halves of the failure "+
+				"or the practitioner is left with the same dead end the old 400 gave them", err, want)
+		}
+	}
+}
+
+// TestGetPipelineDefinitionInvalidIDIsNotProbedForAbsence keeps the ambiguity
+// handling narrow. A malformed definition id also answers 400, with a DIFFERENT
+// measured body, and means the request was wrong rather than the definition
+// gone. It must not satisfy IsNotFound, and must not spend a list request
+// looking.
+func TestGetPipelineDefinitionInvalidIDIsNotProbedForAbsence(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(definitionInvalidID400))
+	})
+
+	_, err := client.GetPipelineDefinition(context.Background(), testDefinitionProjectID, "not-a-uuid")
+
+	if circleci.IsNotFound(err) {
+		t.Errorf("error %v satisfies IsNotFound, but a malformed id says nothing about whether the "+
+			"definition exists", err)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("requests = %d (%+v), want 1: only the ambiguous %q body warrants a list probe",
+			len(*seen), *seen, "Failed to get pipeline definition.")
 	}
 }
 
@@ -374,10 +533,30 @@ func TestDeletePipelineDefinitionRequest(t *testing.T) {
 	}
 }
 
-func TestDeletePipelineDefinitionNotFound(t *testing.T) {
+// TestDeletePipelineDefinitionAlreadyGoneIsIdempotent records what DELETE
+// actually does for a definition that is already gone: measured over the
+// network, it answers 200 with the ordinary success body, not 404 and not the
+// 400 GET and PATCH give. This test used to serve 404 and assert IsNotFound,
+// which described a response the route does not produce.
+func TestDeletePipelineDefinitionAlreadyGoneIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Pipeline definition not found"}`)
+	srv, _ := newRecordingServer(t, http.StatusOK, `{"message":"Pipeline definition deleted."}`)
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	if err := client.DeletePipelineDefinition(context.Background(), testDefinitionProjectID, "already-gone"); err != nil {
+		t.Errorf("DeletePipelineDefinition returned error %v, want nil: the API reports a repeat delete as success", err)
+	}
+}
+
+// TestDeletePipelineDefinitionStillToleratesAbsence keeps the caller-side
+// tolerance honest. DELETE does not answer 404 today, but the resource's Delete
+// treats absence as success, and that has to keep holding if the route ever
+// starts reporting one.
+func TestDeletePipelineDefinitionStillToleratesAbsence(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newRecordingServer(t, http.StatusNotFound, `{"message":"Pipeline definition not found."}`)
 	client := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
 	err := client.DeletePipelineDefinition(context.Background(), testDefinitionProjectID, "nope")
