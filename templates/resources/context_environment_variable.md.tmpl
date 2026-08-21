@@ -51,6 +51,23 @@ Note that CircleCI bumps its timestamp on every write, including one that stores
 identical value — so any external write, even a harmless one, produces one
 corrective apply.
 
+## Contexts holding more than 100 variables
+
+Reading this resource means listing the context: CircleCI has no route that reads
+one context environment variable by name. That list stops at 100 variables and
+cannot be paged past — the `next_page_token` the API advertises is ignored on every
+request, whatever parameter name it is sent under.
+
+A variable that appears in the 100 the API discloses refreshes normally. One that
+does not is *ambiguous*, not absent, so refresh fails with an error naming it rather
+than dropping it from state — dropping it would make the next apply recreate the
+variable and overwrite whatever value is really stored on it. The API sorts by name,
+so which variables fall inside the 100 depends on their names.
+
+CircleCI caps a context at 100 environment variables, but does not apply the cap
+atomically: concurrent writes can push a context past it. Split the variables across
+more than one context to recover.
+
 ## Import
 
 Import is supported using `context_id/env_var_name`:

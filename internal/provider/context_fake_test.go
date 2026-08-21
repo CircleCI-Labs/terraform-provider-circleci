@@ -4,10 +4,13 @@
 package provider
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -36,9 +39,12 @@ import (
 //     restriction's name on create; only a subsequent list/read does. See
 //     contextRestrictionResource.Create.
 //   - restriction delete: {"message":"Context restriction deleted."}
-//   - env var list response is {"items":[...],"next_page_token":null}, each
+//   - env var list response is {"items":[...],"next_page_token":...}, each
 //     item carrying "truncated_value" rather than "value" (the raw value is
-//     never returned by the API)
+//     never returned by the API), paged at 100 with a token that is advertised
+//     and never read back — see getEnvVars
+//   - env var put reads exactly one request key, "value", and silently stores
+//     an empty value for any other — see putEnvVar
 //   - env var put response is {variable,context_id,created_at,updated_at}
 //   - env var delete: {"message":"Environment variable deleted."}
 //
@@ -588,6 +594,33 @@ func (a *contextFakeAPI) deleteRestriction(w http.ResponseWriter, r *http.Reques
 	a.write(w, http.StatusOK, map[string]any{"message": "Context restriction deleted."})
 }
 
+// fakeContextEnvVarPageSize is the number of variables the real list route puts
+// on a page, and the number this fake puts on one. It is fixed by the service:
+// no request parameter changes it.
+const fakeContextEnvVarPageSize = 100
+
+// getEnvVars serves the list route, INCLUDING its pagination, which is the part
+// this fake used to get wrong.
+//
+// It answered next_page_token: nil unconditionally, whatever the variable count.
+// That is right for a context at or below the page size and wrong above it, and
+// it made the truncation that a larger context really produces unreachable from
+// every mocked test in this package: the plural data source could under-report by
+// any number of variables and nothing here would notice. Measured against a real
+// context filled past the cap, the route behaves as modelled below.
+//
+//   - Exactly fakeContextEnvVarPageSize items come back when more exist, sorted
+//     by name.
+//   - next_page_token is null at or below the page size and a real cursor above
+//     it, derived from the last item on the page. Production's is base64 of a
+//     transit-encoded ":after <name>"; the encoding is not reproduced literally
+//     here, because a fake spelling out another service's internal cursor format
+//     is a fake claiming to be that service. What IS reproduced is the property
+//     the client depends on: the token names the page's last item, so it changes
+//     whenever the tail of page one changes.
+//   - The token is never read back. Whatever the request's query string holds,
+//     the answer is page one and the same token — so the collection cannot be
+//     paged, only detected as incomplete.
 func (a *contextFakeAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
 	if a.failed(w) {
 		return
@@ -605,6 +638,13 @@ func (a *contextFakeAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 
+	// The page token is ignored, exactly as production ignores it: the page
+	// served is always the first one.
+	truncated := len(names) > fakeContextEnvVarPageSize
+	if truncated {
+		names = names[:fakeContextEnvVarPageSize]
+	}
+
 	items := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		ev := ctx.envVars[name]
@@ -618,7 +658,12 @@ func (a *contextFakeAPI) getEnvVars(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Unlock()
 
-	a.write(w, http.StatusOK, map[string]any{"items": items, "next_page_token": nil})
+	var nextPageToken any
+	if truncated {
+		nextPageToken = base64.StdEncoding.EncodeToString([]byte("after " + names[len(names)-1]))
+	}
+
+	a.write(w, http.StatusOK, map[string]any{"items": items, "next_page_token": nextPageToken})
 }
 
 func (a *contextFakeAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
@@ -633,13 +678,39 @@ func (a *contextFakeAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
 
 	name := r.PathValue("name")
 
-	var body struct {
-		Value string `json:"value"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	// Decoded as a map rather than into a struct so that a request key this
+	// route does not read is visible rather than dropped on the floor.
+	//
+	// The real route reads exactly one key, "value", and ignores every other:
+	// PUT {"val": "s3cr3t"} and PUT {"Value": "s3cr3t"} both answer 200 with a
+	// normal-looking body and store an EMPTY value — measured against a real
+	// context. An empty object is the one body it rejects, with 400 "Invalid
+	// body.", so a wrong key cannot be told from a right one by status code.
+	//
+	// This fake reproduces the storing-empty part, because that is what
+	// production does and a fake that quietly corrected it would hide the whole
+	// class of defect. It also fails the test outright, because no test in this
+	// package wants to exercise a provider that drops the secret it was given:
+	// this is the same silent-drop shape as the webhook signing-secret defect,
+	// where client and fake agreed on a key production never read.
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) == 0 {
 		a.write(w, http.StatusBadRequest, map[string]any{"message": "Invalid body."})
 
 		return
+	}
+
+	var value string
+	if raw, present := body["value"]; present {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			a.write(w, http.StatusBadRequest, map[string]any{"message": "Invalid body."})
+
+			return
+		}
+	} else {
+		a.t.Errorf("PUT %s carried no \"value\" key (body keys: %v); the route reads only that key "+
+			"and answers 200 while storing an empty value, so the variable would exist with no "+
+			"secret in it", r.URL.Path, slices.Sorted(maps.Keys(body)))
 	}
 
 	a.mu.Lock()
@@ -648,7 +719,7 @@ func (a *contextFakeAPI) putEnvVar(w http.ResponseWriter, r *http.Request) {
 		ev = &fakeContextEnvVar{createdAt: "2024-01-02T03:04:05.000Z"}
 		ctx.envVars[name] = ev
 	}
-	ev.value = body.Value
+	ev.value = value
 	// updated_at advances on every upsert; created_at is set once, matching an
 	// atomic "overwrite in place" update semantic.
 	a.nextEnvVarUpdateSeq++

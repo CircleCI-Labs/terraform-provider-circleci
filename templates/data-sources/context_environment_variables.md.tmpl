@@ -8,8 +8,7 @@ description: |-
 # circleci_context_environment_variables (Data Source)
 
 Fetches every environment variable set on a CircleCI context, including variables
-created outside Terraform. Pagination is followed internally, so the result covers
-every variable rather than a single page. Use
+created outside Terraform. Use
 [`circleci_context_environment_variable`](context_environment_variable) to fetch
 one by name.
 
@@ -22,6 +21,16 @@ one by name.
 | **API** | `GET /api/v2/context/{context_id}/environment-variable` |
 | **Organization type** | Any. |
 | **Token** | Any valid API token with read access to the context's organization. |
+
+~> **A context of more than 100 variables cannot be read.** CircleCI lists at
+most 100 environment variables per context, and provides no way to reach the rest:
+the `next_page_token` the API advertises is ignored on every request, whatever
+parameter name it is sent under, and there is no route that reads a context
+environment variable by name. Rather than return a partial list that nothing
+downstream could tell from a complete one, this data source raises an error naming
+the context. CircleCI caps a context at 100 variables, but does not apply the cap
+atomically, so concurrent writes can push a context past it — split the variables
+across more than one context to recover.
 
 ~> **The value is never returned.** CircleCI does not disclose a context
 environment variable's value on any route, not even the one that just set it.
@@ -37,10 +46,13 @@ source to discover *which* variables a context holds, not what they are set to.
 
 ## Notes
 
-* `truncated_value` is the last four characters of the value, or fewer for a value
-  eight characters or shorter, with **no** mask prefix. This is a different shape
-  from `circleci_project_environment_variables`' `value`, which prefixes the same
-  kind of tail with `xxxx` — the two look alike and are not.
+* `truncated_value` is the last `min(4, floor(length / 2))` characters of the
+  value, with **no** mask prefix — measured across values of length 1 to 12, since
+  the published API spec documents neither the field's shape nor its length. A
+  12-character value gives up 4 characters, a 4-character value gives up 2, and a
+  1-character value gives up none. This is a different shape from
+  `circleci_project_environment_variables`' `value`, which prefixes the same kind
+  of tail with `xxxx` — the two look alike and are not.
 * Do not use `truncated_value` to detect that a value changed. Rotating a secret
   while keeping its last characters leaves it identical, so comparing it silently
   misses that class of rotation — a community CircleCI provider compares the mask
@@ -49,4 +61,5 @@ source to discover *which* variables a context holds, not what they are set to.
   value, so it means "last written", not "last changed".
 * `environment_variables` is always a list, empty when the context has none, so
   configurations can iterate over it unconditionally.
-* The API returns the variables sorted by name.
+* The API returns the variables sorted by name. That ordering is what decides
+  which variables fall inside the 100 the API discloses when a context holds more.

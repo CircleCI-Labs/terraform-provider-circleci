@@ -41,10 +41,60 @@
   before importing rather than after. Behaviour is unchanged; this corrects what the
   attribute and the resource's import notes claim.
 
-The entries below affect contributors running the acceptance test suite against a real
-CircleCI installation, not provider users — nothing there changes provider behaviour.
+* **A context holding more than 100 environment variables no longer breaks every
+  `circleci_context_environment_variable` on it.** `GET
+  /api/v2/context/{id}/environment-variable` lists at most 100 variables, and there is no
+  route that reads one by name (a `GET` on a named variable answers 404), so a read of this
+  resource has to go through that list. A context above the cap made the list a failure,
+  which made `terraform plan` error out for every variable on the context — including
+  variables sitting in the response the API had just sent. A variable that appears in the
+  disclosed 100 now refreshes normally. One that does not is reported as ambiguous rather
+  than absent: refresh fails with an error naming it instead of removing it from state,
+  because removing it would make the next apply recreate the variable and overwrite whatever
+  value is really stored on it. `data.circleci_context_environment_variable` behaves the same
+  way, and `data.circleci_context_environment_variables`, which promises the whole
+  collection, raises a diagnostic naming the context rather than returning a partial list
+  nothing downstream could tell from a complete one. CircleCI caps a context at 100
+  variables but does not apply the cap atomically, so concurrent writes can exceed it.
+
+* **Listing a context's environment variables can no longer loop without bound.** The list
+  route advertises a `next_page_token` and then ignores it: `page-token`, `page_token`,
+  `pageToken`, `page[token]`, `next_page_token`, `page[cursor]`, `cursor` and `after` were
+  each sent carrying the advertised token, and all eight answered with page one and the same
+  token. The previous guard stopped the drain only when the token came back byte-identical,
+  and the token names the last item on the page — so any concurrent write that moves the
+  page-one boundary changes it while the page stays the same. Reproduced against a route
+  answering the same page under a fresh token each time: the drain returned 500 duplicated
+  variables from five requests and would not have stopped. Truncation is now detected from
+  the first response's token, in one request, and the client no longer sends a page
+  parameter the route ignores.
 
 ### NOTES
+
+* **The diagnostic for an over-long context no longer suggests a route that does not
+  exist.** It previously advised reading the variables "individually by name"; `GET
+  /api/v2/context/{id}/environment-variable/{name}` answers 404 page not found, so that was
+  not possible. The advice is now to split the variables across more than one context, which
+  is the only thing that works.
+
+* **`truncated_value`'s shape is documented and pinned.** CircleCI reveals the last
+  `min(4, floor(length / 2))` characters of a context environment variable's value, with no
+  mask prefix — measured across values of length 1 to 12, since the published API spec
+  documents neither. A 12-character value gives up 4 characters, a 4-character value gives
+  up 2, and a 1-character value gives up none. It is a different shape from
+  `circleci_project_environment_variables`' `value`, which prefixes the same kind of tail
+  with `xxxx`.
+
+* **The upsert body's request key is pinned by a test.** `PUT
+  /api/v2/context/{id}/environment-variable/{name}` reads exactly one key, `value`, and
+  ignores every other: a body of `{"val": ...}` or `{"Value": ...}` answers 200, with
+  `created_at` and `updated_at` both set, and stores an *empty* value. Only an empty object
+  is rejected (400). Nothing downstream can detect the difference — the value is never
+  returned on any route, and `truncated_value` is empty both for a dropped value and for a
+  deliberately empty one. The provider has always sent the right key; it is now asserted by
+  a wire-format test, and the stand-in API used by the unit tests fails any test whose
+  request body lacks it. This is the same silent-drop shape as the webhook signing-secret
+  defect fixed in 0.6.0.
 
 * **`TestAccTriggerResourceUpdateRemovesRepoExternalId` failed its own teardown and left a
   real trigger behind on every run.** Its last step is an `ExpectError` step, so the

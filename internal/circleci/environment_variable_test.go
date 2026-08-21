@@ -6,6 +6,7 @@ package circleci_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,21 +136,54 @@ func TestListProjectEnvironmentVariablesNotFound(t *testing.T) {
 
 const testEnvVarContextID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
 
+// contextEnvVarItem renders one item of the list route's response body.
+func contextEnvVarItem(name, truncated string) string {
+	return `{"variable":"` + name + `","context_id":"` + testEnvVarContextID + `","truncated_value":"` +
+		truncated + `","created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-01-02T03:04:05.000Z"}`
+}
+
+// contextEnvVarPage renders a full page: contextEnvVarPageSizeInTests items
+// named PAD000..PAD099, which is what the route sends whenever a context holds
+// more than one page's worth.
+func contextEnvVarPage() string {
+	items := make([]string, 0, contextEnvVarPageSizeInTests)
+	for i := range contextEnvVarPageSizeInTests {
+		items = append(items, contextEnvVarItem(fmt.Sprintf("PAD%03d", i), "3cr3"))
+	}
+
+	return strings.Join(items, ",")
+}
+
+// contextEnvVarPageSizeInTests mirrors the page size the service fixes for this
+// route. It is duplicated here rather than exported from the client, because a
+// test that reads the number out of the code under test cannot notice the code
+// getting it wrong.
+const contextEnvVarPageSizeInTests = 100
+
+// TestListContextEnvironmentVariables pins the whole-collection case: a context
+// at or below the page size, answered in a single request.
+//
+// The response shape is what the API actually returns: {"items": [...],
+// "next_page_token": null}, with truncated_value rather than value, because the
+// API never discloses the configured value. truncated_value carries the tail of
+// the value with NO mask prefix — the API takes the last four characters, or the
+// last floor(len/2) for a value of eight characters or fewer. This fixture used
+// to say "xxxx3cr3", borrowing the *project* environment variable convention,
+// which does prefix the tail with "xxxx". The two are different shapes from
+// different routes, and a fixture in the wrong one is not evidence.
+//
+// One request, and no page-token query parameter on it. The route ignores every
+// spelling of that parameter (see circleci.ContextEnvVarsTruncatedError for the
+// eight that were measured), so sending one would advertise a contract the route
+// does not honour.
 func TestListContextEnvironmentVariables(t *testing.T) {
 	t.Parallel()
 
-	// The shape matches what the API actually returns:
-	// {"items": [...], "next_page_token": ...} with truncated_value rather than
-	// value, because the API never discloses the configured value.
-	// truncated_value carries the tail of the value with NO mask prefix — the
-	// API takes the last four characters, or the last floor(len/2) for a value
-	// of eight characters or fewer. This fixture used to say "xxxx3cr3",
-	// borrowing the *project* environment variable convention, which does
-	// prefix the tail with "xxxx". The two are different shapes from different
-	// routes, and a fixture in the wrong one is not evidence.
 	client, seen := pageListServer(t,
-		`{"items":[{"variable":"API_KEY","context_id":"`+testEnvVarContextID+`","truncated_value":"3cr3","created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-01-02T03:04:05.000Z"}],"next_page_token":"tok-2"}`,
-		`{"items":[{"variable":"ZONE","context_id":"`+testEnvVarContextID+`","truncated_value":"st-1","created_at":"2024-02-01T00:00:00.000Z","updated_at":"2024-02-01T00:00:00.000Z"}],"next_page_token":null}`,
+		`{"items":[`+
+			contextEnvVarItem("API_KEY", "3cr3")+`,`+
+			contextEnvVarItem("ZONE", "st-1")+
+			`],"next_page_token":null}`,
 	)
 
 	vars, err := client.ListContextEnvironmentVariables(context.Background(), testEnvVarContextID)
@@ -158,7 +192,7 @@ func TestListContextEnvironmentVariables(t *testing.T) {
 	}
 
 	if len(vars) != 2 {
-		t.Fatalf("variable count = %d, want 2 (both pages drained)", len(vars))
+		t.Fatalf("variable count = %d, want 2", len(vars))
 	}
 	if vars[0].Variable != "API_KEY" || vars[0].TruncatedValue != "3cr3" {
 		t.Errorf("first variable = %+v, want API_KEY truncated as 3cr3", vars[0])
@@ -167,68 +201,122 @@ func TestListContextEnvironmentVariables(t *testing.T) {
 		t.Errorf("first variable context_id = %q, want %q", vars[0].ContextID, testEnvVarContextID)
 	}
 
-	if len(*seen) != 2 {
-		t.Fatalf("request count = %d, want 2", len(*seen))
+	if len(*seen) != 1 {
+		t.Fatalf("request count = %d, want 1 — this route serves one page and cannot be paged", len(*seen))
 	}
 	wantPath := "/api/v2/context/" + testEnvVarContextID + "/environment-variable"
 	if got := (*seen)[0]; got.method != http.MethodGet || got.path != wantPath {
-		t.Errorf("first request = %s %s, want GET %s", got.method, got.path, wantPath)
+		t.Errorf("request = %s %s, want GET %s", got.method, got.path, wantPath)
 	}
-	if got := (*seen)[1].query; got != "page-token=tok-2" {
-		t.Errorf("second request query = %q, want %q", got, "page-token=tok-2")
+	if got := (*seen)[0].query; got != "" {
+		t.Errorf("request query = %q, want it empty: the route ignores every page parameter, so "+
+			"sending one claims a pagination contract that does not exist", got)
 	}
 }
 
-// TestListContextEnvironmentVariablesRepeatedPageTokenErrors covers the one
-// failure mode worse than a wrong answer: a drain that never terminates.
+// TestListContextEnvironmentVariablesTruncationDetectedOnFirstResponse is the
+// regression test for a context that holds more variables than this route will
+// disclose.
 //
-// This route's pagination is broken server-side. Its handler reads the page token
-// from the request's *path* parameters rather than its query string, and the route
-// declares no such path parameter, so the page-token this client sends is never
-// seen: every request is answered with the first page, and with the same
-// next_page_token. A context holding more than one page of variables (the page
-// size is fixed at 100 by the service, not by this client) therefore made the
-// naive drain re-request page one for ever, accumulating duplicates until the
-// provider ran out of memory.
+// The measured contract is in circleci.ContextEnvVarsTruncatedError. The part
+// this test exists for: the advertised page token is derived from the LAST ITEM
+// on the page, so it changes whenever the tail of page one changes. Two
+// consecutive first-page requests against a context that is being written to
+// come back with two DIFFERENT non-null tokens — measured on a real context by
+// deleting a variable that sorts before the page boundary, which moved the token
+// from "after ZZZ07" to "after ZZZ08".
 //
-// No fake in this repository could have caught that, because every one of them
-// answers with next_page_token null and so terminates on the first page whatever
-// the client does. The server below is the shape the real route has.
+// The server below reproduces exactly that: the same page every time, a fresh
+// token every time. Detecting truncation by comparing one response's token
+// against the token that was sent therefore never fires — it sees two unequal
+// tokens, concludes pagination advanced, and drains for ever, adding a hundred
+// duplicates per iteration. That is the failure mode worse than a wrong answer,
+// and it is why the signal has to be the FIRST response's token on its own: a
+// non-null token means "there is more, and no request can reach it".
 //
-// The repeated token is a hard error rather than a quiet stop on purpose. The
-// remaining variables cannot be fetched through this route at all, and silently
-// returning the first page would make a data source under-report and could make a
-// resource conclude one of its variables had been deleted.
-func TestListContextEnvironmentVariablesRepeatedPageTokenErrors(t *testing.T) {
+// The server stops advertising a token after a few requests so that a
+// regression here fails on the request count rather than hanging the suite.
+func TestListContextEnvironmentVariablesTruncationDetectedOnFirstResponse(t *testing.T) {
 	t.Parallel()
 
-	// Always the same page, always the same token, whatever page-token is sent.
-	client, seen := pageListServer(t,
-		`{"items":[{"variable":"API_KEY","context_id":"`+testEnvVarContextID+`","truncated_value":"3cr3",`+
-			`"created_at":"2024-01-02T03:04:05.000Z","updated_at":"2024-01-02T03:04:05.000Z"}],`+
-			`"next_page_token":"same-token"}`,
-	)
+	var calls int
+	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		token := fmt.Sprintf(`"after-%d"`, calls)
+		if calls > 4 {
+			// Terminate a drain that should never have got this far, so the
+			// assertions below run instead of the test timing out.
+			token = "null"
+		}
+		writeListJSON(w, `{"items":[`+contextEnvVarPage()+`],"next_page_token":`+token+`}`)
+	})
 
 	vars, err := client.ListContextEnvironmentVariables(context.Background(), testEnvVarContextID)
 	if err == nil {
-		t.Fatalf("ListContextEnvironmentVariables returned %d variables and no error against a route that "+
-			"never advances its page token; a caller has no way to know the list is incomplete", len(vars))
+		t.Fatalf("ListContextEnvironmentVariables returned %d variables and no error for a context that "+
+			"holds more than the route discloses; a caller has no way to know the list is incomplete",
+			len(vars))
 	}
 	if vars != nil {
-		t.Errorf("a failed drain returned %d variables; it must return none rather than a partial list "+
-			"a caller might mistake for the whole collection", len(vars))
-	}
-	for _, want := range []string{"page token", "incomplete"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q, so it does not say why the list is short", err, want)
-		}
+		t.Errorf("returned %d variables alongside the error; a partial collection must not be handed "+
+			"back through the normal return, where a caller would mistake it for the whole one", len(vars))
 	}
 
-	// Exactly two requests: the first page, then the one that proves the token is
-	// ignored. Anything more means the guard fires late, and a guard that fires
-	// late on a real API is a guard that never fires at all.
-	if len(*seen) != 2 {
-		t.Errorf("made %d requests, want 2 — the loop must stop as soon as the token repeats", len(*seen))
+	if len(*seen) != 1 {
+		t.Errorf("made %d requests, want 1 — truncation is visible in the first response's token, and "+
+			"a second request neither reaches the rest nor proves anything", len(*seen))
+	}
+
+	truncated, ok := circleci.AsContextEnvVarsTruncated(err)
+	if !ok {
+		t.Fatalf("error %v is not a *circleci.ContextEnvVarsTruncatedError, so a caller cannot tell an "+
+			"incomplete list from any other failure and must treat every variable on the context as "+
+			"unreadable", err)
+	}
+	if truncated.ContextID != testEnvVarContextID {
+		t.Errorf("ContextID = %q, want %q", truncated.ContextID, testEnvVarContextID)
+	}
+	if len(truncated.Page) != contextEnvVarPageSizeInTests {
+		t.Fatalf("Page holds %d variables, want the %d that were disclosed: a resource managing one of "+
+			"them must still be able to refresh it", len(truncated.Page), contextEnvVarPageSizeInTests)
+	}
+
+	if got, found := truncated.Find("PAD000"); !found || got.Variable != "PAD000" {
+		t.Errorf("Find(\"PAD000\") = %+v, %v; want the disclosed variable", got, found)
+	}
+	if _, found := truncated.Find("PAD999"); found {
+		t.Error("Find(\"PAD999\") reported a variable that was not on the page")
+	}
+}
+
+// TestListContextEnvironmentVariablesTruncatedErrorDoesNotAdviseTheMissingRoute
+// guards the wording of the diagnostic a practitioner sees.
+//
+// The previous message ended "or read them individually by name". There is no
+// such route: GET /context/{id}/environment-variable/{name} answers 404 page not
+// found, measured. Advice that cannot be followed is worse than none, because it
+// sends the reader looking for a route rather than at the only fix that works,
+// which is splitting the variables across more than one context.
+func TestListContextEnvironmentVariablesTruncatedErrorDoesNotAdviseTheMissingRoute(t *testing.T) {
+	t.Parallel()
+
+	client, _ := pageListServer(t, `{"items":[`+contextEnvVarPage()+`],"next_page_token":"after-PAD099"}`)
+
+	_, err := client.ListContextEnvironmentVariables(context.Background(), testEnvVarContextID)
+	if err == nil {
+		t.Fatal("ListContextEnvironmentVariables returned no error for a truncated list")
+	}
+
+	msg := err.Error()
+	if strings.Contains(msg, "individually by name") {
+		t.Errorf("error %q tells the practitioner to read the variables individually by name; that "+
+			"route does not exist and answers 404", msg)
+	}
+	for _, want := range []string{testEnvVarContextID, "100", "more than one context"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not mention %q, so it does not say which context is affected, "+
+				"how many variables were disclosed, or what to do about it", msg, want)
+		}
 	}
 }
 
@@ -658,5 +746,63 @@ func TestContextEnvVarNameRejectsDotSegments(t *testing.T) {
 	wantURI := "/api/v2/context/" + testEnvVarContextID + "/environment-variable/API_KEY"
 	if got := (*seen)[0].rawURI; got != wantURI {
 		t.Errorf("raw request URI = %q, want %q", got, wantURI)
+	}
+}
+
+// TestContextEnvironmentVariableInputMarshalsValueKey is the wire-format test
+// for the upsert body, and it needs no server: it serialises the request type
+// and looks at the keys.
+//
+// PUT /context/{id}/environment-variable/{name} reads exactly one request key,
+// "value", and ignores every other one. Measured against a real context:
+//
+//	{"value":"ABCDEFGHIJKL"} -> 200, stored, truncated_value "IJKL"
+//	{"val":"ABCDEFGHIJKL"}   -> 200, stored EMPTY, truncated_value ""
+//	{"Value":"ABCDEFGHIJKL"} -> 200, stored EMPTY, truncated_value ""
+//	{}                       -> 400 {"message":"Invalid body."}
+//
+// So the only body the route rejects is an empty object. A misspelled key looks
+// exactly like a correct one from the outside — same status, same response body,
+// created_at and updated_at both set — and the variable exists from then on with
+// no secret in it. Nothing downstream can detect it either: the value is never
+// returned on any route, and truncated_value is "" both for a dropped value and
+// for a deliberately empty one.
+//
+// This is the same silent-drop class as the webhook signing-secret defect (see
+// TestWebhookInputMarshalsHyphenatedRequestKeys), which shipped because nothing
+// pinned the request shape. The client here has always sent the right key; this
+// test is what keeps it that way. Asserting the plausible misspellings are
+// ABSENT matters as much as asserting "value" is present, because a type
+// carrying both spellings would satisfy a presence-only check while telling the
+// reader something false about the route.
+func TestContextEnvironmentVariableInputMarshalsValueKey(t *testing.T) {
+	t.Parallel()
+
+	body, err := json.Marshal(circleci.ContextEnvironmentVariableInput{Value: "s3cr3t"})
+	if err != nil {
+		t.Fatalf("marshalling ContextEnvironmentVariableInput: %v", err)
+	}
+
+	var keys map[string]any
+	if err := json.Unmarshal(body, &keys); err != nil {
+		t.Fatalf("serialised ContextEnvironmentVariableInput is not a JSON object: %v (%s)", err, body)
+	}
+
+	if keys["value"] != "s3cr3t" {
+		t.Errorf(`serialised body["value"] = %v, want "s3cr3t" — that is the only key the route reads, `+
+			`and a body without it is a 200 that stores an empty secret (%s)`, keys["value"], body)
+	}
+
+	for _, wrong := range []string{"val", "Value", "env_value", "environment_value", "secret", "name"} {
+		if _, present := keys[wrong]; present {
+			t.Errorf("serialised body carries %q; the route ignores every key but \"value\", so the "+
+				"secret would be silently discarded and the variable stored empty (%s)", wrong, body)
+		}
+	}
+
+	// Exactly one key. The name travels in the path, and the read type's masked
+	// tail must never be echoed back as if it were a value.
+	if len(keys) != 1 {
+		t.Errorf("serialised body = %s, want only {\"value\": ...}", body)
 	}
 }

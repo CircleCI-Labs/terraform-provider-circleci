@@ -164,6 +164,9 @@ func (r *contextEnvironmentVariableResource) Create(ctx context.Context, req res
 //
 // The one thing it does with the value is remove it, when the timestamps say
 // somebody else wrote it — see detectContextEnvVarDrift.
+//
+// A context holding more variables than the list route discloses is handled
+// rather than treated as a failed read; see listForRead.
 func (r *contextEnvironmentVariableResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state contextEnvironmentVariableResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -171,37 +174,8 @@ func (r *contextEnvironmentVariableResource) Read(ctx context.Context, req resou
 		return
 	}
 
-	vars, err := r.client.ListContextEnvironmentVariables(ctx, state.ContextId.ValueString())
-	if err != nil {
-		if circleci.IsNotFound(err) {
-			resp.State.RemoveResource(ctx)
-
-			return
-		}
-
-		// See context_resource.go's Read for why 403 is not folded into
-		// IsNotFound: this route resolves the context id the same way, so a
-		// context that no longer exists and a token that lost permission look
-		// identical.
-		if circleci.IsUnauthorized(err) {
-			resp.Diagnostics.AddError(
-				"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
-				fmt.Sprintf(
-					"The API denied access to context %s. It has either been deleted outside "+
-						"Terraform, or the configured token lacks permission — the API returns the same "+
-						"response for both and does not distinguish them.\n\n%s",
-					state.ContextId.ValueString(), circleci.Detail(err),
-				),
-			)
-
-			return
-		}
-
-		resp.Diagnostics.AddError(
-			"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
-			circleci.Detail(err),
-		)
-
+	vars, truncated, ok := r.listForRead(ctx, state, resp)
+	if !ok {
 		return
 	}
 
@@ -218,6 +192,27 @@ func (r *contextEnvironmentVariableResource) Read(ctx context.Context, req resou
 	}
 
 	if !found {
+		// Absent from a list that stopped short is not absent from the context.
+		// Dropping the resource here would make the next apply recreate a
+		// variable that is alive, overwriting whatever value is really stored on
+		// it — so the ambiguity is reported instead of guessed at.
+		if truncated {
+			resp.Diagnostics.AddError(
+				"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
+				fmt.Sprintf(
+					"Context %s holds more variables than CircleCI will list, and %s was not among the "+
+						"%d it disclosed, so Terraform cannot say whether it still exists. It is NOT "+
+						"being removed from state on that basis: doing so would recreate it on the next "+
+						"apply and overwrite the value stored on it.\n\n"+
+						"Reduce the context to at most %d environment variables, or split them across "+
+						"more than one context, so that the whole list can be read.",
+					state.ContextId.ValueString(), state.Name.ValueString(), len(vars), len(vars),
+				),
+			)
+
+			return
+		}
+
 		resp.State.RemoveResource(ctx)
 
 		return
@@ -226,14 +221,71 @@ func (r *contextEnvironmentVariableResource) Read(ctx context.Context, req resou
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
+// listForRead lists the context's variables for Read, mapping each way the list
+// can fail onto what Read should do about it. The second result reports that the
+// list stopped short of the whole collection.
+//
+// A truncated list is deliberately NOT a failed read. There is no route that
+// fetches one context environment variable by name — GET
+// /context/{id}/environment-variable/{name} answers 404 — so the list is the only
+// way to read one at all, and failing the whole read made every
+// circleci_context_environment_variable on a context of more than 100 variables
+// unrefreshable, including the ones sitting in the response. A variable that IS in the disclosed page is described exactly as
+// well as a complete list would have described it.
+func (r *contextEnvironmentVariableResource) listForRead(
+	ctx context.Context,
+	state contextEnvironmentVariableResourceModel,
+	resp *resource.ReadResponse,
+) (vars []circleci.ContextEnvironmentVariable, truncated, ok bool) {
+	vars, err := r.client.ListContextEnvironmentVariables(ctx, state.ContextId.ValueString())
+	if err == nil {
+		return vars, false, true
+	}
+
+	if partial, isTruncated := circleci.AsContextEnvVarsTruncated(err); isTruncated {
+		return partial.Page, true, true
+	}
+
+	if circleci.IsNotFound(err) {
+		resp.State.RemoveResource(ctx)
+
+		return nil, false, false
+	}
+
+	// See context_resource.go's Read for why 403 is not folded into
+	// IsNotFound: this route resolves the context id the same way, so a
+	// context that no longer exists and a token that lost permission look
+	// identical.
+	if circleci.IsUnauthorized(err) {
+		resp.Diagnostics.AddError(
+			"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
+			fmt.Sprintf(
+				"The API denied access to context %s. It has either been deleted outside "+
+					"Terraform, or the configured token lacks permission — the API returns the same "+
+					"response for both and does not distinguish them.\n\n%s",
+				state.ContextId.ValueString(), circleci.Detail(err),
+			),
+		)
+
+		return nil, false, false
+	}
+
+	resp.Diagnostics.AddError(
+		"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
+		circleci.Detail(err),
+	)
+
+	return nil, false, false
+}
+
 // detectContextEnvVarDrift reports a value changed outside Terraform, by
 // comparing the timestamp CircleCI reports now against the one recorded after
 // this provider's own last write.
 //
 // Timestamps are the only signal available. The API returns no value on any
-// route, and truncated_value cannot substitute: it is the last four characters
-// of the value, so rotating a secret while keeping its suffix leaves it
-// identical. (A community provider compares it and silently misses those
+// route, and truncated_value cannot substitute: it is the last
+// min(4, floor(len/2)) characters of the value, so rotating a secret while
+// keeping its suffix leaves it identical. (A community provider compares it and silently misses those
 // rotations.) updated_at, meanwhile, bumps on *every* PUT even when the value
 // written is byte-identical — which is exactly why the comparison has to be
 // against a timestamp we put in state ourselves, never against the previous

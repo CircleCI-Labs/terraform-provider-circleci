@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -84,13 +85,46 @@ func (d *ContextEnvironmentVariableDataSource) Read(ctx context.Context, req dat
 		return
 	}
 
+	// There is no route that reads one context environment variable by name —
+	// GET /context/{id}/environment-variable/{name} answers 404 — so this data
+	// source has to list and filter.
 	vars, err := d.client.ListContextEnvironmentVariables(ctx, state.ContextId.ValueString())
 	if err != nil {
-		resp.Diagnostics.AddError(
-			"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
-			circleci.Detail(err),
-		)
-		return
+		// A context holding more variables than CircleCI will list is only a
+		// problem for a name that is not among the ones it disclosed. One that
+		// is there is described exactly as well as a complete list would have
+		// described it, so it is not worth failing the read over. See
+		// circleci.ContextEnvVarsTruncatedError.
+		truncated, ok := circleci.AsContextEnvVarsTruncated(err)
+		if !ok {
+			resp.Diagnostics.AddError(
+				"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
+				circleci.Detail(err),
+			)
+
+			return
+		}
+
+		if _, found := truncated.Find(state.Name.ValueString()); !found {
+			resp.Diagnostics.AddError(
+				"Unable to read CircleCI context environment variable "+state.Name.ValueString(),
+				fmt.Sprintf(
+					"Context %s holds more environment variables than CircleCI will list, and %s was "+
+						"not among the %d it disclosed, so Terraform cannot say whether it exists. "+
+						"CircleCI provides no way to reach the rest: the page token it advertises is "+
+						"ignored on every request, and there is no route that reads a context "+
+						"environment variable by name.\n\n"+
+						"Reduce the context to at most %d environment variables, or split them across "+
+						"more than one context.",
+					state.ContextId.ValueString(), state.Name.ValueString(),
+					len(truncated.Page), len(truncated.Page),
+				),
+			)
+
+			return
+		}
+
+		vars = truncated.Page
 	}
 
 	// Documents current behavior when no environment variable matches the
