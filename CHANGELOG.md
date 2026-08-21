@@ -206,9 +206,11 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
 ### SECURITY
 
 * **`circleci_webhook` never sent `signing_secret` or `verify_tls`.**
-  `circleci-sdk-go` tags those fields `json:"signing-secret"` and
-  `json:"verify-tls"` (hyphenated), while the CircleCI webhook API reads
-  `signing_secret` and `verify_tls`. The API ignores keys it does not recognise, so
+  The webhook API reads those fields as `signing-secret` and `verify-tls`
+  (hyphenated) on the way in, while *reporting* them as `signing_secret` and
+  `verify_tls` on the way out. A client written from the response shape — as this
+  one was — sends the snake_case spelling, and the API ignores keys it does not
+  recognise, so
   **every webhook created or updated by this provider at v0.4.0 or earlier had no
   signing secret at all**, however carefully one was configured, and TLS
   verification silently took the server-side default. `terraform apply` reported
@@ -225,8 +227,17 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
 
   Fixed by migrating the resource onto the provider's own API client.
   `TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire` asserts both that the
-  correct keys are sent, on create *and* on rotation, and that the hyphenated ones
-  are absent, so this cannot silently regress.
+  hyphenated keys are sent, on create *and* on rotation, and that the snake_case
+  ones are absent, so this cannot silently regress.
+
+  Measured directly, two creates with the same token seconds apart:
+
+  ```
+  POST /api/v2/webhook  {"verify-tls":true,"signing-secret":"s3cr3t"}
+    -> 201 {"verify_tls":true,  "signing_secret":"****"}      stored
+  POST /api/v2/webhook  {"verify_tls":true,"signing_secret":"s3cr3t"}
+    -> 201 {"verify_tls":false, <no signing_secret key>}      silently dropped
+  ```
 
   Note `circleci_webhook`'s `signing_secret` still cannot be read back — the API
   masks it. That is a separate, cosmetic issue.
@@ -260,12 +271,14 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
   This is not housekeeping. **Eight bugs in this release were traced to that SDK**, and
   they were structural rather than incidental — a wrapper could not have fixed them:
 
-  * hyphenated JSON tags against a snake_case API that ignores unrecognised keys, so
-    fields were silently never sent or permanently empty. **Three separate instances**:
-    `signing-secret`/`verify-tls` on webhooks (the security issue above),
-    `public-key`/`created-at` on checkout keys, and `created-at` on project environment
-    variables. Three of one mistake in one library is why this was a removal rather
-    than a patch
+  * JSON tags that used one spelling where the API uses two, against an API that
+    ignores unrecognised keys, so fields were silently never sent or permanently
+    empty. **Three separate instances**: `signing-secret`/`verify-tls` on webhooks
+    (the security issue above, where the request spelling is the hyphenated one and
+    the SDK sent snake_case), and `public-key`/`created-at` on checkout keys and
+    `created-at` on project environment variables (where the *response* is
+    snake_case and the SDK read hyphenated, so the values were always empty). Three
+    of one mistake in one library is why this was a removal rather than a patch
   * untyped errors (every failure collapsed to one formatted string), which forced
     drift detection to match on the text `"404"` — and that also matches a 5xx whose
     body happens to contain it, **silently removing live resources from state**

@@ -39,11 +39,15 @@ terraform apply
 
 Every webhook this provider created or updated at v0.4.0 or earlier was sent
 with no signing secret at all, however carefully one was configured, because
-the request used the JSON keys `signing-secret` and `verify-tls` (hyphenated)
-where the CircleCI API reads `signing_secret` and `verify_tls`. The API silently
-ignores keys it does not recognise, so `terraform apply` reported success while
-sending neither field, and TLS verification quietly took the server-side
-default.
+the request used the JSON keys `signing_secret` and `verify_tls` where the
+CircleCI API reads `signing-secret` and `verify-tls` (hyphenated). Those two
+routes are asymmetric: the request keys are hyphenated and the *response* keys
+are snake_case, so a client written from the response shape sends the wrong
+spelling. The API silently ignores keys it does not recognise, so
+`terraform apply` reported success while sending neither field, and TLS
+verification quietly took the server-side default — `verify_tls` defaults to
+`false` when the key it reads is absent, so it was not merely unset, it was
+off.
 
 The signing secret is what lets a receiver distinguish a genuine CircleCI
 delivery from a forged one. If you configured one and your receiver verifies
