@@ -24,15 +24,47 @@ type projectCall struct {
 	body       []byte
 }
 
+// Identifiers a real standalone project is addressed by, copied from a live
+// create so the fake's shapes are the API's shapes rather than plausible-looking
+// stand-ins.
+//
+// standaloneCreatedSlug has the shape POST /organization/{uuid}/project answered
+// with: two opaque base62 fragments of 21 or 22 characters each — both lengths
+// were observed in both positions — and neither one a UUID or a name. The
+// identifiers themselves are stand-ins; the shape is what was measured. The fake
+// used to model a
+// standalone slug as "circleci/<uuid>/repo" — organization UUID, project NAME —
+// which is a shape the API never produces and which would hide any caller that
+// addresses a standalone project by name. Measured: the name-addressed form is
+// rejected outright, with 400 "Invalid project slug …", not 404. See
+// circleci.DeleteProject's comment for all three measurements.
+const (
+	standaloneOrgUUID     = "11111111-2222-3333-4444-555555555555"
+	standaloneProjectUUID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+	standaloneCreatedSlug = "circleci/TFtestOrgFragment01234/TFtestProjFragment012"
+)
+
 // newProjectAPI serves the project routes, recording every call.
 //
 // createdSlug shapes the create response, and it is what decides whether a follow
 // request is issued: the slug's middle segment is the organization name for a
-// classic organization and a UUID for a standalone one.
+// classic organization, and an opaque identifier that is never the organization
+// name for a standalone one.
+//
+// The rest of the response body is DERIVED from createdSlug rather than
+// hardcoded, because the two classes do not differ in the slug alone. Measured
+// over the network: a classic project reports organization_slug "gh/<org>",
+// provider "GitHub" and a real https vcs_url, while a standalone project reports
+// organization_slug "circleci/<fragment>", provider "CircleCI" and a vcs_url of
+// "//circleci.com/<orgUUID>/<projectUUID>". The fake used to answer with the
+// classic shape for both, so every standalone test was asserting against a body
+// the API cannot return.
 func newProjectAPI(t *testing.T, createdSlug, provider string) (*httptest.Server, func() []projectCall) {
 	const orgName = "acme"
 
 	t.Helper()
+
+	orgSlug, vcsURL := projectBodyShape(createdSlug, provider, orgName)
 
 	var (
 		mu    sync.Mutex
@@ -58,14 +90,14 @@ func newProjectAPI(t *testing.T, createdSlug, provider string) (*httptest.Server
 		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":                "00000000-1111-2222-3333-444444444444",
+			"id":                standaloneProjectUUID,
 			"name":              "repo",
 			"slug":              createdSlug,
 			"organization_name": orgName,
-			"organization_slug": "gh/acme",
-			"organization_id":   "55555555-6666-7777-8888-999999999999",
+			"organization_slug": orgSlug,
+			"organization_id":   standaloneOrgUUID,
 			"vcs_info": map[string]string{
-				"vcs_url":        "https://github.com/acme/repo",
+				"vcs_url":        vcsURL,
 				"provider":       provider,
 				"default_branch": "main",
 			},
@@ -79,6 +111,32 @@ func newProjectAPI(t *testing.T, createdSlug, provider string) (*httptest.Server
 
 		return append([]projectCall(nil), calls...)
 	}
+}
+
+// projectBodyShape derives the organization_slug and vcs_info.vcs_url that go
+// with a given project slug, the way the API does. See newProjectAPI.
+func projectBodyShape(createdSlug, provider, orgName string) (orgSlug, vcsURL string) {
+	segments := strings.Split(createdSlug, "/")
+	if len(segments) != 3 {
+		// A deliberately malformed slug: leave the rest of the body classic, since
+		// the test using it is about the malformed slug and nothing else.
+		return "gh/" + orgName, "https://github.com/" + orgName + "/repo"
+	}
+
+	orgSlug = segments[0] + "/" + segments[1]
+
+	if segments[0] == "circleci" {
+		// Standalone: no repository behind the project, so no VCS URL either —
+		// CircleCI reports its own scheme-relative one.
+		return orgSlug, "//circleci.com/" + standaloneOrgUUID + "/" + standaloneProjectUUID
+	}
+
+	host := "github.com"
+	if strings.EqualFold(provider, "Bitbucket") {
+		host = "bitbucket.org"
+	}
+
+	return orgSlug, "https://" + host + "/" + segments[1] + "/" + segments[2]
 }
 
 // TestCreateProjectFollowsAgainstTheConfiguredHost is the regression test for the
@@ -123,19 +181,20 @@ func TestCreateProjectFollowsAgainstTheConfiguredHost(t *testing.T) {
 
 // TestCreateProjectSkipsFollowForStandaloneOrgs covers the other branch.
 //
-// A standalone organization follows the project as part of creating it, and its
-// slug's middle segment is a UUID rather than the organization name. Issuing a
-// second follow there would be a pointless request against a route that does not
-// apply.
+// A standalone organization follows the project as part of creating it, so a
+// second follow would be a pointless request against a route that does not
+// apply. The slug this uses is one a live create actually returned
+// (standaloneCreatedSlug) rather than the "circleci/<uuid>/repo" the fake used to
+// invent, and the create response is the standalone one: provider "CircleCI" and
+// a "//circleci.com/…" vcs_url.
 func TestCreateProjectSkipsFollowForStandaloneOrgs(t *testing.T) {
 	t.Parallel()
 
-	const standaloneSlug = "circleci/aaaaaaaa-1111-2222-3333-444444444444/repo"
-
-	srv, recorded := newProjectAPI(t, standaloneSlug, "GitHub")
+	srv, recorded := newProjectAPI(t, standaloneCreatedSlug, "CircleCI")
 	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
-	if _, err := c.CreateProject(context.Background(), "55555555-6666-7777-8888-999999999999", "repo"); err != nil {
+	project, err := c.CreateProject(context.Background(), standaloneOrgUUID, "repo")
+	if err != nil {
 		t.Fatalf("CreateProject returned error: %v", err)
 	}
 
@@ -147,6 +206,61 @@ func TestCreateProjectSkipsFollowForStandaloneOrgs(t *testing.T) {
 		if strings.Contains(call.path, "/follow") {
 			t.Errorf("issued a follow request for a standalone organization: %s", call.path)
 		}
+	}
+
+	if got, want := project.VCSInfo.Provider, "CircleCI"; got != want {
+		t.Errorf("vcs_info.provider = %q, want %q for a standalone project", got, want)
+	}
+	if got := project.VCSInfo.VCSURL; !strings.HasPrefix(got, "//circleci.com/") {
+		t.Errorf("vcs_info.vcs_url = %q, want a //circleci.com/… URL for a repository-less project", got)
+	}
+}
+
+// TestDeleteProjectUsesTheSlugTheAPIReported is the BUG P6 investigation, pinned.
+//
+// The concern was that DeleteProject builds a name-addressed slug, which for a
+// standalone project the API rejects — measured, over the network, on a freshly
+// created standalone project:
+//
+//	DELETE /project/circleci/TFtestOrgFragment01234/TFtestProjFragment012 → 200 "Project deleted"
+//	DELETE /project/circleci/TFtestOrgFragment01234/my-project            → 400 "Invalid project slug …"
+//	DELETE /project/circleci/<orgUUID>/my-project                         → 400, same
+//
+// It does not build one: it sends the slug it is given, and circleci_project's
+// Delete gives it the slug create or the last read reported. So destroy works on
+// a standalone project, which a live apply-then-destroy confirmed. This test
+// holds that property in place, because the failure it would guard against is
+// invisible against a fake whose standalone slug ends in the project name — which
+// is exactly the fake this file had.
+func TestDeleteProjectUsesTheSlugTheAPIReported(t *testing.T) {
+	t.Parallel()
+
+	srv, recorded := newProjectAPI(t, standaloneCreatedSlug, "CircleCI")
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	project, err := c.CreateProject(context.Background(), standaloneOrgUUID, "repo")
+	if err != nil {
+		t.Fatalf("CreateProject returned error: %v", err)
+	}
+
+	if err := c.DeleteProject(context.Background(), project.Slug); err != nil {
+		t.Fatalf("DeleteProject returned error: %v", err)
+	}
+
+	calls := recorded()
+	deleted := ""
+	for _, call := range calls {
+		if call.method == http.MethodDelete {
+			deleted = call.path
+		}
+	}
+
+	if want := "/api/v2/project/" + standaloneCreatedSlug; deleted != want {
+		t.Errorf("delete path = %q, want %q — the slug the API reported, verbatim", deleted, want)
+	}
+	if strings.HasSuffix(deleted, "/repo") {
+		t.Errorf("delete path = %q ends in the project NAME; the API answers 400 "+
+			"\"Invalid project slug\" for that form on a standalone project", deleted)
 	}
 }
 

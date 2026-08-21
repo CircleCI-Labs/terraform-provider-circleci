@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -513,8 +514,252 @@ func TestProjectResourceUnit_Destroy(t *testing.T) {
 	}
 }
 
-// TestProjectResourceUnit_Import covers importing by slug, which is all
-// ImportState sets (project_resource.go's ImportState).
+// TestProjectResourceUnit_CreateOnAClassicOrgExplainsAMissingRepository covers
+// the diagnostic half of BUG P4.
+//
+// A practitioner pointing circleci_project at a classic, VCS-backed organization
+// with a name that has no repository behind it used to get exactly this, and
+// nothing else:
+//
+//	Could not create CircleCI project, unexpected error: POST
+//	/api/v2/organization/<uuid>/project: 404 Not Found
+//
+// — observed over the network. Not even the API's own "GitHub response: Not
+// Found" survived, because Create passed err.Error() through instead of
+// circleci.Detail(err), and nothing said that a missing repository is what a 404
+// means here or that adoption is the only thing this route does on a classic
+// organization.
+func TestProjectResourceUnit_CreateOnAClassicOrgExplainsAMissingRepository(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+	api.setMissingRepository(true)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: projectResourceConfig(host, "no-such-repo", ""),
+				// One word, so Terraform's line wrapping cannot break the match.
+				// TestProjectCreateFailureDetail below asserts the whole message.
+				ExpectError: regexp.MustCompile(`ADOPT`),
+			},
+		},
+	})
+
+	// And nothing was created or followed on the way out.
+	if followed := api.followedCalls(); len(followed) != 0 {
+		t.Errorf("follow calls = %v, want none: the create failed", followed)
+	}
+}
+
+// TestProjectCreateFailureDetail asserts the whole diagnostic, as a pure
+// function, away from Terraform's line wrapping.
+//
+// The error it feeds in is a real one: the fake answers the create the way the
+// API does, so what is under test is the rendering rather than a hand-built
+// error value that might not resemble one.
+func TestProjectCreateFailureDetail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a 404 explains the classic-organization precondition", func(t *testing.T) {
+		t.Parallel()
+
+		api, client := newFakeProjectClient(t)
+		api.setMissingRepository(true)
+
+		_, err := client.CreateProject(t.Context(), testProjectResourceOrgID, "no-such-repo")
+		if err == nil {
+			t.Fatal("CreateProject succeeded; the fake was asked to answer 404")
+		}
+
+		detail := projectCreateFailureDetail("no-such-repo", err)
+
+		for _, want := range []string{
+			// The API's own message, which err.Error() alone dropped.
+			"GitHub response: Not Found",
+			// Both behaviours, so the message is true whichever class the
+			// organization turns out to be.
+			"standalone",
+			"repository-less project",
+			"can only ADOPT a repository that already exists",
+			// The name, so the practitioner knows which repository to look for.
+			`"no-such-repo"`,
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("the diagnostic does not mention %q; got:\n%s", want, detail)
+			}
+		}
+	})
+
+	t.Run("a non-404 gets the message without the hint", func(t *testing.T) {
+		t.Parallel()
+
+		api, client := newFakeProjectClient(t)
+		api.setFailSettingsStatus(http.StatusInternalServerError)
+
+		// A 500 from the settings route, reused here purely as a non-404 API
+		// error: the hint is about a missing repository and would be noise on
+		// anything but a 404.
+		_, err := client.GetProjectSettings(t.Context(), "gh", "AcmeOrg", "my-repo")
+		if err == nil {
+			t.Fatal("GetProjectSettings succeeded; the fake was asked to answer 500")
+		}
+
+		detail := projectCreateFailureDetail("my-repo", err)
+
+		if strings.Contains(detail, "ADOPT") {
+			t.Errorf("a non-404 error carried the missing-repository hint, which does not apply to "+
+				"it; got:\n%s", detail)
+		}
+		if !strings.Contains(detail, "forced failure for test") {
+			t.Errorf("the API's own message did not reach the diagnostic; got:\n%s", detail)
+		}
+	})
+}
+
+// TestProjectResourceUnit_DestroyOfAStandaloneProjectUsesTheReportedSlug is the
+// provider half of the BUG P6 investigation.
+//
+// The concern was that Delete addresses the project by name, which for a
+// standalone project the API rejects with 400 "Invalid project slug". It does
+// not: it sends state's slug, which is whatever create reported. Confirmed
+// end to end against the live API — `terraform apply` then `terraform destroy`
+// against a standalone organization deleted the project (a following GET
+// answered 404) and emptied state, and the acceptance tests in
+// project_resource_test.go now exercise the same path on every run.
+//
+// This test is what keeps the property visible in CI, and it only means anything
+// because the fake's standalone slug is now the shape the API actually returns —
+// two opaque fragments, see fakeStandaloneProjectFragment. Against the old fake,
+// whose standalone slug ended in the project's own id, a Delete that rebuilt the
+// slug from the name would have looked almost identical.
+func TestProjectResourceUnit_DestroyOfAStandaloneProjectUsesTheReportedSlug(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "standalone")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: projectResourceConfig(host, "my-repo", "")},
+		},
+	})
+
+	want := "DELETE /api/v2/project/" + fakeStandaloneOrgSlug + "/" + fakeStandaloneProjectFragment
+
+	var sawDelete bool
+	for _, req := range api.recordedRequests() {
+		if req == want {
+			sawDelete = true
+		}
+		if req == "DELETE /api/v2/project/"+fakeStandaloneOrgSlug+"/my-repo" {
+			t.Errorf("the provider addressed the delete by project NAME (%s); the API answers "+
+				"400 \"Invalid project slug\" for that form on a standalone project", req)
+		}
+	}
+	if !sawDelete {
+		t.Errorf("no %q seen, got %v", want, api.recordedRequests())
+	}
+}
+
+// TestProjectResourceUnit_DestroyDoesNotOrphanAnUnreachableProject is the
+// regression test for the silent orphaning BUG P6 was looking for, which turned
+// out to be real but for a different reason than the slug shape.
+//
+// `DELETE /project/{slug}` answers 404 "Project not found" both for a project
+// that is gone and for one the token may not see — measured over the network with
+// two personal tokens belonging to two different accounts; the project survived
+// the refused DELETE. Delete used to treat every 404 as "already gone", so
+// Terraform reported a successful destroy and dropped a live project from state.
+//
+// The fake reproduces both halves: refuseDeleteAs404 answers the DELETE the way
+// an unauthorised one is answered and keeps the project, and hiddenOrganization
+// makes the organization lookup answer "Org not found." the way it does for a
+// token that cannot reach it. Without deletedProjectIsReallyGone this test fails
+// with no diagnostics at all — a clean, wrong success.
+func TestProjectResourceUnit_DestroyDoesNotOrphanAnUnreachableProject(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeProjectClient(t)
+
+	api.addProject(&fakeProject{
+		id:            "id",
+		name:          "my-repo",
+		slug:          "gh/AcmeOrg/my-repo",
+		orgName:       "AcmeOrg",
+		orgSlug:       "gh/AcmeOrg",
+		orgID:         testProjectResourceOrgID,
+		vcsURL:        "url",
+		vcsProvider:   "GitHub",
+		defaultBranch: "main",
+	}, defaultFakeProjectSettings())
+
+	api.setRefuseDeleteAs404(true)
+	api.setOrganizationHidden(true)
+
+	schema := projectResourceSchemaForTest(t)
+	state := projectResourceStateForTest(t, schema, minimalProjectModel("gh/AcmeOrg/my-repo"))
+
+	r := &projectResource{client: client}
+	resp := &fwresource.DeleteResponse{State: state}
+
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Delete reported success for a project the token cannot see. The DELETE answered " +
+			"404, the project is still there, and Terraform will now drop it from state — a live " +
+			"project left running with nothing managing it.")
+	}
+
+	if detail := resp.Diagnostics.Errors()[0].Detail(); !strings.Contains(detail, "terraform state rm") {
+		t.Errorf("the diagnostic does not tell the practitioner what to do if the organization was "+
+			"genuinely deleted; got: %s", detail)
+	}
+}
+
+// TestProjectResourceUnit_DestroyOfAGenuinelyDeletedProjectStillSucceeds is the
+// other side of the guard above, and the reason the guard checks the organization
+// rather than simply failing on every 404.
+//
+// A project someone deleted in the CircleCI UI is the common case, and a destroy
+// of it must succeed rather than making the practitioner run `terraform state
+// rm`. Here the DELETE answers 404 but the organization is still reachable, so
+// the 404 is taken at face value.
+func TestProjectResourceUnit_DestroyOfAGenuinelyDeletedProjectStillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeProjectClient(t)
+
+	// No project seeded at all, so the DELETE answers 404 on its own — and the
+	// organization route answers normally.
+	api.setOrganizationHidden(false)
+
+	schema := projectResourceSchemaForTest(t)
+	state := projectResourceStateForTest(t, schema, minimalProjectModel("gh/AcmeOrg/my-repo"))
+
+	r := &projectResource{client: client}
+	resp := &fwresource.DeleteResponse{State: state}
+
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Delete of a project that really is gone reported an error: %v\n"+
+			"A project deleted outside Terraform must destroy cleanly.", resp.Diagnostics.Errors())
+	}
+}
+
+// TestProjectResourceUnit_Import covers importing by slug, with NO
+// ImportStateVerifyIgnore list — which is the point.
+//
+// This test used to carry a nine-entry ignore list: the eight boolean toggles and
+// pr_only_branch_overrides, all of which ImportState left null while Create
+// resolved every one of them. That list was BUG P3 written down as an
+// expectation. Removing it is the regression test: with the nine attributes
+// unpopulated the framework reports
+//
+//	ImportStateVerify attributes not equivalent … the - symbol indicates
+//	attributes missing after import
+//
+// naming all nine. The same thing happens against the real API — see the
+// acceptance tests in project_resource_test.go, which have always asked for
+// ImportStateVerify with no ignore list and could not have passed.
 func TestProjectResourceUnit_Import(t *testing.T) {
 	_, host := newFakeProjectAPI(t, "classic")
 
@@ -527,44 +772,31 @@ func TestProjectResourceUnit_Import(t *testing.T) {
 				ImportState:       true,
 				ImportStateVerify: true,
 				ImportStateId:     "gh/AcmeOrg/my-repo",
-				// ImportState sets only slug, so every toggle starts null and the
-				// first Read after import leaves an undeclared one that way too — see
-				// TestProjectResourceUnit_ReadDoesNotAdoptUndeclaredToggles. The
-				// resource created in the first step never declared any of these
-				// either, but it went through Create, which must resolve every
-				// Computed toggle to a known value up front; the imported copy has no
-				// such step and is not expected to match it here.
-				ImportStateVerifyIgnore: []string{
-					"auto_cancel_builds",
-					"build_fork_prs",
-					"build_prs_only",
-					"disable_ssh",
-					"forks_receive_secret_env_vars",
-					"set_github_status",
-					"setup_workflows",
-					"write_settings_requires_admin",
-					// The ninth: exactly as Optional+Computed and exactly as untracked
-					// by import as the eight booleans above, once Read stopped
-					// adopting it unconditionally — see the comment on the
-					// corresponding guard in project_resource.go's Read and
-					// TestProjectResourceUnit_ImportLeavesBranchOverridesUntracked.
-					"pr_only_branch_overrides",
-				},
 			},
 		},
 	})
 }
 
-// TestProjectResourceUnit_ImportLeavesTogglesUntracked is the positive half of
-// the ImportStateVerifyIgnore list above: it asserts what state an imported
-// project actually ends up with, rather than only ignoring the mismatch.
+// TestProjectResourceUnit_ImportPopulatesEverySetting is the positive statement
+// of what an import must leave behind, and it replaces two tests that asserted
+// the opposite.
 //
-// This is the same contract circleci_project_settings' ImportState already
-// documents for itself (see its ImportState method): only the identifying
-// attribute is set on import, so the first plan afterwards shows exactly what
-// the configuration declares rather than every toggle CircleCI happens to
-// report.
-func TestProjectResourceUnit_ImportLeavesTogglesUntracked(t *testing.T) {
+// Those were TestProjectResourceUnit_ImportLeavesTogglesUntracked and
+// TestProjectResourceUnit_ImportLeavesBranchOverridesUntracked, which between
+// them pinned all nine attributes as absent after import and explained why that
+// was correct. It was not: an import whose state omits nine of the resource's
+// attributes fails the framework's own ImportStateVerify against the same
+// project created through Create, and makes the first plan after the import
+// propose a change for every setting the practitioner then writes down. That is
+// BUG P3.
+//
+// Every value asserted here comes from defaultFakeProjectSettings, which is
+// CircleCI's own default set as confirmed against a live project — including the
+// two that are NOT false (set_github_status, setup_workflows) and
+// pr_only_branch_overrides defaulting to the default branch rather than an empty
+// list. Asserting the exact values rather than merely "not null" is what makes
+// this catch an import that populates the attributes with the wrong thing.
+func TestProjectResourceUnit_ImportPopulatesEverySetting(t *testing.T) {
 	_, host := newFakeProjectAPI(t, "classic")
 
 	resource.UnitTest(t, resource.TestCase{
@@ -580,19 +812,45 @@ func TestProjectResourceUnit_ImportLeavesTogglesUntracked(t *testing.T) {
 						return fmt.Errorf("got %d imported instance states, want 1", len(states))
 					}
 
-					for _, attr := range []string{
-						"auto_cancel_builds",
-						"build_fork_prs",
-						"build_prs_only",
-						"disable_ssh",
-						"forks_receive_secret_env_vars",
-						"set_github_status",
-						"setup_workflows",
-						"write_settings_requires_admin",
+					attributes := states[0].Attributes
+
+					for attribute, want := range map[string]string{
+						"auto_cancel_builds":            "false",
+						"build_fork_prs":                "false",
+						"build_prs_only":                "false",
+						"disable_ssh":                   "false",
+						"forks_receive_secret_env_vars": "true",
+						"set_github_status":             "true",
+						"setup_workflows":               "true",
+						"write_settings_requires_admin": "false",
+						// The ninth. CircleCI defaults it to the project's default
+						// branch, not to an empty list.
+						"pr_only_branch_overrides.#": "1",
+						"pr_only_branch_overrides.0": "main",
 					} {
-						if v, ok := states[0].Attributes[attr]; ok {
-							return fmt.Errorf("imported state has %s = %q, want it absent (null): "+
-								"an import must not adopt a toggle nothing configured", attr, v)
+						got, ok := attributes[attribute]
+						if !ok {
+							return fmt.Errorf(
+								"imported state has no %s; an import must populate every attribute the "+
+									"API can supply, or the first plan afterwards proposes a change for it",
+								attribute,
+							)
+						}
+						if got != want {
+							return fmt.Errorf("imported state has %s = %q, want %q", attribute, got, want)
+						}
+					}
+
+					// And the identifying attributes the import ID does not carry.
+					for attribute, want := range map[string]string{
+						"id":                "proj-1",
+						"name":              "my-repo",
+						"slug":              "gh/AcmeOrg/my-repo",
+						"organization_name": "AcmeOrg",
+						"vcs_info_provider": "GitHub",
+					} {
+						if got := attributes[attribute]; got != want {
+							return fmt.Errorf("imported state has %s = %q, want %q", attribute, got, want)
 						}
 					}
 
@@ -604,19 +862,16 @@ func TestProjectResourceUnit_ImportLeavesTogglesUntracked(t *testing.T) {
 }
 
 // TestProjectResourceUnit_ImportRoundTrips is the "plan after import is empty"
-// proof that TestProjectResourceUnit_Import's ImportStateVerifyIgnore list only
-// argues for in a comment.
+// half of the import contract.
 //
-// A generated configuration from `terraform plan -generate-config-out` would
-// omit every one of the eight toggles ImportStateVerifyIgnore names, along with
-// pr_only_branch_overrides: all are null after import, and null Optional
-// attributes are not emitted into generated HCL. So the honest round trip to
-// prove is narrower than "the whole schema matches" — it is "a config this
-// trivial plans clean against the state import actually produced." Unlike
-// circleci_project_settings, these toggles are Optional+Computed rather than
+// It matters more now than it did, and for the opposite reason. Import populates
+// all nine settings attributes, so this proves the thing an import is for: a
+// configuration that names none of them still plans clean against the state the
+// import produced. These attributes are Optional+Computed rather than
 // Optional-only, so it is not obvious without a real plan that Terraform core
-// keeps an unconfigured Computed attribute at its prior (null) value here
-// rather than treating it as unknown; this test is what confirms it does.
+// keeps an unconfigured Computed attribute at its prior (now non-null) value
+// rather than treating it as unknown and proposing a change; this test is what
+// confirms it does.
 func TestProjectResourceUnit_ImportRoundTrips(t *testing.T) {
 	_, host := newFakeProjectAPI(t, "classic")
 
@@ -638,52 +893,6 @@ func TestProjectResourceUnit_ImportRoundTrips(t *testing.T) {
 				Config:             trivialConfig,
 				PlanOnly:           true,
 				ExpectNonEmptyPlan: false,
-			},
-		},
-	})
-}
-
-// TestProjectResourceUnit_ImportLeavesBranchOverridesUntracked is
-// TestProjectResourceUnit_ImportLeavesTogglesUntracked's missing ninth case.
-//
-// pr_only_branch_overrides is exactly as Optional+Computed as the eight boolean
-// toggles that test already covers, and the resource's own doc comment on the
-// schema and Create describes it as one of the settings a configuration must
-// opt into to manage. But Read's handling of it (project_resource.go) has no
-// null guard the way projectSettingRefresh gives every boolean: it calls
-// branchOverrideSet and assigns the result unconditionally, on every Read —
-// including the one Terraform runs immediately after import. So where the
-// eight booleans stay null until a configuration names them,
-// pr_only_branch_overrides is silently adopted from whatever CircleCI
-// currently holds the moment an import's automatic refresh runs, even though
-// nothing has asked this resource to manage it yet.
-func TestProjectResourceUnit_ImportLeavesBranchOverridesUntracked(t *testing.T) {
-	_, host := newFakeProjectAPI(t, "classic")
-
-	resource.UnitTest(t, resource.TestCase{
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{Config: projectResourceConfig(host, "my-repo", "")},
-			{
-				ResourceName:  "circleci_project.test",
-				ImportState:   true,
-				ImportStateId: "gh/AcmeOrg/my-repo",
-				ImportStateCheck: func(states []*terraform.InstanceState) error {
-					if len(states) != 1 {
-						return fmt.Errorf("got %d imported instance states, want 1", len(states))
-					}
-
-					if v, ok := states[0].Attributes["pr_only_branch_overrides.#"]; ok && v != "0" {
-						return fmt.Errorf(
-							"imported state has pr_only_branch_overrides = %v, want it absent (null): "+
-								"an import must not adopt a setting nothing configured, the same as every "+
-								"boolean toggle",
-							states[0].Attributes,
-						)
-					}
-
-					return nil
-				},
 			},
 		},
 	})
@@ -1050,11 +1259,15 @@ func TestProjectResourceUnit_UpdateWritesBranchOverridesFromResponseNotRequest(t
 // build_prs_only stands in for "declared" here: prior state already carries a
 // known value for it, so a refresh is expected to keep tracking it.
 // set_github_status stands in for "undeclared": prior state is null for it,
-// simulating a project whose toggles have never been adopted (which is exactly
-// the state ImportState leaves every toggle in, see
-// TestProjectResourceUnit_ImportLeavesTogglesUntracked). The fake is made to
-// report a *different* value for it than any default, so adopting it would be
-// obvious rather than accidentally matching by coincidence.
+// simulating a project whose toggles have never been adopted — state written by
+// an older provider version, or hand-edited. The fake is made to report a
+// *different* value for it than any default, so adopting it would be obvious
+// rather than accidentally matching by coincidence.
+//
+// This is deliberately NOT the post-import case, which adopts every value the
+// API reports (see projectSettingImport and
+// TestProjectResourceUnit_ImportPopulatesEverySetting). minimalProjectModel sets
+// a non-null id, which is exactly what tells the two apart.
 func TestProjectResourceUnit_ReadDoesNotAdoptUndeclaredToggles(t *testing.T) {
 	t.Parallel()
 

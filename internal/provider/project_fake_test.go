@@ -28,17 +28,25 @@ type fakeProjectAPI struct {
 
 	mu sync.Mutex
 
-	// orgKind decides the shape Create responds with.
+	// orgKind decides the shape Create responds with, and — because the two
+	// classes are two different operations — what a create can do at all.
+	//
+	// For "classic" this fake models an organization in which a repository of
+	// the requested name ALREADY EXISTS, because that is the only case where a
+	// create succeeds there: on a classic organization the route adopts an
+	// existing repository and never creates one. missingRepository models the
+	// other case.
 	//
 	//   - "classic" mimics a GitHub OAuth organization: addressed by name, and
 	//     CircleCI does not follow the project as part of creating it, so a
 	//     v1.1 follow call is expected afterwards.
-	//   - "standalone" mimics a circleci-native organization: addressed by
-	//     UUID, and the project is already followed by the create call, so no
-	//     v1.1 follow call should ever be made.
+	//   - "standalone" mimics a circleci-native organization: addressed by two
+	//     opaque base62 fragments, and the project is already followed by the
+	//     create call, so no v1.1 follow call should ever be made.
 	//
 	// See internal/circleci/project.go's followProject for the condition this
-	// mirrors.
+	// mirrors, and fakeStandaloneOrgFragment below for why the standalone slug
+	// looks the way it does.
 	orgKind string
 
 	projects map[string]*fakeProject   // keyed by slug
@@ -47,9 +55,35 @@ type fakeProjectAPI struct {
 	requests []string                  // "METHOD path", in order
 	followed []string                  // "vcsType/org/name" from every follow call
 
+	// missingRepository makes a create on a CLASSIC organization answer
+	// 404 {"message":"GitHub response: Not Found"} — what the API answers when
+	// no repository of that name exists for it to adopt. Measured over the
+	// network against two separate GitHub-backed organizations. It is ignored
+	// for a standalone organization, where no repository is involved and a
+	// create of any name succeeds (also measured, on an organization created
+	// seconds earlier with no VCS connection at all).
+	missingRepository bool
+
 	// missingProject makes every GET for a single project answer 404, to
 	// simulate a project deleted outside Terraform.
 	missingProject bool
+
+	// refuseDeleteAs404 makes every project DELETE answer
+	// 404 {"message":"Project not found"} while leaving the project in place.
+	//
+	// This is not a hypothetical. Measured over the network with two personal
+	// API tokens: a DELETE issued by a token that cannot see the project's
+	// organization answers exactly that, and the project is still there
+	// afterwards. See deletedProjectIsReallyGone in project_resource.go.
+	refuseDeleteAs404 bool
+
+	// hiddenOrganization makes GET /organization/{id} answer
+	// 404 {"message":"Org not found."} — what CircleCI answers for an
+	// organization the token cannot see, also measured. Paired with
+	// refuseDeleteAs404 it reproduces a token that has lost access to the
+	// organization; on its own it reproduces an organization that was deleted
+	// while its project was still in state.
+	hiddenOrganization bool
 
 	// failSettingsStatus, when non-zero, makes every settings GET and PATCH
 	// answer with that status instead of the normal behavior. It exists to
@@ -127,6 +161,24 @@ func defaultFakeProjectSettings() map[string]any {
 	}
 }
 
+// The slug fragments a standalone project is really addressed by, copied from a
+// live create.
+//
+// This fake used to build a standalone slug as "circleci/<orgUUID>/<projectID>",
+// with the project's own id as the last segment. The API produces neither: the
+// organization segment is a 22-character base62 fragment (not its UUID) and the
+// project segment is a 21-character one (not its UUID, and not its name). None of
+// the three is interchangeable in every direction — measured over the network, a
+// slug whose last segment is the project NAME is rejected with
+// 400 "Invalid project slug …", while the organization's UUID in the first
+// position does work. Modelling the slug as something derivable from the name is
+// what would hide a caller that reconstructs it instead of using the one the API
+// reported; see circleci.DeleteProject.
+const (
+	fakeStandaloneOrgSlug         = "circleci/TFtestOrgFragment01234"
+	fakeStandaloneProjectFragment = "TFtestProjFragment012"
+)
+
 // newFakeProjectAPI starts the stand-in API and returns it alongside its
 // origin, for tests that configure the provider by host.
 func newFakeProjectAPI(t *testing.T, orgKind string) (*fakeProjectAPI, string) {
@@ -179,6 +231,10 @@ func (a *fakeProjectAPI) handle(w http.ResponseWriter, r *http.Request) {
 		strings.HasSuffix(r.URL.Path, "/follow"):
 		a.handleFollow(w, r)
 
+	case r.Method == http.MethodGet &&
+		strings.HasPrefix(r.URL.Path, "/api/v2/organization/"):
+		a.handleGetOrganization(w, r)
+
 	case strings.HasPrefix(r.URL.Path, "/api/v2/project/"):
 		a.handleProjectRoute(w, r)
 
@@ -200,6 +256,19 @@ func (a *fakeProjectAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	orgID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/organization/"), "/project")
 
 	a.mu.Lock()
+	missingRepository := a.missingRepository && a.orgKind != "standalone"
+	a.mu.Unlock()
+
+	if missingRepository {
+		// The API's own message, verbatim. It never mentions the repository or
+		// the fact that adoption is the only thing on offer, which is why
+		// projectCreateFailureDetail adds that.
+		a.write(w, http.StatusNotFound, map[string]any{"message": "GitHub response: Not Found"})
+
+		return
+	}
+
+	a.mu.Lock()
 	a.nextID++
 	id := fmt.Sprintf("proj-%d", a.nextID)
 
@@ -208,9 +277,9 @@ func (a *fakeProjectAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 	case "standalone":
 		p = &fakeProject{
 			id: id, name: body.Name,
-			slug:          "circleci/" + orgID + "/" + id,
+			slug:          fakeStandaloneOrgSlug + "/" + fakeStandaloneProjectFragment,
 			orgName:       "Standalone Org Display Name",
-			orgSlug:       "circleci/" + orgID,
+			orgSlug:       fakeStandaloneOrgSlug,
 			orgID:         orgID,
 			vcsURL:        "//circleci.com/" + orgID + "/" + id,
 			vcsProvider:   "CircleCI",
@@ -307,6 +376,16 @@ func (a *fakeProjectAPI) handleDelete(w http.ResponseWriter, slug string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// A refused delete is answered exactly like a missing project, and the
+	// project stays. That indistinguishability is the whole defect
+	// deletedProjectIsReallyGone addresses, so the fake has to reproduce it
+	// rather than making the two cases tell-apart-able by status code.
+	if a.refuseDeleteAs404 {
+		a.write(w, http.StatusNotFound, map[string]any{"message": "Project not found"})
+
+		return
+	}
+
 	if _, ok := a.projects[slug]; !ok {
 		a.write(w, http.StatusNotFound, map[string]any{"message": "Project not found"})
 
@@ -315,6 +394,32 @@ func (a *fakeProjectAPI) handleDelete(w http.ResponseWriter, slug string) {
 
 	delete(a.projects, slug)
 	a.write(w, http.StatusOK, map[string]any{"message": "Project deleted"})
+}
+
+// handleGetOrganization serves GET /api/v2/organization/{org-slug-or-id}, which
+// circleci_project's Delete uses to tell a deleted project apart from one this
+// token cannot see.
+//
+// The 404 body is the API's own — "Org not found.", with the trailing full stop,
+// which is a different string from the project route's "Project not found".
+func (a *fakeProjectAPI) handleGetOrganization(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.hiddenOrganization {
+		a.write(w, http.StatusNotFound, map[string]any{"message": "Org not found."})
+
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/v2/organization/")
+
+	a.write(w, http.StatusOK, map[string]any{
+		"id":       id,
+		"name":     "AcmeOrg",
+		"slug":     "gh/AcmeOrg",
+		"vcs_type": "github",
+	})
 }
 
 func (a *fakeProjectAPI) handleGetSettings(w http.ResponseWriter, slug string) {
@@ -559,6 +664,34 @@ func (a *fakeProjectAPI) setMissing(missing bool) {
 	defer a.mu.Unlock()
 
 	a.missingProject = missing
+}
+
+// setMissingRepository makes a create on a classic organization answer 404, as
+// the API does when there is no repository of that name to adopt. See
+// missingRepository.
+func (a *fakeProjectAPI) setMissingRepository(missing bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.missingRepository = missing
+}
+
+// setRefuseDeleteAs404 makes every project DELETE answer 404 with the project
+// left in place. See refuseDeleteAs404.
+func (a *fakeProjectAPI) setRefuseDeleteAs404(refuse bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.refuseDeleteAs404 = refuse
+}
+
+// setOrganizationHidden makes GET /organization/{id} answer 404. See
+// hiddenOrganization.
+func (a *fakeProjectAPI) setOrganizationHidden(hidden bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.hiddenOrganization = hidden
 }
 
 // setForceSlug overrides the slug Create responds with. See forceSlug.

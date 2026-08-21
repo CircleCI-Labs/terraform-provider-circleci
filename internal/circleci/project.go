@@ -32,15 +32,35 @@ type ProjectVCS struct {
 // "vcs-type/org/project".
 const projectSlugSegments = 3
 
-// GetProject returns the project identified by slug, e.g. "gh/acme/repo" or
-// "circleci/<orgUUID>/<projectUUID>".
+// GetProject returns the project identified by slug.
 //
-// The route itself also accepts a bare project UUID in place of the slug — the
-// handler matches the slug pattern first and falls back to a lookup by id — but
-// this client requires the three-segment form, because every caller holds a slug
-// and a single-segment argument would be ambiguous with a malformed slug. If a
-// project ever needs addressing by id alone, that is a new method rather than a
-// loosening of projectSlugPath.
+// WHAT A SLUG'S THIRD SEGMENT IS depends on the organization's class, and it is
+// not the project name on both. Measured over the network:
+//
+//   - CLASSIC, VCS-backed organization: "gh/example-org/example-repo".
+//     Organization name, then repository name.
+//   - STANDALONE (CircleCI-native) organization: "circleci/TFtestOrgFragment01234/TFtestProjFragment012".
+//     Two opaque base62 identifiers, 21 or 22 characters each — the length
+//     varies, and both a 21- and a 22-character segment were observed in each
+//     position — and NEITHER is a UUID or a name. Substituting the project name
+//     for that second fragment does not work: it answers
+//     400 {"message":"Invalid project slug circleci/…/my-project"}, not 404.
+//     Substituting the organization's UUID for the first one does work, as does
+//     the project's UUID for the second.
+//
+// So the only safe source for a standalone project's slug is the API itself:
+// whatever create or a previous read reported. Every caller in this package
+// passes exactly that, which is why DeleteProject below is correct even though
+// the name-addressed form it would otherwise build is rejected — see its own
+// comment.
+//
+// The route also accepts a bare project UUID in place of the whole slug (also
+// measured: 200, with the same body), because the handler matches the slug
+// pattern first and falls back to a lookup by id. This client still requires the
+// three-segment form, because every caller holds a slug and a single-segment
+// argument would be ambiguous with a malformed slug. If a project ever needs
+// addressing by id alone, that is a new method rather than a loosening of
+// projectSlugPath.
 func (c *Client) GetProject(ctx context.Context, slug string) (*Project, error) {
 	path, err := projectSlugPath(slug)
 	if err != nil {
@@ -55,7 +75,24 @@ func (c *Client) GetProject(ctx context.Context, slug string) (*Project, error) 
 	return &project, nil
 }
 
-// CreateProject creates a project in an organization.
+// CreateProject creates — or, on a classic organization, adopts — a project in an
+// organization.
+//
+// This one route is TWO operations, and which one runs is decided by the
+// organization's class, not by the body. Both measured over the network:
+//
+//   - STANDALONE (CircleCI-native) organization: a genuine create. 200, and the
+//     project comes back with no repository behind it — vcs_info.provider
+//     "CircleCI" and a vcs_url of "//circleci.com/<orgUUID>/<projectUUID>". It
+//     works on an organization created seconds earlier with no VCS connection of
+//     any kind, so nothing about it depends on a VCS integration.
+//   - CLASSIC, VCS-backed organization: an adoption of a repository that already
+//     exists, and nothing else. A name with no matching repository answers
+//     404 {"message":"GitHub response: Not Found"} — checked against two separate
+//     GitHub-backed organizations.
+//
+// The provider surfaces that distinction in the diagnostic; see
+// projectCreateFailureDetail in internal/provider/project_resource.go.
 //
 // This replaces circleci-sdk-go's project.Create for two reasons. The SDK sent the
 // follow request below to a hardcoded https://circleci.com, ignoring the
@@ -81,14 +118,18 @@ func (c *Client) CreateProject(ctx context.Context, organizationID, name string)
 
 // followProject follows a newly created project when the organization requires it.
 //
-// A standalone (`circleci/<uuid>`) organization follows the project as part of
+// A standalone (CircleCI-native) organization follows the project as part of
 // creating it. A classic GitHub or Bitbucket organization does not, and an
 // unfollowed project never runs. The only route that follows a project is v1.1, so
 // this is the provider's one remaining v1.1 dependency.
 //
-// The condition mirrors the API's own: the slug's middle segment is the
-// organization *name* for a classic organization, and a UUID for a standalone one,
-// so comparing it to OrganizationName distinguishes them without a second lookup.
+// The condition distinguishes the two classes without a second lookup: the slug's
+// middle segment is the organization *name* for a classic organization, and an
+// opaque base62 identifier of 21 or 22 characters for a standalone one —
+// measured: "circleci/TFtestOrgFragment01234/…" for an organization whose name
+// is a short hyphenated string.
+// It is not a UUID, as an earlier version of this comment claimed; that mattered
+// only as a description, since either way it never equals OrganizationName.
 func (c *Client) followProject(ctx context.Context, project *Project) error {
 	segments := strings.Split(project.Slug, "/")
 	if len(segments) != projectSlugSegments || segments[1] != project.OrganizationName {
@@ -108,6 +149,30 @@ func (c *Client) followProject(ctx context.Context, project *Project) error {
 }
 
 // DeleteProject deletes the project identified by slug.
+//
+// The slug MUST be one the API itself reported — from create, or from a read —
+// and not one assembled from the organization and project names. On a standalone
+// organization the two differ, and only the API's own form is accepted. All three
+// measured over the network against the same freshly created standalone project:
+//
+//	DELETE /project/circleci/TFtestOrgFragment01234/TFtestProjFragment012  (the reported slug)
+//	→ 200 {"message":"Project deleted"}, and a following GET answers 404
+//
+//	DELETE /project/circleci/TFtestOrgFragment01234/my-project             (name-addressed)
+//	→ 400 {"message":"Invalid project slug circleci/TFtestOrgFragment01234/my-project"}
+//
+//	DELETE /project/circleci/<orgUUID>/my-project                          (name-addressed)
+//	→ 400, same message
+//
+// The provider always passes the reported slug — circleci_project stores whatever
+// create or the last read returned — so destroy works on a standalone project.
+// This comment records the measurement because the 400 is the failure mode to
+// expect from any future caller that builds a slug from names, and because a 400
+// is not IsNotFound: it surfaces as an error and Terraform keeps the resource in
+// state, rather than dropping it and orphaning the project.
+//
+// A project that is already gone answers 404 {"message":"Project not found"}, and
+// circleci_project's Delete treats that as success.
 func (c *Client) DeleteProject(ctx context.Context, slug string) error {
 	path, err := projectSlugPath(slug)
 	if err != nil {

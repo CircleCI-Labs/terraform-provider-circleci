@@ -9,7 +9,28 @@ description: |-
 
 Manages a CircleCI project and its advanced settings.
 
-Use this for a project Terraform creates. For a project that **already exists**, use [`circleci_project_settings`](project_settings) instead: this resource owns the project's whole settings record, and it can neither adopt a project it did not create nor be pointed at one alongside another resource — two resources managing the same project overwrite each other's changes on every apply.
+Use this for a project Terraform creates. For a project that **already exists** in CircleCI, use [`circleci_project_settings`](project_settings) instead: this resource owns the project's whole settings record, and it can neither be pointed at an existing CircleCI project nor share one with another resource — two resources managing the same project overwrite each other's changes on every apply.
+
+## What an apply actually does
+
+`POST /api/v2/organization/{organization_id}/project` is **two different operations**, and which one runs depends on the organization, not on the configuration. Both behaviours were measured against the live API.
+
+| Organization | What an apply does |
+| --- | --- |
+| **Standalone** (CircleCI-native; slug `circleci/…`) | **Creates** a new project. Nothing needs to exist beforehand and no repository is involved: the new project comes back with `vcs_info_provider = "CircleCI"` and a `vcs_info_url` of `//circleci.com/<org-uuid>/<project-uuid>`. Confirmed on a standalone organization with no VCS connection at all, as well as on GitHub App and GitLab organizations. |
+| **Classic**, VCS-backed (slug `gh/…`, `bb/…`) | **Adopts a repository that already exists.** It never creates one. The project comes back with the real VCS provider (`GitHub`) and repository URL, and CircleCI is then followed through a v1.1 route so the project can run. |
+
+~> **Precondition on a classic organization.** A repository named `name` must **already exist** in that organization and be visible to the token's VCS account. Otherwise the apply fails, and the API's answer says nothing about repositories:
+
+```
+Error: Error creating CircleCI project
+
+Could not create CircleCI project, unexpected error: GitHub response: Not Found (HTTP 404)
+```
+
+The provider adds the explanation, but the underlying condition can only be fixed on the VCS: create the repository first, then apply. A randomly generated project name can never work on a classic organization.
+
+Destroying works the same way on both: `DELETE /api/v2/project/{project-slug}`, using the slug CircleCI reported. On a standalone organization that slug's segments are opaque identifiers rather than names (`circleci/<org-fragment>/<project-fragment>`), and a slug assembled from the organization and project names is rejected with `400 Invalid project slug` — so use the `slug` attribute, not a name-based guess, when importing.
 
 ## Availability
 
@@ -18,8 +39,8 @@ Use this for a project Terraform creates. For a project that **already exists**,
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | Yes. Projects are a first-class CircleCI Server feature with the same v2 surface. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against, so this is derived from which routes a Server installation exposes. Creating a project on a classic (non-standalone) organization additionally follows a v1.1 route to make the project runnable — the oldest API surface this provider still depends on — and that dependency is untested against Server too. See the CircleCI Server note on the provider index page. |
 | **API** | `POST /api/v2/organization/{organization_id}/project`, `GET` and `DELETE /api/v2/project/{project-slug}` |
-| **Organization type** | Any. |
-| **Token** | A personal API token with permission to create projects in the organization. |
+| **Organization type** | Any, but the operation differs — see "What an apply actually does" above. On a standalone organization this creates a project; on a classic one it adopts an existing repository. |
+| **Token** | A personal API token with permission to create projects in the organization. On a classic organization the token's VCS account must also be able to see the repository being adopted. |
 
 ## Example Usage
 
@@ -82,7 +103,9 @@ output "circleci_api_project" {
 
 ### Required
 
-- `name` (String) The name of the project repository. Changing this value forces a new resource to be created.
+- `name` (String) The name of the project. Changing this value forces a new resource to be created.
+
+On a **classic**, VCS-backed organization this must be the name of a repository that **already exists** in that organization: CircleCI adopts the repository, it does not create one. On a **standalone** organization it is simply the name of the new project, and no repository is involved.
 
 ### Optional
 
@@ -116,20 +139,28 @@ Changing this value forces a new resource to be created.
 - `oss` (Boolean) Whether the project is treated as free and open source, which grants additional credits and makes builds visible to everyone.
 
 ~> **Read-only.** This is reported by the API but cannot be set through it. The settings endpoint rejects the field outright — `400 Unexpected field 'advanced.oss'.` — and because it rejects the whole request, including it broke every project create and settings update. CircleCI derives it from whether the repository is public together with an organization-level flag, so set it in the CircleCI web application rather than here.
-- `slug` (String) The project slug in the format `vcs-type/org-name/repo-name`.
+- `slug` (String) The project slug, as CircleCI reports it. On a **classic**, VCS-backed organization that is `vcs-type/org-name/repo-name`, for example `gh/acme/my-repo`. On a **standalone** organization it is `circleci/<org-fragment>/<project-fragment>`, where both segments are opaque identifiers — the second is neither the project name nor its UUID. Use this value verbatim when importing; a slug assembled from names is rejected there.
 - `vcs_info_default_branch` (String) The default branch of the project repository.
 - `vcs_info_provider` (String) The VCS provider (e.g., `github`, `bitbucket`).
 - `vcs_info_url` (String) The VCS URL of the project repository.
 
 ## Import
 
-Import is supported using the project slug (`vcs-type/org-name/repo-name`):
+Import is supported using the project slug:
 
 ```shell
-terraform import circleci_project.example "github/my-org/my-repo"
+# Classic, VCS-backed organization
+terraform import circleci_project.example "gh/my-org/my-repo"
+
+# Standalone (CircleCI-native) organization: both segments are opaque identifiers
+terraform import circleci_project.example "circleci/TFtestOrgFragment01234/TFtestProjFragment012"
 ```
 
-Only `slug` is populated by the import itself. Every setting — every boolean toggle and `pr_only_branch_overrides` alike — starts `null`, the same as when this resource is created against a configuration that names none of them: see "Settings you leave out" below. So a configuration generated from the import (for example with `terraform plan -generate-config-out`) mentions no settings either, and `terraform plan` against it is empty. Add a setting to the generated configuration only once you actually want this resource to manage it; adding one that already holds the value CircleCI reports is a no-op, but adding one with a different value writes it on the next apply.
+Use the value of the `slug` attribute, exactly as CircleCI reports it. On a classic organization that reads as `gh/my-org/my-repo`; on a standalone organization it is `circleci/<org-fragment>/<project-fragment>`, where both segments are opaque identifiers and the second is neither the project's name nor its UUID. A slug built from names is rejected there with `400 Invalid project slug`.
+
+The import populates **every attribute the API can supply** — the identifying attributes and all nine settings (the eight boolean toggles and `pr_only_branch_overrides`) — so the imported resource is indistinguishable from one this provider created, and `terraform plan` immediately afterwards is empty. Earlier versions populated only `slug` and left those nine `null`, which made the first plan after an import propose a change for every setting you then wrote down, whether or not it already held that value.
+
+Because the settings attributes are optional, a configuration generated from the import (for example with `terraform plan -generate-config-out`) still mentions none of them, and that plans clean too. Add a setting to the generated configuration once you actually want this resource to manage it.
 
 ## Settings you leave out
 
