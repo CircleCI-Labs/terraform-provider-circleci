@@ -88,6 +88,14 @@ type fakeContext struct {
 	createdAt string
 	orgID     string
 
+	// oauthBacked stands in for whether this context's organization is
+	// OAuth-backed (a classic gh/<org> or bitbucket/<org> slug) rather than
+	// standalone (circleci/<uuid>). It gates "group" restrictions — see
+	// postRestriction — and defaults to false (standalone), matching every
+	// existing seedContext call site, none of which cares about the
+	// distinction until a test explicitly calls setOAuthBacked.
+	oauthBacked bool
+
 	restrictions []*fakeContextRestriction
 	envVars      map[string]*fakeContextEnvVar
 }
@@ -187,6 +195,22 @@ func (a *contextFakeAPI) fail(status int, message string) {
 
 	a.failStatus = status
 	a.failMessage = message
+}
+
+// setOAuthBacked marks a seeded context's organization as OAuth-backed (true)
+// or standalone (false; the default), controlling whether a "group"
+// restriction can ever succeed against it. See fakeContext.oauthBacked and
+// postRestriction.
+func (a *contextFakeAPI) setOAuthBacked(contextID string, oauthBacked bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	ctx, ok := a.contexts[contextID]
+	if !ok {
+		a.t.Fatalf("setOAuthBacked: no such context %q", contextID)
+	}
+
+	ctx.oauthBacked = oauthBacked
 }
 
 // setMissing makes a context id resolve to "missing" on every route addressed
@@ -367,6 +391,19 @@ func (a *contextFakeAPI) postContext(w http.ResponseWriter, r *http.Request) {
 		orgID:     body.Owner.ID,
 		createdAt: "2024-01-02T03:04:05.000Z",
 		envVars:   map[string]*fakeContextEnvVar{},
+		// [NET, measured on 2026-08-21] a context created through the real API
+		// never starts with an empty restrictions list: CircleCI adds this "All
+		// members" `group` restriction, whose value is the organization's own id,
+		// as part of creating it. See ListContextRestrictions and
+		// TestContextFakeAPI_CreateSeedsDefaultGroupRestriction.
+		restrictions: []*fakeContextRestriction{
+			{
+				id:               body.Owner.ID,
+				name:             "All members",
+				restrictionType:  "group",
+				restrictionValue: body.Owner.ID,
+			},
+		},
 	}
 	a.contexts[id] = ctx
 	a.mu.Unlock()
@@ -524,7 +561,22 @@ func (a *contextFakeAPI) postRestriction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	switch body.RestrictionType {
-	case "project", "expression", "group":
+	case "project", "expression":
+	case "group":
+		// [NET, measured on 2026-08-21] — see
+		// circleci.ContextRestrictionTypeGroup's doc comment: this type only ever
+		// succeeds against an OAuth-backed organization, and only when the value is
+		// that organization's own UUID.
+		if !ctx.oauthBacked {
+			a.write(w, http.StatusBadRequest, map[string]any{"message": "This is only supported for OAuth orgs."})
+
+			return
+		}
+		if body.RestrictionValue != ctx.orgID {
+			a.write(w, http.StatusBadRequest, map[string]any{"message": "Invalid restriction."})
+
+			return
+		}
 	default:
 		a.write(w, http.StatusBadRequest, map[string]any{"message": "Invalid restriction."})
 
@@ -532,16 +584,39 @@ func (a *contextFakeAPI) postRestriction(w http.ResponseWriter, r *http.Request)
 	}
 
 	a.mu.Lock()
-	a.nextRestrictionSeq++
-	res := &fakeContextRestriction{
-		id:               fmt.Sprintf("rst-%d", a.nextRestrictionSeq),
-		restrictionType:  body.RestrictionType,
-		restrictionValue: body.RestrictionValue,
-		// The name is deliberately left unset here: production learns a
-		// restriction's human-readable name (e.g. a project's name) out of band
-		// and only reports it on a later list/read, never on creation.
+	// A successful "group" restriction is not a new, independent restriction: it
+	// is idempotent with the "All members" default CircleCI already applies to
+	// every context, reusing the organization's own id rather than minting a
+	// fresh one. Everything else gets a fresh sequential id as before.
+	var res *fakeContextRestriction
+	if body.RestrictionType == "group" {
+		for _, existing := range ctx.restrictions {
+			if existing.id == ctx.orgID {
+				res = existing
+
+				break
+			}
+		}
 	}
-	ctx.restrictions = append(ctx.restrictions, res)
+	if res == nil {
+		var id string
+		if body.RestrictionType == "group" {
+			id = ctx.orgID
+		} else {
+			a.nextRestrictionSeq++
+			id = fmt.Sprintf("rst-%d", a.nextRestrictionSeq)
+		}
+
+		res = &fakeContextRestriction{
+			id:               id,
+			restrictionType:  body.RestrictionType,
+			restrictionValue: body.RestrictionValue,
+			// The name is deliberately left unset here: production learns a
+			// restriction's human-readable name (e.g. a project's name) out of band
+			// and only reports it on a later list/read, never on creation.
+		}
+		ctx.restrictions = append(ctx.restrictions, res)
+	}
 	a.mu.Unlock()
 
 	// The create response has no "name" field at all.

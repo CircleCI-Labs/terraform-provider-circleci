@@ -18,9 +18,17 @@ data "circleci_project" "web" {
   slug = "github/acme/web"
 }
 
-# One restriction per permitted project. An unrestricted context is usable by
-# *every* project in the organization, so adding the first restriction is what
-# actually locks the context down — not a separate setting.
+# One restriction per permitted project. CircleCI also creates a `group`
+# restriction named "All members" on every context as part of creating it (see
+# the resource description above) — that is a separate, members axis, not a
+# projects axis. Per CircleCI's documentation and support the two combine as
+# an AND, so leaving "All members" in place alongside the project restrictions
+# below means "any member of the organization, but only from these projects" —
+# check with circleci_context_restrictions to see both. Do NOT delete "All
+# members" to try to make the project restrictions "take effect": they already
+# do. Removing every `group` restriction instead narrows the context to
+# organization administrators only and breaks scheduled workflows and
+# bot-triggered pipelines (e.g. Renovate), which hold no group membership.
 #
 # All three configurable attributes (context_id, type, value) force replacement
 # when changed, because the API has no update route for a restriction.
@@ -57,14 +65,17 @@ output "permitted_projects" {
 # The other two restriction types take their own kind of `value`, and are
 # deliberately not shown with invented values:
 #
-#   type = "group"      `value` is a group id. CircleCI has two unrelated things
-#                       called "group" — VCS security groups (GitHub OAuth
-#                       organizations only) and CircleCI RBAC groups (see
-#                       circleci_group; standalone organizations only) — and the
-#                       API does not document which one this type expects. Verify
-#                       against your own organization before relying on it.
+#   type = "group"      `value` must be the restricted context's own
+#                       organization UUID, and only succeeds against an
+#                       OAuth-backed (classic gh/<org> or bitbucket/<org>)
+#                       organization — it does not reach a VCS team or a
+#                       circleci_group RBAC group, despite the name. See the
+#                       resource description above.
 #
-#   type = "expression" `value` is a CircleCI restriction expression. The
-#                       expression grammar is not published, so copy a working
-#                       expression out of a restriction created in the web
-#                       application instead of guessing at one.
+#   type = "expression" `value` is a CircleCI restriction expression. Its
+#                       grammar is checked, but the fields it names are not —
+#                       a typo'd field name is accepted and creates a
+#                       restriction that may not guard what you intended. Copy
+#                       a working expression out of a restriction created in
+#                       the web application instead of guessing at one, and
+#                       verify its effect.

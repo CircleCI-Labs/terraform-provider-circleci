@@ -57,9 +57,21 @@ func (d *contextRestrictionsDataSource) Schema(_ context.Context, _ datasource.S
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every restriction on a CircleCI context, including restrictions " +
 			"created outside Terraform. Available on CircleCI Cloud and CircleCI Server.\n\n" +
-			"Restrictions control which projects, groups or pipeline conditions may use a context. " +
-			"An unrestricted context is usable by every project in the organization, so an empty " +
-			"`restrictions` list is a meaningful result rather than a missing one.",
+			"Restrictions control which projects, groups or pipeline conditions may use a context.\n\n" +
+			"~> **An empty list is the most restricted state, not the least.** [NET, measured on " +
+			"2026-08-21] a context created through the API or the UI starts with exactly one " +
+			"restriction: a `group` restriction named \"All members\" whose `value` equals the " +
+			"organization's own UUID. That is the permissive default — per CircleCI's documentation " +
+			"it means every organization member may use the context. An empty `restrictions` list " +
+			"means every group grant has been removed, which per CircleCI's documentation leaves the " +
+			"context usable by organization administrators only. To ask \"may every member use this " +
+			"context\", look for a `group` entry whose `value` equals the organization UUID; to ask " +
+			"\"is this context genuinely narrowed to specific teams\", look for a `group` entry whose " +
+			"`value` does not. Do not use the list's length for either question, and do not delete the " +
+			"default entry to make a `project` restriction \"take effect\" — per CircleCI's " +
+			"documentation and support the two combine as an AND already, and removing every `group` " +
+			"restriction instead locks the context down to administrators, breaking scheduled and " +
+			"bot-triggered pipelines.",
 		Attributes: map[string]schema.Attribute{
 			"context_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the context whose restrictions are listed.",
@@ -67,7 +79,9 @@ func (d *contextRestrictionsDataSource) Schema(_ context.Context, _ datasource.S
 			},
 			"restrictions": schema.ListNestedAttribute{
 				MarkdownDescription: "The restrictions on the context, in the order the API returns them. " +
-					"Empty when the context is unrestricted.",
+					"A context freshly created through the API or the UI carries one `group` " +
+					"restriction naming \"All members\"; an empty list means every group grant has " +
+					"been removed, restricting the context to organization administrators.",
 				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
@@ -129,8 +143,9 @@ func (d *contextRestrictionsDataSource) Read(ctx context.Context, req datasource
 		return
 	}
 
-	// An empty, non-null list keeps `for_each` and `length()` working against an
-	// unrestricted context.
+	// An empty, non-null list keeps `for_each` and `length()` working. Note that
+	// an empty list here means the context is locked down to organization
+	// administrators, not that it is unrestricted; see the schema description.
 	state.Restrictions = make([]contextRestrictionItemModel, 0, len(restrictions))
 	for _, restriction := range restrictions {
 		state.Restrictions = append(state.Restrictions, contextRestrictionItemModel{

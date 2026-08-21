@@ -25,6 +25,18 @@ Manages a restriction on a CircleCI context. Restrictions control which projects
 
 {{ .SchemaMarkdown | trimspace }}
 
+## Notes
+
+* **Telling a real `group` restriction apart from the default.** Every context
+  carries a `group` restriction named "All members" from the moment it is
+  created, whose `value` equals the context's own organization UUID (see the
+  schema description above). To decide whether a `group` restriction listed by
+  [`circleci_context_restrictions`](../data-sources/context_restrictions) is a
+  genuine restriction or just that default, compare its `value` to the
+  organization's UUID: equal means the permissive default ("every member");
+  different means a real restriction. This rule comes from CircleCI's own
+  documentation, not from anything this provider measured.
+
 ## Import
 
 Import is supported using `context_id/restriction_id`:

@@ -43,8 +43,12 @@ data "circleci_context" "by_id" {
 }
 
 # `restrictions` is the reason to read a context rather than list them: it reports
-# which projects, groups or expressions may use it. An empty list is the *permissive*
-# case — an unrestricted context is usable by every project in the organization.
+# which projects, groups or expressions may use it. A freshly created context
+# carries one `group` restriction named "All members" whose value equals the
+# organization's own UUID — the *permissive* default, meaning every organization
+# member may use the context. An EMPTY list is the opposite: it means every group
+# grant has been removed, which per CircleCI's documentation restricts the context
+# to organization administrators only.
 output "circleci_deploy_context" {
   value = {
     id         = data.circleci_context.deploy.id
@@ -58,8 +62,14 @@ output "circleci_deploy_context" {
   }
 }
 
-output "circleci_context_is_unrestricted" {
-  value = length(data.circleci_context.deploy.restrictions) == 0
+# Is the context open to every organization member? Look for a `group` entry
+# whose value equals the organization's own UUID; do not use the list's length
+# for this — an empty list means the opposite (administrators only).
+output "circleci_context_is_open_to_all_members" {
+  value = anytrue([
+    for restriction in data.circleci_context.deploy.restrictions :
+    restriction.type == "group" && restriction.value == data.circleci_organization.acme.id
+  ])
 }
 ```
 

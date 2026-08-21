@@ -247,8 +247,14 @@ interesting part is who may use one.
 | `circleci_context_restriction` | One restriction: `type` is `project`, `expression` or `group` |
 | `circleci_contexts`, `circleci_context_restrictions` | Data sources listing what exists, including objects created outside Terraform |
 
-An unrestricted context is usable by **every project in the organization**. Each
-restriction is a separate resource, so allowing three projects means three
+A context created through the API or the UI starts with exactly one
+restriction: a `group` restriction named "All members" whose value is the
+organization's own UUID — the permissive default, meaning **every member of
+the organization** may use it. An empty restrictions list is not that
+permissive state; it means every group grant has been removed, which per
+CircleCI's documentation locks the context down to organization
+administrators only. Each `project` restriction is a separate resource, so
+limiting a context to three projects means three
 `circleci_context_restriction` resources.
 
 Project-scoped variables are a different type: `circleci_project_environment_variable`,

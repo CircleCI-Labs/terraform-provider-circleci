@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -55,7 +56,28 @@ func (r *contextRestrictionResource) Metadata(_ context.Context, req resource.Me
 // Schema defines the schema for the resource.
 func (r *contextRestrictionResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a restriction on a CircleCI context. Restrictions control which projects or groups can use a context.",
+		MarkdownDescription: "Manages a restriction on a CircleCI context. Restrictions control which projects or groups can use a context.\n\n" +
+			"~> **Every context already carries one restriction before Terraform ever manages it.** " +
+			"[NET, measured on 2026-08-21]: CircleCI creates a `group` restriction named \"All members\" " +
+			"(value equal to the context's own organization UUID) on every context as part of creating " +
+			"the context itself — visible on read even though nothing ever called this resource's create. " +
+			"It is not special or protected: it can be deleted like any other restriction (import it and " +
+			"remove it from configuration, or delete it directly through the API), and CircleCI never " +
+			"recreates it.\n\n" +
+			"This is a **security-group** restriction: per CircleCI's documentation, it governs which " +
+			"organization *members* may use the context, and \"All members\" is the permissive default " +
+			"naming every member. A `project` restriction governs a separate axis — which *projects* may " +
+			"use the context — and per CircleCI's documentation and support the two combine as an AND: a " +
+			"context carrying both \"All members\" and a `project` restriction is usable by any org " +
+			"member, but only from the listed projects. Adding a `project` restriction is therefore " +
+			"already effective with \"All members\" left in place. Do **not** delete the default `group` " +
+			"restriction to \"activate\" a `project` restriction — removing every `group` restriction " +
+			"narrows the context to organization administrators only and breaks scheduled workflows and " +
+			"bot-triggered pipelines (e.g. Renovate), which hold no group membership. (The enforcement " +
+			"behavior in this paragraph is documented by CircleCI and confirmed by CircleCI support, not " +
+			"independently measured against this provider — the API only lets us observe the listing, " +
+			"not the enforcement.) Use `circleci_context_restrictions` (the plural data source) to see " +
+			"the full set, including this default entry.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the restriction.",
@@ -86,14 +108,26 @@ func (r *contextRestrictionResource) Schema(_ context.Context, _ resource.Schema
 				MarkdownDescription: "The kind of restriction: `project` restricts the context to a " +
 					"project, `expression` restricts it with an expression, and `group` restricts " +
 					"it to a group.\n\n" +
-					"~> `group` is ambiguous and not fully documented by the API. CircleCI has two " +
-					"unrelated concepts called \"group\": VCS security groups, which the contexts " +
-					"documentation states are available for `github` type organizations only and " +
-					"require the GitHub OAuth integration; and CircleCI RBAC groups (see " +
-					"`circleci_group`), which require a `circleci` type organization. Those " +
-					"requirements are mutually exclusive, and the API does not say which one " +
-					"`restriction_type = \"group\"` expects. Verify against your organization " +
-					"before relying on it.\n\n" +
+					"~> [NET, measured on 2026-08-21]: through this resource's create route, `group` " +
+					"only ever succeeded on an OAuth-backed organization (a classic `gh/<org>` or " +
+					"`bitbucket/<org>` slug), and the only `value` accepted was the organization's " +
+					"own UUID — the value CircleCI already assigns to the default \"All members\" " +
+					"restriction every context carries (see the resource description above). We did " +
+					"not test a `value` naming a real VCS security group, so this does not establish " +
+					"what the type can or cannot restrict in general — only that the create route we " +
+					"exercised accepted nothing else. Per CircleCI's documentation, `group` " +
+					"restrictions are security groups governing which organization members may use " +
+					"the context (a members axis, separate from `project`'s projects axis); \"All " +
+					"members\" is that axis's permissive default. On a standalone (`circleci/<uuid>`) " +
+					"organization, `group` fails outright, whatever the value.\n\n" +
+					"~> `expression`'s grammar is checked at apply time — malformed syntax is " +
+					"rejected — but the fields an expression names are not: a field that does not " +
+					"exist, or a type mismatch (a number field compared to a string), is silently " +
+					"accepted. A typo therefore creates a restriction with no error anywhere, that " +
+					"may not guard what its author intended. Copy a working expression out of a " +
+					"restriction created in the web application rather than writing one from " +
+					"scratch, and verify its effect rather than trusting that CircleCI would have " +
+					"rejected a mistake.\n\n" +
 					"Changing this value forces a new resource to be created.",
 				Required: true,
 				Validators: []validator.String{
@@ -122,6 +156,32 @@ func (r *contextRestrictionResource) Schema(_ context.Context, _ resource.Schema
 	}
 }
 
+// contextRestrictionCreateErrorDetail renders a CreateContextRestriction error
+// for a Terraform diagnostic, explaining a "group" restriction's 400s instead
+// of forwarding the API's bare, easy-to-miss message.
+//
+// [NET, measured on 2026-08-21] every 400 the API returns for restriction_type
+// = "group" traces to one of exactly two constraints — see
+// circleci.ContextRestrictionTypeGroup — and neither is guessable from the
+// message alone: "This is only supported for OAuth orgs." says nothing about
+// which value would have worked, and "Invalid restriction." says nothing about
+// organization type at all. A 400 on any other restriction type is left
+// exactly as circleci.Detail renders it.
+func contextRestrictionCreateErrorDetail(restrictionType string, err error) string {
+	detail := circleci.Detail(err)
+
+	if restrictionType != circleci.ContextRestrictionTypeGroup || !circleci.HasStatus(err, http.StatusBadRequest) {
+		return detail
+	}
+
+	return detail + "\n\nThrough this create route, restriction_type = \"group\" only ever succeeded " +
+		"against an OAuth-backed organization (a classic gh/<org> or bitbucket/<org> slug), and the " +
+		"only value accepted was that organization's own UUID — not a VCS team id or a circleci_group " +
+		"RBAC group id, despite the name. That UUID is the value CircleCI already assigns to the " +
+		"default \"All members\" restriction every context carries; on a standalone (circleci/<uuid>) " +
+		"organization this type fails outright, whatever the value."
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (r *contextRestrictionResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan contextRestrictionResourceModel
@@ -137,7 +197,7 @@ func (r *contextRestrictionResource) Create(ctx context.Context, req resource.Cr
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI context restriction",
-			circleci.Detail(err),
+			contextRestrictionCreateErrorDetail(plan.Type.ValueString(), err),
 		)
 
 		return
@@ -221,8 +281,12 @@ func (r *contextRestrictionResource) Read(ctx context.Context, req resource.Read
 }
 
 // Update is unreachable for a real configuration change: every attribute but
-// the computed ones is RequiresReplace. It persists the plan so a
-// refresh-driven re-apply of an unchanged plan is a no-op.
+// the computed ones is RequiresReplace, because there is no route that updates
+// a restriction in place (see the doc comment above the const block in
+// internal/circleci/context_restriction.go: [NET, measured on 2026-08-21]
+// PATCH and PUT to the restriction route both 404 at the router, not merely
+// reject the method). This method only persists the plan so a refresh-driven
+// re-apply of an unchanged plan is a no-op.
 func (r *contextRestrictionResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan contextRestrictionResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -234,6 +298,14 @@ func (r *contextRestrictionResource) Update(ctx context.Context, req resource.Up
 }
 
 // Delete deletes the resource and removes the Terraform state on success.
+//
+// [NET, measured on 2026-08-21]: deleting a context's last remaining `group`
+// restriction succeeds even when the organization setting that requires every
+// context to carry one (IsContextGroupRestrictionRequired — see
+// circleci_organization_settings) is enabled; the API does not enforce that
+// setting on this route. So there is deliberately no special handling of that
+// setting here — an error the API never returns would be dead code — and this
+// resource can leave a context in the state that setting is meant to prevent.
 func (r *contextRestrictionResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state contextRestrictionResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
