@@ -301,6 +301,15 @@ func (r *pipelineResource) Read(ctx context.Context, req resource.ReadRequest, r
 	// string-matching the error: matching "404" also matches a 5xx whose body
 	// happens to mention it, which would silently remove live resources from
 	// state. See DESIGN.md's characterization test notes.
+	//
+	// Note that a deleted definition does NOT produce a 404 on the wire — the
+	// singular route answers 400, with a body it also returns for definitions
+	// that are alive and well on GitLab. Deciding "gone" from that response is
+	// what made this resource unrecoverable after an out-of-band delete. The
+	// client resolves the ambiguity against the plural list before reporting
+	// IsNotFound at all, and reports a plain error when it cannot; see
+	// circleci.GetPipelineDefinition. This code sees only the settled answer, so
+	// IsNotFound here really does mean gone.
 	if circleci.IsNotFound(err) {
 		resp.State.RemoveResource(ctx)
 
@@ -370,7 +379,10 @@ func (r *pipelineResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 
 	// A definition already gone is the desired end state, so absence is not an
-	// error.
+	// error. In practice the route never says so: measured over the network,
+	// DELETE of an already-deleted definition answers 200 with the ordinary
+	// success body. The IsNotFound tolerance stays as a guard in case that
+	// changes.
 	err := r.client.DeletePipelineDefinition(ctx, state.ProjectId.ValueString(), state.Id.ValueString())
 	if err != nil && !circleci.IsNotFound(err) {
 		resp.Diagnostics.AddError(

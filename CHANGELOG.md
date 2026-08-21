@@ -123,6 +123,40 @@
 The note below affects contributors running the acceptance test suite against a real
 CircleCI installation, not provider users.
 
+* **`circleci_pipeline_definition` (and its `circleci_pipeline` alias) can now recover when a
+  pipeline definition is deleted outside Terraform.** The resource used to enter an error it
+  could never leave: every subsequent plan and apply failed on refresh, and the only escape was
+  editing the state file by hand.
+
+  The cause is the status the API returns. `GET
+  /api/v2/projects/{project}/pipeline-definitions/{id}` does **not** answer 404 for a definition
+  that is gone — it answers `400 {"message":"Failed to get pipeline definition."}`, and the
+  provider treated that as a real failure rather than as absence.
+
+  Reading that 400 as "gone" would be wrong too, because the same status **and the same response
+  body** are returned for definitions that exist: on GitLab-backed projects the singular route
+  refuses every definition, live ones included. Nothing in the response distinguishes the two
+  cases. The provider therefore settles the question against the pipeline-definitions **list**
+  route, which answers correctly on every integration: if the list carries the definition it is
+  refreshed from there and stays managed; if the list does not, it is dropped from state and the
+  next plan recreates it. If the list itself cannot be read, **nothing is concluded** — the
+  resource stays in state and the error explains both halves of the failure, so a transient
+  outage can never silently delete a live resource from state.
+
+  A side effect worth knowing: a definition on a GitLab-backed project now refreshes
+  successfully instead of erroring.
+
+
+* **The canonical `circleci_pipeline_definition` type name now has acceptance coverage against a
+  real API.** Every acceptance configuration previously used the deprecated `circleci_pipeline`
+  alias, so the canonical registration had never made a request to a real installation. Both
+  names are now covered, on GitHub App and GitHub Server organizations — the integrations where
+  the API accepts an explicit definition create at all — including an import that round-trips
+  with no ignored attributes. The alias keeps its own coverage.
+
+The entry below affects contributors running the acceptance test suite against a real CircleCI
+installation, not provider users — nothing there changes provider behaviour.
+
 * **Acceptance-test environment variables are now named per integration**, and a placeholder
   value skips cleanly instead of failing. Every fixture variable is `CIRCLECI_TEST_<KEY>_<SUFFIX>`,
   where `KEY` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or `BB_CLOUD` and the

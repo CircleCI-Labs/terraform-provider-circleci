@@ -3,7 +3,14 @@
 
 package circleci
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"terraform-provider-circleci/internal/httpcl"
+)
 
 // Pipeline definition routes.
 //
@@ -15,7 +22,48 @@ import "context"
 const pipelineDefinitionsRoute = "/projects/%s/pipeline-definitions"
 
 // pipelineDefinitionRoute addresses a single pipeline definition by id.
+//
+// This route does NOT report a missing definition as 404. Measured over the
+// network against circleci.com on 2026-08-21, GET of this route answers:
+//
+//	200                                                — the definition, when this route can serve it
+//	400 {"message":"Failed to get pipeline definition."} — see below
+//	400 {"message":"Invalid pipeline definition id."}    — id is not a UUID
+//	400 {"message":"ProjectID required."}                — project id is not a UUID
+//	404 {"message":"Pipeline definition not found."}     — well-formed project id that does not exist
+//
+// The first 400 is the problem: one status AND one byte-identical body cover at
+// least four distinct conditions, measured over the network:
+//
+//   - a definition deleted out of band (created, deleted, then fetched);
+//   - a definition id that never existed, under a real project;
+//   - a real definition id fetched under the wrong project, whether that project
+//     is in the same organization or another one;
+//   - on GitLab, a definition that DEMONSTRABLY EXISTS — its id was read out of
+//     the plural list, which answered 200 for the same project moments earlier.
+//     Measured on two separate GitLab projects.
+//
+// So the status conflates "gone" with "this project cannot serve definitions on
+// this route at all", and the response body conflates them too: GitLab's live
+// definition and a deleted GitHub App definition return the same 46 bytes. No
+// property of this response can tell them apart.
+//
+// pipelineDefinitionsRoute — the plural list — is the oracle that can. It
+// answered 200 for every project measured, on GitHub App, GitHub OAuth and
+// GitLab alike, and 404 {"message":"Project not found."} for a project id that
+// does not exist. GetPipelineDefinition therefore resolves the ambiguous 400
+// against it rather than guessing from the status. See its comment.
 const pipelineDefinitionRoute = "/projects/%s/pipeline-definitions/%s"
+
+// pipelineDefinitionLookupFailedMessage is the exact body message the singular
+// GET returns for the ambiguous condition described on pipelineDefinitionRoute.
+// The match is deliberately this narrow: the other two 400s carry different
+// messages ("Invalid pipeline definition id." and "ProjectID required.") and are
+// malformed-request errors, not "possibly gone" — they must stay hard errors, and
+// must not trigger a list probe. If CircleCI ever reworded this message, the
+// match would stop firing and behaviour would fall back to today's hard error:
+// wrong, but safe, and never a silent state drop.
+const pipelineDefinitionLookupFailedMessage = "Failed to get pipeline definition."
 
 // RepoInput is the create/update body for a repository reference: only the
 // caller-supplied external id. FullName is never accepted on write — it is
@@ -194,17 +242,72 @@ func (c *Client) CreatePipelineDefinition(ctx context.Context, projectID string,
 	return &created, nil
 }
 
-// GetPipelineDefinition returns one pipeline definition by id. A missing
-// definition is reported as an error satisfying IsNotFound.
+// isAmbiguousPipelineDefinitionLookup reports whether err is the 400 documented
+// on pipelineDefinitionRoute: the one response that may mean either "this
+// definition is gone" or "this route cannot serve this project's definitions".
+//
+// It requires both the status and the exact body message, so the two other
+// measured 400s — a malformed definition id and a malformed project id — do not
+// reach the list probe.
+func isAmbiguousPipelineDefinitionLookup(err error) bool {
+	var httpErr *httpcl.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+
+	return serverMessage(httpErr.Body) == pipelineDefinitionLookupFailedMessage
+}
+
+// GetPipelineDefinition returns one pipeline definition by id.
+//
+// A definition that no longer exists is reported as an error satisfying
+// IsNotFound — but note that the API does not say so with a 404. It answers 400
+// with a body that says the same thing for a live GitLab definition, so this
+// method cannot decide from the response alone; see pipelineDefinitionRoute for
+// the measurements. On that 400 it asks the plural list route, which every
+// integration measured answers honestly, and:
+//
+//   - the list contains the id  -> the definition is alive and this route simply
+//     cannot serve it (the GitLab case). The list entry is returned; it carries
+//     the same fields the singular route would have.
+//   - the list omits the id     -> the definition is genuinely gone. Reported as
+//     ErrNotFound, which is what lets a resource drop out of state and be
+//     recreated.
+//   - the list itself fails     -> NOTHING is concluded. Both failures are
+//     reported together as a plain error that is deliberately neither IsNotFound
+//     nor an HTTP error, so no caller can read "gone" out of a signal that was
+//     never confirmed. A resource stays in state.
 //
 // CircleCI Cloud only. See pipelineDefinitionsRoute.
 func (c *Client) GetPipelineDefinition(ctx context.Context, projectID, id string) (*PipelineDefinition, error) {
 	var found PipelineDefinition
-	if err := c.GetV2(ctx, pipelineDefinitionRoute, &found, RouteParams(projectID, id)); err != nil {
+
+	err := c.GetV2(ctx, pipelineDefinitionRoute, &found, RouteParams(projectID, id))
+	if err == nil {
+		return &found, nil
+	}
+	if !isAmbiguousPipelineDefinitionLookup(err) {
 		return nil, err
 	}
 
-	return &found, nil
+	definitions, listErr := c.ListPipelineDefinitions(ctx, projectID)
+	if listErr != nil {
+		return nil, fmt.Errorf(
+			"cannot determine whether pipeline definition %s still exists on project %s: "+
+				"GET returned %q, which the API also returns for definitions that do exist, "+
+				"so it does not mean the definition is gone; listing the project's pipeline "+
+				"definitions to settle it failed as well: %s. "+
+				"The definition is being left as-is rather than assumed deleted",
+			id, projectID, pipelineDefinitionLookupFailedMessage, Detail(listErr))
+	}
+
+	for i := range definitions {
+		if definitions[i].ID == id {
+			return &definitions[i], nil
+		}
+	}
+
+	return nil, fmt.Errorf("pipeline definition %s on project %s: %w", id, projectID, ErrNotFound)
 }
 
 // PipelineConfigSourceUpdateInput is the update body's config_source: file_path
@@ -238,6 +341,12 @@ func (c *Client) UpdatePipelineDefinition(ctx context.Context, projectID, id str
 }
 
 // DeletePipelineDefinition deletes a pipeline definition by id.
+//
+// DELETE is idempotent: measured over the network, deleting an already-deleted
+// definition answers 200 {"message":"Pipeline definition deleted."} rather than
+// 404 or 400, so a caller does not have to tolerate an absence error here (it
+// still does, harmlessly). PATCH on the same gone definition, by contrast,
+// answers 400 {"message":"Failed to update pipeline definition."}.
 //
 // CircleCI Cloud only. See pipelineDefinitionsRoute.
 func (c *Client) DeletePipelineDefinition(ctx context.Context, projectID, id string) error {

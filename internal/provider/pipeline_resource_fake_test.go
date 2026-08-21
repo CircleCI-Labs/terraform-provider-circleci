@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -47,8 +48,24 @@ import (
 
 // fakePipelineDefAPI is an in-memory stand-in for the pipeline-definitions
 // routes, keyed by "projectID/pipelineID" so that a request against the wrong
-// project for an otherwise-valid definition id gets a 404, exactly like the
-// real API would (definitions do not exist outside their project).
+// project for an otherwise-valid definition id is refused, exactly like the real
+// API (definitions do not exist outside their project).
+//
+// The statuses below are the ones measured over the network against circleci.com
+// on 2026-08-21, not the ones this fake used to return. It previously answered
+// 404 for a missing definition on GET, PATCH and DELETE, which is wrong on all
+// three counts and hid the bug the singular route actually has:
+//
+//	GET    a definition that is gone   400 {"message":"Failed to get pipeline definition."}
+//	GET    a definition on GitLab      400, same body, even though it EXISTS
+//	GET    a nonexistent project       404 {"message":"Pipeline definition not found."}
+//	PATCH  a definition that is gone   400 {"message":"Failed to update pipeline definition."}
+//	DELETE a definition that is gone   200 {"message":"Pipeline definition deleted."}  (idempotent)
+//	LIST   a real project              200 {"items":[...]}, no next_page_token, on every integration
+//	LIST   a nonexistent project       404 {"message":"Project not found."}
+//
+// See internal/circleci/pipeline_definition.go's pipelineDefinitionRoute for the
+// full probe.
 type fakePipelineDefAPI struct {
 	t *testing.T
 
@@ -57,9 +74,17 @@ type fakePipelineDefAPI struct {
 	requests    []fakeRecordedRequest
 	nextID      int
 
-	// missing forces a 404 on GET for the given key, simulating deletion
-	// outside Terraform.
+	// missing forces the singular GET to answer as it does for a deleted
+	// definition, simulating deletion outside Terraform. The definition is
+	// removed from the plural list too, because the real API removes it from
+	// both.
 	missing map[string]bool
+
+	// singularUnservable reproduces the GitLab case: the definition exists and
+	// the plural list returns it, but the singular route answers the SAME 400 a
+	// deleted definition gets. Keyed by project id, because it is a property of
+	// the project's integration rather than of one definition.
+	singularUnservable map[string]bool
 
 	// failStatus/failBody, when failStatus is non-zero, make every GET answer
 	// with that response instead of the stored definition. Used to reproduce
@@ -81,9 +106,10 @@ func newFakePipelineDefAPI(t *testing.T) (*fakePipelineDefAPI, string) {
 	t.Helper()
 
 	api := &fakePipelineDefAPI{
-		t:           t,
-		definitions: map[string]map[string]any{},
-		missing:     map[string]bool{},
+		t:                  t,
+		definitions:        map[string]map[string]any{},
+		missing:            map[string]bool{},
+		singularUnservable: map[string]bool{},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(api.handle))
 	t.Cleanup(srv.Close)
@@ -143,6 +169,8 @@ func (a *fakePipelineDefAPI) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && pipelineID == "":
 		a.create(w, projectID, body)
+	case r.Method == http.MethodGet && pipelineID == "":
+		a.list(w, projectID)
 	case r.Method == http.MethodGet && pipelineID != "":
 		a.get(w, projectID, pipelineID)
 	case r.Method == http.MethodPatch && pipelineID != "":
@@ -286,29 +314,86 @@ func resolvedSource(source map[string]any, withFilePath bool) map[string]any {
 	return out
 }
 
+// lookupFailed400 is the exact response the real singular GET gives for a
+// definition it will not serve — whether because the definition is gone or
+// because the project is a GitLab one whose live definitions this route cannot
+// serve at all. One status, one body, both conditions.
+func lookupFailed400(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = io.WriteString(w, `{"message":"Failed to get pipeline definition."}`)
+}
+
+// list is the plural route: the oracle the client falls back on. It returns
+// every definition of the project in one body with no next_page_token, matching
+// the measured response, and 404s only for a project with nothing stored at all.
+func (a *fakePipelineDefAPI) list(w http.ResponseWriter, projectID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	prefix := projectID + "/"
+
+	items := []map[string]any{}
+	known := false
+
+	for key, record := range a.definitions {
+		if len(key) <= len(prefix) || key[:len(prefix)] != prefix {
+			continue
+		}
+
+		known = true
+
+		// A definition deleted out of band is absent from the list as well as
+		// from the singular route: that difference is the whole reason the list
+		// can settle what the 400 cannot.
+		if a.missing[key] {
+			continue
+		}
+
+		items = append(items, record)
+	}
+
+	if !known {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"Project not found."}`)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+}
+
 func (a *fakePipelineDefAPI) get(w http.ResponseWriter, projectID, pipelineID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	key := projectID + "/" + pipelineID
 
-	if a.missing[key] {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"message":"Pipeline definition not found"}`)
+	// The GitLab case: the definition is stored and the plural list returns it,
+	// but this route refuses it with the very same 400 a deleted definition
+	// gets.
+	if a.singularUnservable[projectID] {
+		lookupFailed400(w)
 
 		return
 	}
 
-	record, ok := a.definitions[key]
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"message":"Pipeline definition not found"}`)
+	if a.missing[key] {
+		lookupFailed400(w)
+
+		return
+	}
+
+	if _, ok := a.definitions[key]; !ok {
+		// A definition id that never existed, or a real id under the wrong
+		// project: measured, both give this same 400.
+		lookupFailed400(w)
 
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(record)
+	_ = json.NewEncoder(w).Encode(a.definitions[key])
 }
 
 func (a *fakePipelineDefAPI) update(w http.ResponseWriter, projectID, pipelineID string, body map[string]any) {
@@ -320,9 +405,11 @@ func (a *fakePipelineDefAPI) update(w http.ResponseWriter, projectID, pipelineID
 	if !ok {
 		// Exactly what happens today if project_id changes without forcing
 		// replacement: the PATCH lands on the new project with the old
-		// definition id, which does not exist there.
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"message":"Pipeline definition not found"}`)
+		// definition id, which does not exist there. Measured: PATCH against a
+		// definition that is not there answers 400 with its own message, not a
+		// 404 and not the GET message.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":"Failed to update pipeline definition."}`)
 
 		return
 	}
@@ -354,17 +441,13 @@ func (a *fakePipelineDefAPI) delete(w http.ResponseWriter, projectID, pipelineID
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	key := projectID + "/" + pipelineID
-	if _, ok := a.definitions[key]; !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"message":"Pipeline definition not found"}`)
+	// Measured: DELETE is idempotent. Deleting a definition that is already
+	// gone answers 200 with the same body as deleting a live one, so there is no
+	// absence case to report here at all.
+	delete(a.definitions, projectID+"/"+pipelineID)
 
-		return
-	}
-
-	delete(a.definitions, key)
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, `{"message":"ok"}`)
+	_, _ = io.WriteString(w, `{"message":"Pipeline definition deleted."}`)
 }
 
 func (a *fakePipelineDefAPI) setMissing(projectID, pipelineID string, missing bool) {
@@ -372,6 +455,16 @@ func (a *fakePipelineDefAPI) setMissing(projectID, pipelineID string, missing bo
 	defer a.mu.Unlock()
 
 	a.missing[projectID+"/"+pipelineID] = missing
+}
+
+// setSingularUnservable makes the singular GET on projectID answer the
+// ambiguous 400 while the plural list keeps returning the project's live
+// definitions — the GitLab behaviour, measured over the network.
+func (a *fakePipelineDefAPI) setSingularUnservable(projectID string, unservable bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.singularUnservable[projectID] = unservable
 }
 
 func (a *fakePipelineDefAPI) setFail(status int, body string) {
@@ -703,7 +796,8 @@ func TestPipelineResourceUnit_ServerErrorMentioning404DoesNotDropState(t *testin
 // destroy/create, and the PATCH landed on the wrong project — this fake
 // reproduces that faithfully: the definition is created under
 // fakePipelineProjectID, so a PATCH against fakePipelineOtherProjectID with the
-// same id would 404, exactly as the real API would.
+// same id is refused, exactly as the real API refuses it — measured, with 400
+// {"message":"Failed to update pipeline definition."} rather than a 404.
 //
 // Now project_id carries RequiresReplace, so changing it plans a destroy/create
 // instead, and the new definition is created under the new project — no PATCH
@@ -746,14 +840,20 @@ func TestPipelineResourceUnit_ProjectIDChangeForcesReplacement(t *testing.T) {
 
 // TestPipelineResourceUnit_DriftRecreatesRatherThanHardError documents the fix
 // to a second bug: pipeline_resource.go's Read() used to treat every error from
-// the API, including a 404 for a definition deleted outside Terraform, as a
-// hard diagnostic. Unlike the checkout key resource (the established good
-// pattern in checkout_key_resource_test.go), circleci_pipeline never called
+// the API as a hard diagnostic, including the response a definition deleted
+// outside Terraform produces. Unlike the checkout key resource (the established
+// good pattern in checkout_key_resource_test.go), circleci_pipeline never called
 // resp.State.RemoveResource, so drift never led to a clean "will be recreated"
-// plan — it led to a permanent refresh error.
+// plan — it led to a permanent refresh error the practitioner could only escape
+// by hand-editing state.
 //
-// Now a 404 on Read calls resp.State.RemoveResource, so the next plan proposes
-// a create rather than erroring, exactly like TestAccCheckoutKeyResource_RemovedOutsideTerraform.
+// The reason it stayed broken after RemoveResource was wired up is the status:
+// the singular route answers 400, not 404, for a deleted definition — measured
+// over the network by creating one, deleting it and fetching it back. This fake
+// now answers that same 400, so this test fails outright unless the client
+// resolves it (see circleci.GetPipelineDefinition). The next plan then proposes
+// a create rather than erroring, exactly like
+// TestAccCheckoutKeyResource_RemovedOutsideTerraform.
 func TestPipelineResourceUnit_DriftRecreatesRatherThanHardError(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
@@ -774,6 +874,96 @@ func TestPipelineResourceUnit_DriftRecreatesRatherThanHardError(t *testing.T) {
 				// (which reads state before issuing DELETE) succeeds.
 				PreConfig: func() { api.setMissing(fakePipelineProjectID, "11111111-2222-3333-4444-000000000001", false) },
 				Config:    pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002"),
+			},
+		},
+	})
+}
+
+// TestPipelineResourceUnit_GitLabStyle400KeepsALiveDefinitionInState is the
+// other half of the same bug, and the one that rules out the obvious fix.
+//
+// "Treat 400 like 404" would be wrong: measured over the network on two separate
+// GitLab projects, the singular route answers 400 with the byte-identical body
+// for definitions that DEMONSTRABLY EXIST — their ids were read out of a 200
+// from the plural list moments earlier. A provider that read that 400 as "gone"
+// would drop every GitLab-backed definition from state on the first refresh and
+// then try to create a duplicate.
+//
+// So this test asserts the opposite outcome to
+// TestPipelineResourceUnit_DriftRecreatesRatherThanHardError from a response
+// that is identical on the wire: same status, same body, definition still
+// listed. The refresh must succeed from the list entry and the plan must be
+// empty. Anything else — an error, or a planned create — is the failure.
+func TestPipelineResourceUnit_GitLabStyle400KeepsALiveDefinitionInState(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	config := pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+			{
+				// From here on the singular route refuses every read of this
+				// project, while the definition stays alive and listed.
+				PreConfig: func() { api.setSingularUnservable(fakePipelineProjectID, true) },
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionNoop),
+					},
+				},
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("id"),
+						knownvalue.StringExact("11111111-2222-3333-4444-000000000001")),
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("description"),
+						knownvalue.StringExact("original")),
+				},
+			},
+		},
+	})
+
+	// The refresh really did fall back to the plural route rather than getting
+	// lucky with a cached read.
+	api.lastRequest(t, "GET", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
+}
+
+// TestPipelineResourceUnit_UnconfirmableAbsenceKeepsStateAndErrors covers the
+// fail-safe path: the singular route gives the ambiguous 400 and the list that
+// would settle it is unavailable too. Nothing is known, so the resource must
+// stay in state and the practitioner must get an error that says why — not a
+// silent removal.
+//
+// The recovery step is the assertion that matters: once the list works again,
+// the plan must be a no-op. A create there would mean state had been dropped on
+// an unconfirmed signal.
+func TestPipelineResourceUnit_UnconfirmableAbsenceKeepsStateAndErrors(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	config := pipelineFakeResourceConfig(host, fakePipelineProjectID, "pipe-1", "original", "100001", "100002")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+			{
+				// Every route answers 400 with the ambiguous body — including the
+				// list probe, so the ambiguity cannot be resolved either way.
+				PreConfig: func() {
+					api.setFail(http.StatusBadRequest, `{"message":"Failed to get pipeline definition."}`)
+				},
+				Config:      config,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?s)Unable to Read.*does not mean the definition is gone`),
+			},
+			{
+				PreConfig: func() { api.clearFail() },
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_pipeline.test", plancheck.ResourceActionNoop),
+					},
+				},
 			},
 		},
 	})
@@ -907,5 +1097,131 @@ func TestFakePipelineDefAPIRefusesWhatTheRealAPIRefuses(t *testing.T) {
 
 	if stored := len(api.definitions); stored != 0 {
 		t.Errorf("the fake stored %d definitions, want 0: a rejected request must not create one", stored)
+	}
+}
+
+// TestFakePipelineDefAPIAnswersTheStatusesTheRealRouteAnswers pins the fake's
+// singular-route statuses to what was measured over the network against
+// circleci.com on 2026-08-21, one probe per row.
+//
+// This test exists because the fake was wrong here in the same direction as the
+// code and the tests: it answered 404 for a missing definition on GET, PATCH and
+// DELETE, so the suite was green while the provider was permanently broken
+// against the real 400. A fake that agrees with a mistaken belief cannot catch
+// it, so the belief itself is the assertion.
+func TestFakePipelineDefAPIAnswersTheStatusesTheRealRouteAnswers(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	base := host + "/api/v2/projects/" + fakePipelineProjectID + "/pipeline-definitions"
+	const liveID = "11111111-2222-3333-4444-000000000001"
+
+	created := postJSON(t, base, `{
+		"name": "pipe-1", "description": "d",
+		"config_source": {"provider": "github_app", "file_path": ".circleci/config.yml",
+		                   "repo": {"external_id": "100001"}},
+		"checkout_source": {"provider": "github_app", "repo": {"external_id": "100002"}}
+	}`)
+	if created.status != http.StatusOK {
+		t.Fatalf("create answered %d, want 200: %s", created.status, created.body)
+	}
+
+	const updateBody = `{"name":"pipe-1","description":"d",
+		"config_source":{"file_path":".circleci/config.yml"},
+		"checkout_source":{"provider":"github_app","repo":{"external_id":"100002"}}}`
+
+	cases := []struct {
+		name        string
+		method      string
+		url         string
+		body        string
+		wantStatus  int
+		wantMessage string
+	}{
+		{
+			name:        "GET a definition that never existed, under a real project",
+			method:      http.MethodGet,
+			url:         base + "/99999999-9999-9999-9999-999999999999",
+			wantStatus:  http.StatusBadRequest,
+			wantMessage: "Failed to get pipeline definition.",
+		},
+		{
+			name:        "GET a real definition id under the wrong project",
+			method:      http.MethodGet,
+			url:         host + "/api/v2/projects/" + fakePipelineOtherProjectID + "/pipeline-definitions/" + liveID,
+			wantStatus:  http.StatusBadRequest,
+			wantMessage: "Failed to get pipeline definition.",
+		},
+		{
+			name:        "PATCH a definition that is not there",
+			method:      http.MethodPatch,
+			url:         base + "/99999999-9999-9999-9999-999999999999",
+			body:        updateBody,
+			wantStatus:  http.StatusBadRequest,
+			wantMessage: "Failed to update pipeline definition.",
+		},
+		{
+			name:        "DELETE a definition that is not there is idempotent, not an absence error",
+			method:      http.MethodDelete,
+			url:         base + "/99999999-9999-9999-9999-999999999999",
+			wantStatus:  http.StatusOK,
+			wantMessage: "Pipeline definition deleted.",
+		},
+		{
+			name:       "LIST a real project returns 200",
+			method:     http.MethodGet,
+			url:        base,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:        "LIST a project the API has never heard of returns 404",
+			method:      http.MethodGet,
+			url:         host + "/api/v2/projects/" + fakePipelineOtherProjectID + "/pipeline-definitions",
+			wantStatus:  http.StatusNotFound,
+			wantMessage: "Project not found.",
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := sendJSON(t, testCase.method, testCase.url, testCase.body)
+
+			if got.status != testCase.wantStatus {
+				t.Errorf("answered %d, want %d: %s", got.status, testCase.wantStatus, got.body)
+			}
+			if testCase.wantMessage == "" {
+				return
+			}
+			if message, _ := got.decoded["message"].(string); message != testCase.wantMessage {
+				t.Errorf("message = %q, want %q", message, testCase.wantMessage)
+			}
+		})
+	}
+
+	// The list must not carry a next_page_token: measured, this route returns
+	// every definition in one body on every integration, which is what makes it
+	// usable as the oracle for "is this definition still there".
+	list := sendJSON(t, http.MethodGet, base, "")
+	if _, paginated := list.decoded["next_page_token"]; paginated {
+		t.Errorf("the list body carries next_page_token (%s); a paginated list could omit a live "+
+			"definition and make the client report it as gone", list.body)
+	}
+
+	// The GitLab case: a live, listed definition that the singular route still
+	// refuses. Both halves have to hold, or the fake is not reproducing it.
+	api.setSingularUnservable(fakePipelineProjectID, true)
+
+	single := sendJSON(t, http.MethodGet, base+"/"+liveID, "")
+	if single.status != http.StatusBadRequest {
+		t.Errorf("singular GET answered %d, want 400 for an unservable project: %s", single.status, single.body)
+	}
+	if message, _ := single.decoded["message"].(string); message != "Failed to get pipeline definition." {
+		t.Errorf("singular GET message = %q, want the same body a deleted definition gets — the "+
+			"indistinguishability is the point", message)
+	}
+
+	stillListed := sendJSON(t, http.MethodGet, base, "")
+	if !strings.Contains(stillListed.body, liveID) {
+		t.Errorf("the list no longer carries %s (%s); the GitLab case is a definition that EXISTS while "+
+			"the singular route refuses it", liveID, stillListed.body)
 	}
 }
