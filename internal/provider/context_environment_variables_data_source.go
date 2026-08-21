@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -58,9 +59,15 @@ func (d *contextEnvironmentVariablesDataSource) Schema(_ context.Context, _ data
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Fetches every environment variable set on a CircleCI context, including " +
 			"variables created outside Terraform. Available on CircleCI Cloud and CircleCI Server.\n\n" +
-			"Pagination is followed internally, so the result covers every variable rather than one page. " +
 			"Use [`circleci_context_environment_variable`](./context_environment_variable) to fetch one by " +
 			"name.\n\n" +
+			"~> **A context of more than 100 variables cannot be read.** CircleCI lists at most 100 " +
+			"environment variables per context and provides no way to reach the rest: the page token " +
+			"the API advertises is ignored on every request, and there is no route that reads a context " +
+			"environment variable by name. Rather than return a partial list that nothing downstream " +
+			"could tell from a complete one, this data source raises an error. CircleCI caps a context " +
+			"at 100 variables but does not apply the cap atomically, so concurrent writes can push a " +
+			"context past it.\n\n" +
 			"~> **The value is never returned.** CircleCI does not disclose a context environment " +
 			"variable's value on any route. `truncated_value` is the only trace of it the API discloses, " +
 			"and it is a tail with no mask prefix — see that attribute's description below before using " +
@@ -83,8 +90,9 @@ func (d *contextEnvironmentVariablesDataSource) Schema(_ context.Context, _ data
 						},
 						"truncated_value": schema.StringAttribute{
 							MarkdownDescription: "The last few characters of the value, with no mask " +
-								"prefix: the last four characters, or fewer for a value eight characters " +
-								"or shorter. This is **not** the same shape as " +
+								"prefix: CircleCI reveals the last `min(4, floor(length / 2))` " +
+								"characters, so a 12-character value gives up 4 and a 4-character " +
+								"value gives up 2. This is **not** the same shape as " +
 								"`circleci_project_environment_variables`' `value`, which prefixes the " +
 								"same kind of tail with `xxxx` — do not treat the two as comparable.\n\n" +
 								"Do not use this to detect that a value changed. Rotating a secret while " +
@@ -124,6 +132,31 @@ func (d *contextEnvironmentVariablesDataSource) Read(ctx context.Context, req da
 
 	variables, err := d.client.ListContextEnvironmentVariables(ctx, contextID)
 	if err != nil {
+		// This data source promises every variable on the context, and a context
+		// holding more than CircleCI will list cannot be described at all: the
+		// page token the route advertises is never read back, and there is no
+		// route that reads one variable by name. Returning the part that was
+		// disclosed is the worst option available — a for_each over it would
+		// quietly stop managing whatever fell off the end, with nothing in the
+		// plan to show it. See circleci.ContextEnvVarsTruncatedError.
+		if truncated, ok := circleci.AsContextEnvVarsTruncated(err); ok {
+			resp.Diagnostics.AddError(
+				"Incomplete environment variable list for CircleCI context "+contextID,
+				fmt.Sprintf(
+					"CircleCI disclosed %d environment variables for this context and reported that "+
+						"there are more, but it provides no way to fetch them: the page token it "+
+						"advertises is ignored on every request, and there is no route that reads a "+
+						"context environment variable by name.\n\n"+
+						"This data source will not return a partial list, because nothing downstream "+
+						"could tell it apart from a complete one. Reduce the context to at most %d "+
+						"environment variables, or split them across more than one context.",
+					len(truncated.Page), len(truncated.Page),
+				),
+			)
+
+			return
+		}
+
 		resp.Diagnostics.AddError(
 			"Unable to list CircleCI environment variables for context "+contextID,
 			circleci.Detail(err),

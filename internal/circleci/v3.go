@@ -59,11 +59,17 @@ type PaginatedResponse[T any] struct {
 // ErrPaginationDidNotAdvance reports that a collection endpoint handed back the
 // same page token it was given, so draining it would never finish.
 //
-// This is not hypothetical. The context environment variable route reads its page
-// token from the *path* parameters on a route that has no such parameter, so the
-// token supplied in the query string is never seen: every request returns the
-// first page alongside the same token. Before this guard, a context with more than
-// one page of variables hung Terraform and grew the slice until the process died.
+// This is not hypothetical: the context environment variable route ignores the
+// page token it advertises, and answers page one however that token is spelled.
+// It no longer reaches this guard, because it no longer drains at all — a route
+// that cannot page is not paged (see ListContextEnvironmentVariables, and
+// ContextEnvVarsTruncatedError for the measurements). It is named here as the
+// reason this guard exists, and as a warning that the guard is weaker than it
+// looks: it catches a token that repeats byte for byte, and that route's token
+// names the last item on the page, so a concurrent write changes it while the
+// page stays the same. A drain then advances for ever without making progress.
+// Any endpoint whose truncation can be detected from a single response should be
+// detected that way instead of relying on this.
 //
 // Draining stops with this error rather than returning what it has. A partial
 // collection is indistinguishable from a complete one to every caller here, and

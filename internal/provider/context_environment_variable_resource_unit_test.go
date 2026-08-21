@@ -284,3 +284,110 @@ func TestContextEnvVarResourceUnit_MaskedReadNeverProducesADiff(t *testing.T) {
 		},
 	})
 }
+
+// TestContextEnvVarResourceUnit_ReadOnTruncatedListKeepsAVisibleVariable is the
+// regression test for the defect that made a large context unmanageable.
+//
+// The list route stops at 100 variables and there is no route that reads one by
+// name (measured: 404), so on a context holding more than 100 every read of every
+// circleci_context_environment_variable went through a truncated list. Treating
+// that as a failure of the whole read made `terraform plan` error out for
+// variables that were sitting in the response — the resource here is API_KEY,
+// which sorts first and is plainly on the page.
+//
+// A truncated list is only a problem for a variable that is missing from it.
+// One that is present is as well described as it would have been by a complete
+// list, so the refresh succeeds and the plan is empty.
+func TestContextEnvVarResourceUnit_ReadOnTruncatedListKeepsAVisibleVariable(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	api.seedContext(contextEnvVarUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextEnvVarResourceUnitConfig(host, "s3cr3t"),
+			},
+			{
+				// "Z" sorts after "API_KEY", so API_KEY stays on the disclosed
+				// page while the context as a whole runs past it.
+				PreConfig: func() {
+					seedEnvVarsPastThePage(api, contextEnvVarUnitContextID, "ZPAD")
+				},
+				Config: contextEnvVarResourceUnitConfig(host, "s3cr3t"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_context_environment_variable.test", tfjsonpath.New("value"), knownvalue.StringExact("s3cr3t")),
+					statecheck.ExpectKnownValue("circleci_context_environment_variable.test", tfjsonpath.New("created_at"), knownvalue.StringExact("2024-01-02T03:04:05.000Z")),
+					statecheck.ExpectKnownValue("circleci_context_environment_variable.test", tfjsonpath.New("updated_at"), knownvalue.StringExact("2024-06-01T00:00:00.000Z")),
+				},
+			},
+		},
+	})
+
+	// One PUT, from the create. A second would mean the refresh decided the
+	// variable needed writing again.
+	puts := 0
+	for _, req := range api.recorded() {
+		if req == "PUT /api/v2/context/"+contextEnvVarUnitContextID+"/environment-variable/API_KEY" {
+			puts++
+		}
+	}
+	if puts != 1 {
+		t.Errorf("made %d PUT requests, want 1: the refresh must not rewrite a variable it can see "+
+			"unchanged (%q)", puts, api.recorded())
+	}
+}
+
+// TestContextEnvVarResourceUnit_ReadOnTruncatedListDoesNotDeleteAHiddenVariable
+// is the safety half of the pair above.
+//
+// The variable managed here sorts after 100 padding variables, so it falls off
+// the page the API is willing to disclose. Absent from a truncated list is NOT
+// deleted — the variable is alive, and removing it from state would make the next
+// apply recreate it, overwriting whatever value is really stored on it with
+// whatever the configuration currently says. So the read fails, loudly, and says
+// which of the two it cannot tell apart.
+//
+// The test framework distinguishes the two outcomes for us: had the resource been
+// dropped from state, the refresh would have succeeded and the step would fail
+// for a non-empty plan instead of matching this error.
+func TestContextEnvVarResourceUnit_ReadOnTruncatedListDoesNotDeleteAHiddenVariable(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	api.seedContext(contextEnvVarUnitContextID, contextUnitOrgID, "2024-01-02T03:04:05.000Z")
+
+	config := contextFakeProviderConfig(host) + fmt.Sprintf(`
+resource "circleci_context_environment_variable" "hidden" {
+  context_id = %[1]q
+  name       = "ZZ_LAST"
+  value      = "s3cr3t"
+}
+`, contextEnvVarUnitContextID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+			},
+			{
+				// "APAD" sorts before "ZZ_LAST", pushing it past the boundary.
+				PreConfig: func() {
+					seedEnvVarsPastThePage(api, contextEnvVarUnitContextID, "APAD")
+				},
+				Config: config,
+				ExpectError: wrappedDiagnostic(
+					"and ZZ_LAST was not among the 100 it disclosed, so Terraform cannot say " +
+						"whether it still exists. It is NOT being removed from state on that basis"),
+			},
+		},
+		// The variable is real and the fake still holds it; the destroy at the
+		// end of the case would otherwise run against a truncated list too.
+		CheckDestroy: func(*terraform.State) error {
+			for i := range fakeContextEnvVarPageSize {
+				api.removeEnvVar(contextEnvVarUnitContextID, fmt.Sprintf("APAD%03d", i))
+			}
+
+			return nil
+		},
+	})
+}
