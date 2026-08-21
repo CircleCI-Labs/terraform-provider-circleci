@@ -58,6 +58,8 @@ output "circleci_release_agent_live_versions" {
 - `name` (String) Name of the component.
 - `project_id` (String) Unique identifier (UUID) of the CircleCI project the component is associated with. Null when the component has no associated project.
 - `release_count` (Number) Total number of releases recorded for this component.
+
+~> **[`circleci_deploy_components`](deploy_components) (the list) has been observed to always return `0` for this attribute**, even for a component with a substantial release history; only [`circleci_deploy_component`](deploy_component) (the singular lookup by id) returned the true count for the same component at the same time. Do not rely on this value unless it was read through the singular data source.
 - `updated_at` (String) When the component was last updated, as an RFC 3339 timestamp.
 - `versions` (Attributes List) Every version published for this component, across all environments. (see [below for nested schema](#nestedatt--versions))
 

@@ -30,6 +30,13 @@ const (
 // UUID (Go's uuid.NullUUID), sent as either a quoted string or JSON null —
 // never omitted — so a component with no associated CircleCI project decodes
 // to a nil pointer here rather than a zero UUID string.
+//
+// ReleaseCount is unreliable when this struct was decoded from the plural
+// List route: [NET] a real component with confirmed, non-zero release
+// history came back with release_count: 0 from GET /deploy/components
+// (List) and the true count from GET /deploy/components/{id} (Get), for the
+// same component id at the same moment, reproducibly. Prefer Get's value when
+// the count matters; treat List's as decorative.
 type DeployComponent struct {
 	ID           string        `json:"id"`
 	ProjectID    *string       `json:"project_id"`
@@ -91,6 +98,13 @@ func (s *DeployComponentService) Get(ctx context.Context, id string) (*DeployCom
 // List fetches every deploy component in an organization, following
 // pagination to the last page. projectID and name filter the result when
 // non-empty; either may be left empty to fetch every component.
+//
+// name is a substring match against the component name, not an equality
+// filter: [NET] against a real organization, a name value that was itself an
+// exact component name ("widget-api") also matched a second, unrelated
+// component whose name merely contained that string in the middle
+// ("internal.widget-api-shim"). A caller expecting name to select exactly one
+// component by its exact name can get back more than one.
 func (s *DeployComponentService) List(ctx context.Context, orgID, projectID, name string) ([]DeployComponent, error) {
 	return DrainV2(ctx, func(ctx context.Context, pageToken string) (PaginatedResponse[DeployComponent], error) {
 		var page PaginatedResponse[DeployComponent]

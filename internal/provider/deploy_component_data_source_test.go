@@ -75,6 +75,15 @@ func TestAccDeployComponentDataSource(t *testing.T) {
 						tfjsonpath.New("name"),
 						knownvalue.StringExact("release-agent"),
 					),
+					// 42, not the 0 that the same component's release_count reads as
+					// through circleci_deploy_components (the plural list) — see that
+					// data source's test. Only the singular Get, exercised here, has
+					// been observed [NET] to return the true count.
+					statecheck.ExpectKnownValue(
+						"data.circleci_deploy_component.test",
+						tfjsonpath.New("release_count"),
+						knownvalue.Int64Exact(42),
+					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_component.test",
 						tfjsonpath.New("versions"),

@@ -98,6 +98,38 @@ func TestAccDeployEnvironmentsDataSource(t *testing.T) {
 	})
 }
 
+// TestAccDeployEnvironmentsDataSource_emptyOrg pins the shape every one of
+// this provider's four real acceptance-test fixture organizations actually
+// returned [NET] when probed for this workstream: HTTP 200 with
+// `{"items":[],"next_page_token":""}`, not an error and not null. A data
+// source that instead errored, or left `environments` null, would make the
+// entire plan fail for the (in practice extremely common) case of an org
+// that has simply never used deploy/release tracking — see
+// testDeployEmptyOrganizationID's comment for the full [NET] evidence.
+func TestAccDeployEnvironmentsDataSource_emptyOrg(t *testing.T) {
+	_, host := newMockDeployAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: deployProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: deployProviderConfig(host, "cloud") + fmt.Sprintf(`
+data "circleci_deploy_environments" "test" {
+  organization_id = %[1]q
+}
+`, testDeployEmptyOrganizationID),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"data.circleci_deploy_environments.test",
+						tfjsonpath.New("environments"),
+						knownvalue.ListSizeExact(0),
+					),
+				},
+			},
+		},
+	})
+}
+
 func TestAccDeployEnvironmentsDataSource_serverDeployment(t *testing.T) {
 	_, host := newMockDeployAPI(t)
 
