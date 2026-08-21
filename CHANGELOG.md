@@ -2,10 +2,58 @@
 
 ## Unreleased
 
-This entry affects contributors running the acceptance test suite against a real CircleCI
-installation, not provider users — nothing here changes provider behaviour.
+### BUG FIXES
+
+* **`circleci_trigger` left `created_at` empty in state after every create, so every
+  refresh after an apply showed a permanent diff on it** and `ImportStateVerify` failed.
+  The create route does not return the field: `POST
+  /api/v2/projects/{project}/pipeline-definitions/{definition}/triggers` answers HTTP 200
+  with no `created_at` key at all, while `GET /api/v2/projects/{project}/triggers/{id}` and
+  the `PATCH` update route both carry it. `Create` now reads the trigger back to pick it up.
+
+  That read-back is the call whose removal caused this. It was dropped on the grounds that
+  the create response was "a full Trigger, the same shape `GetTrigger` returns" — a claim
+  taken from the published OpenAPI document, which is wrong here, rather than from the API.
+  Its *removal* was fixing something real, though: the read used to `return` on failure
+  before `resp.State.Set`, so a trigger CircleCI had already created was left with no
+  record in state and the next apply created a second one (issue #6). Both defects are
+  real, so the read is back and now writes state either way — a failure degrades
+  `created_at` to empty with a warning and repairs itself on the next refresh, rather than
+  erroring, which would taint the object and destroy and recreate a perfectly good trigger.
+
+  Only `created_at` is taken from the read-back. `GET` returns
+  `event_source.webhook.url` as the literal `**REDACTED**` even for the token that just
+  created the trigger, while the create response carries the real signed URL, so
+  re-mapping the whole response — which is what the old read-back did — would replace a
+  usable webhook URL in state with a placeholder.
+
+  No mocked test caught any of this, because the test fake's create response echoed its
+  whole stored record, `created_at` included. The fake's `POST` now omits it exactly as
+  production does, and the paired regression tests fail if the read-back is dropped *or*
+  if its failure is allowed to gate writing state.
+
+* **Corrected the documentation on `circleci_trigger`'s `event_source_web_hook_url`.** It
+  said the API redacts the embedded secret "when the calling token is not allowed to see
+  it", which is not what happens: probing with the very token that had just created a
+  trigger, the create response carried the real signed URL and the immediately following
+  `GET` carried `**REDACTED**`, as did `PATCH`. Only the create response ever carries the
+  secret, so the first refresh after an apply replaces it — that is worth knowing about
+  before importing rather than after. Behaviour is unchanged; this corrects what the
+  attribute and the resource's import notes claim.
+
+The entries below affect contributors running the acceptance test suite against a real
+CircleCI installation, not provider users — nothing there changes provider behaviour.
 
 ### NOTES
+
+* **`TestAccTriggerResourceUpdateRemovesRepoExternalId` failed its own teardown and left a
+  real trigger behind on every run.** Its last step is an `ExpectError` step, so the
+  *invalid* configuration was the last one written to disk — and the test framework plans
+  the post-test destroy against whatever configuration is there, so `ValidateConfig`
+  rejected it again during teardown and the destroy never ran. A third step restores the
+  valid configuration (a no-op against state, since the erroring step never applied) so
+  that teardown has something it can plan. Unrelated to the `created_at` fix above; it
+  reproduces identically on the unmodified tree.
 
 * **Acceptance-test environment variables are now named per integration**, and a placeholder
   value skips cleanly instead of failing. Every fixture variable is `CIRCLECI_TEST_<KEY>_<SUFFIX>`,

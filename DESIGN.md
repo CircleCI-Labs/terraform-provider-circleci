@@ -178,8 +178,8 @@ receiver and never is one. Same reasoning excludes `token` from
 
 The highest-leverage decision in the project. An audit of what the API really
 accepts and returns found **six bugs where the client and the mock were wrong in
-the same way**, so every test passed (two more were found later, below, bringing
-the total to eight):
+the same way**, so every test passed (three more were found later, below, bringing
+the total to nine):
 
 - checkout key tags were `public-key`/`created-at`; production sends
   `public_key`/`created_at`, so `public_key` was permanently empty
@@ -242,6 +242,33 @@ in a `MarshalJSON` — tags are what people read and grep, and a method body is 
 convention like this goes to die. `Webhook.SigningSecret` only ever holds the `"****"`
 mask, and one struct doing both jobs is also exactly how a masked value gets written back
 as a literal secret.
+
+**Ninth bug — a fake more generous than production, and the first of that shape.** Every
+bug above was a *wrong* value: a misspelled key, a bare array, a rewritten `ttl`. This one
+was a value production does not send at all. `POST
+/projects/{project}/pipeline-definitions/{definition}/triggers` answers `200` and omits
+`created_at`; `GET`, `PATCH` and the list route all include it. Nothing in the OpenAPI
+document says so, and the trigger fake echoed its whole stored record back from `POST`,
+`created_at` and all — so when `circleci_trigger`'s `Create` dropped its read-back on the
+strength of a comment asserting "the create response is a full `Trigger`, the same shape
+`GetTrigger` returns", every mocked test still passed while `created_at` was permanently
+empty in state for real users.
+
+The generalisation this time was not about spelling but about symmetry: *a create returns
+the thing it created.* Usually true, promised nowhere, and — as with "the API is
+snake_case everywhere" — a fake written from it is a fake written from the client again.
+Two lessons on top of the rule above:
+
+1. **A fake must be able to be less generous than the client wants.** A fake that always
+   answers with everything the struct can hold cannot fail a provider that reads a field
+   the route never sends. The trigger fake now derives its `POST` body from its stored
+   record by *removing* `created_at` (`createResponse` in
+   `internal/provider/trigger_resource_fake_test.go`), so the omission is a property of
+   the fake rather than an accident of which fixture a test happened to use.
+2. **Route-by-route, not resource-by-resource.** "The trigger API returns a trigger" is
+   true of three of its four routes. The shape has to be confirmed per method, which is
+   what `CreateTrigger`'s doc comment now records: all four responses, side by side, with
+   the timestamps they were measured from.
 
 ### Characterization tests state the bug in the assertion
 
@@ -627,10 +654,15 @@ with the same measurement everywhere. `internal/circleci` is at **90.6%**, and `
 
 So credentials were never the blocker for *coverage*. What they are still needed for
 is the class of bug mocks cannot find, which is a different thing and remains the top
-outstanding ask. Note that the seven wire-shape bugs found so far
-were all caught by checking the real wire format rather than by running against a live
-API — real organizations are for the behaviours nobody thought to mock, not for
-re-finding these.
+outstanding ask. Eight of the nine wire-shape bugs found so far were caught by checking
+the real wire format rather than by running against a live API — real organizations are
+for the behaviours nobody thought to mock, not for re-finding those.
+
+The ninth is the exception, and it is the argument for credentials rather than against
+them: the trigger create route's missing `created_at` was surfaced by a real acceptance
+run (`ImportStateVerify` failing, and a permanent `created_at` diff after apply), *then*
+localised with `curl`. Reading a wire format tells you what a route sends; only running
+the resource tells you which of the fields it omits the provider was relying on.
 
 Targets unchanged: 85% for `internal/provider`, 95% for `internal/circleci`.
 `internal/httpcl` is vendored and deliberately not padded.
