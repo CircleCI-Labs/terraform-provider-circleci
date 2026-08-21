@@ -22,7 +22,7 @@ import (
 
 func TestAccRunnerResourceClassResource(t *testing.T) {
 	organizationId := testOrgID(t)
-	resourceClass := fmt.Sprintf("%s/acc-test-runner", testRunnerNamespace(t))
+	resourceClass := testUniqueRunnerResourceClass(t, "acc-test-runner")
 	description := "Acceptance test runner resource class"
 	uuidRegex := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -81,7 +81,7 @@ func TestAccRunnerResourceClassResource(t *testing.T) {
 
 func TestAccRunnerResourceClassForceDelete(t *testing.T) {
 	organizationId := testOrgID(t)
-	resourceClass := fmt.Sprintf("%s/acc-test-runner-force", testRunnerNamespace(t))
+	resourceClass := testUniqueRunnerResourceClass(t, "acc-test-runner-force")
 	description := "Acceptance test runner resource class with force delete"
 
 	resource.Test(t, resource.TestCase{

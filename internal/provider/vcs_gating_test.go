@@ -16,7 +16,7 @@ import (
 // Per-VCS gating and coverage reporting for the acceptance suite.
 //
 // A green run of this package against one GitHub App organization used to be
-// indistinguishable from full coverage across all seven integration types,
+// indistinguishable from full coverage across all eight integration types,
 // because no test keyed its skips off which one it was actually pointed at.
 // Running the same suite against GitLab or Bitbucket would fail on features
 // those integrations genuinely do not have (see README.md's compatibility
@@ -36,7 +36,7 @@ import (
 //
 // This is deliberately not a general pass/fail reporter — `go test`'s own
 // output already is one. It exists only to answer the one question the rest
-// of the suite cannot: of the seven integration types, which one did *this*
+// of the suite cannot: of the eight integration types, which one did *this*
 // run actually touch.
 var vcsCoverage = struct {
 	mu      sync.Mutex
@@ -75,13 +75,91 @@ func testRequireVCSType(t *testing.T, supported ...string) {
 	vcsCoverage.mu.Unlock()
 }
 
+// testIsolateVCSCoverage keeps the calling test's own calls to
+// testRequireVCSType out of the end-of-run summary, restoring whatever was
+// recorded before it once the test finishes.
+//
+// Only the guard's own mutation tests below should use this. They drive
+// testRequireVCSType directly, with a CIRCLECI_TEST_VCS_TYPE they set
+// themselves, and without this their entries land in the same slices the real
+// acceptance tests record into — which made the summary state something
+// false. A CI job pointed at GitLab reported:
+//
+//	=== VCS integration coverage (CIRCLECI_TEST_VCS_TYPE=gitlab) ===
+//	Exercised by this run (1):
+//	  TestRequireVCSTypeRunsWhenSupported/subtest (github_app)
+//
+// naming a github_app test as exercised by a GitLab run, because that is the
+// value the mutation test needs for its own purposes. It also meant the block
+// was never empty whatever the configuration, so its absence stopped being
+// usable as a signal that a run never resolved CIRCLECI_TEST_VCS_TYPE at all
+// — which is exactly what .circleci/config.yml's acceptance jobs check for.
+//
+// Snapshot-and-restore is safe here rather than racy: a test that calls
+// testRequireVCSType for real also calls testAccPreCheck, which calls
+// t.Setenv, which panics in a test that has called t.Parallel — so no gated
+// test can be running concurrently with these.
+func testIsolateVCSCoverage(t *testing.T) {
+	t.Helper()
+
+	vcsCoverage.mu.Lock()
+	ran := append([]string(nil), vcsCoverage.ran...)
+	skipped := append([]string(nil), vcsCoverage.skipped...)
+	vcsCoverage.mu.Unlock()
+
+	t.Cleanup(func() {
+		vcsCoverage.mu.Lock()
+		defer vcsCoverage.mu.Unlock()
+
+		vcsCoverage.ran = ran
+		vcsCoverage.skipped = skipped
+	})
+}
+
+// TestVCSCoverageIsolationKeepsSelfTestsOutOfTheSummary pins the behaviour
+// testIsolateVCSCoverage exists for: driving the guard the way the two
+// mutation tests below do must leave the coverage record exactly as it found
+// it. Without the isolation this test sees one extra entry — the entry that
+// used to appear in every CI job's summary as coverage nobody had.
+func TestVCSCoverageIsolationKeepsSelfTestsOutOfTheSummary(t *testing.T) {
+	recorded := func() int {
+		vcsCoverage.mu.Lock()
+		defer vcsCoverage.mu.Unlock()
+
+		return len(vcsCoverage.ran) + len(vcsCoverage.skipped)
+	}
+
+	before := recorded()
+
+	// The nesting matters: the isolation is undone by t.Cleanup, which runs
+	// when this subtest ends, so the assertion has to be outside it.
+	t.Run("drives the guard the way a mutation test does", func(t *testing.T) {
+		testIsolateVCSCoverage(t)
+		t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
+
+		t.Run("subtest", func(t *testing.T) {
+			testRequireVCSType(t, "github_app")
+		})
+	})
+
+	if after := recorded(); after != before {
+		t.Errorf("the guard's own use of testRequireVCSType left %d entries in vcsCoverage, want %d; "+
+			"they would be reported as VCS integration coverage that no acceptance test provided",
+			after, before)
+	}
+}
+
 // TestRequireVCSTypeSkipsWhenUnsupported and TestRequireVCSTypeRunsWhenSupported
 // mutation-test the guard itself. Every test that calls testRequireVCSType needs
 // a live CircleCI account to run at all, which makes the guard's own correctness
 // otherwise unobservable in this repository — these two exercise it directly, with
 // no API involved, by checking whether code placed after the call in a subtest
 // ever runs.
+//
+// Both isolate themselves from the coverage record: they are tests of the
+// guard, not evidence about an integration. See testIsolateVCSCoverage.
 func TestRequireVCSTypeSkipsWhenUnsupported(t *testing.T) {
+	testIsolateVCSCoverage(t)
 	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "gitlab")
 
 	ranPastTheGate := false
@@ -98,6 +176,7 @@ func TestRequireVCSTypeSkipsWhenUnsupported(t *testing.T) {
 }
 
 func TestRequireVCSTypeRunsWhenSupported(t *testing.T) {
+	testIsolateVCSCoverage(t)
 	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
 
 	ranPastTheGate := false
@@ -139,6 +218,12 @@ func printVCSCoverageSummary() {
 		// Nothing to report either way, and staying silent here matters —
 		// this is what keeps `task test:fast` and `task test` quiet on a
 		// fresh checkout.
+		//
+		// The acceptance jobs in .circleci/config.yml rely on that silence
+		// having exactly one meaning: they fail when the block is absent,
+		// because for a job that configures an integration its absence means
+		// the gate was never reached. That only holds because the guard's own
+		// mutation tests keep out of the record — see testIsolateVCSCoverage.
 		return
 	}
 

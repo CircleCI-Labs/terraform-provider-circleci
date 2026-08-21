@@ -69,6 +69,20 @@
   the first response's token, in one request, and the client no longer sends a page
   parameter the route ignores.
 
+
+* **`data.circleci_user_collaborations`'s `vcs_type` was empty for every organization.**
+  Found by the sweep above, and the mirror image of the webhook: `GET
+  /api/v2/me/collaborations` sends `vcs_type` like everything else in v2, while the published
+  OpenAPI document declares a required `vcs-type`. The client was written from the document,
+  and so was the fake behind the test, so the two agreed and an always-empty attribute passed
+  every assertion. Checked against Cloud over 38 collaborations spanning `github` and
+  `circleci` organizations: every one snake_case, no hyphenated key anywhere in the payload.
+
+  The decode now takes `vcs_type` and falls back to `vcs-type`, so a deployment that really
+  does send the documented spelling — an older CircleCI Server — keeps working. Filtering a
+  collaborations list on `vcs_type` (the example in the data source's own documentation)
+  matched nothing before this fix.
+
 ### NOTES
 
 * **The diagnostic for an over-long context no longer suggests a route that does not
@@ -105,6 +119,10 @@
   that teardown has something it can plan. Unrelated to the `created_at` fix above; it
   reproduces identically on the unmodified tree.
 
+
+The note below affects contributors running the acceptance test suite against a real
+CircleCI installation, not provider users.
+
 * **Acceptance-test environment variables are now named per integration**, and a placeholder
   value skips cleanly instead of failing. Every fixture variable is `CIRCLECI_TEST_<KEY>_<SUFFIX>`,
   where `KEY` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or `BB_CLOUD` and the
@@ -118,6 +136,66 @@
   as accounts become available — without a stray placeholder turning into a live-API failure
   that reads like a regression. See README.md's "Fixture identifiers" and TESTING.md's
   "Credentials layout in CircleCI" for the full naming scheme.
+
+### SECURITY
+
+* **`circleci_webhook` sent `signing_secret` and `verify_tls` under keys the API ignores.**
+  Again — and for the opposite reason to the one 0.5.0 recorded, whose entry below has been
+  corrected.
+
+  The webhook routes are asymmetric. The **request** side reads `signing-secret` and
+  `verify-tls`, hyphenated; **responses** report `signing_secret` and `verify_tls`,
+  snake_case. The published OpenAPI document says exactly that. The request side ignores
+  unrecognised keys, so the snake_case spellings are accepted with a `201`/`200` and both
+  values are silently discarded. Verified against the live API, two creates on the same
+  project seconds apart:
+
+  ```
+  POST /api/v2/webhook  {"verify-tls":true,"signing-secret":"..."}
+    -> 201 {"verify_tls":true,"signing_secret":"****"}     honoured
+  POST /api/v2/webhook  {"verify_tls":true,"signing_secret":"..."}
+    -> 201 {"verify_tls":false}                            both silently dropped
+  ```
+
+  0.5.0 changed the request keys from hyphenated to snake_case to match the responses and
+  the read path, so **every webhook created or updated by 0.5.0 and 0.6.0 had no signing
+  secret and TLS verification off**, however it was configured — the same outcome as the
+  v0.4.0 bug 0.5.0 set out to fix. `verify_tls = true` additionally made `terraform apply`
+  fail late, after the webhook existed, with `Provider produced inconsistent result after
+  apply: .verify_tls: was cty.True, but now cty.False`, because the provider writes state
+  from the response and the response said `false`.
+
+  The signing secret is what lets a receiver distinguish a genuine CircleCI delivery from a
+  forged request. If you configured one and your receiver verifies signatures, it was
+  rejecting every delivery. If your receiver does *not* verify, treat it as having accepted
+  unauthenticated input for the period concerned. TLS verification being off means CircleCI
+  did not check the certificate of the endpoint it posted your payloads to.
+
+  **What to do:** re-apply with this version. No configuration change is needed. Rotate the
+  signing secret afterwards if the receiver may have accepted unauthenticated deliveries;
+  and note the API has no way to *remove* a secret, only replace it — an empty
+  `signing-secret` in a request is treated as "leave it alone".
+
+  Fixed by tagging the request type (`circleci.WebhookInput`) with the hyphenated keys the
+  request side reads, while the response type (`circleci.Webhook`) keeps the snake_case keys
+  responses carry. Two types rather than one, because plain struct tags cannot express both
+  directions and burying the difference in a `MarshalJSON` is what makes the next reader
+  "fix" it back. Guarded by `TestWebhookInputMarshalsHyphenatedRequestKeys`, which serialises
+  the request body with no server involved, plus the client- and resource-level assertions in
+  `TestCreateWebhookSendsHyphenatedSecretAndVerifyTLS` and
+  `TestWebhookResourceUnit_SecretAndVerifyTLSReachTheWire`.
+
+  The reason this shipped at all is that the fake API used by every mocked webhook test read
+  the same snake_case keys the broken client sent, so client and fake agreed and the suite
+  was green. The fake now reads only the hyphenated request keys and stores `verify_tls`
+  false when they are absent, exactly as production does, so a client sending snake_case
+  fails against it.
+
+* **The other two spellings 0.5.0 changed were checked against the live API and are
+  correct.** `public_key`/`created_at` on checkout keys and `created_at` on project
+  environment variables really are snake_case in responses — created through the API and read
+  back, key by key. Neither field is ever *sent*, so neither has a request side to get wrong.
+  Only the webhook routes are asymmetric.
 
 ## 0.6.0 (2026-08-13)
 
@@ -304,6 +382,16 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
 ### SECURITY
 
 * **`circleci_webhook` never sent `signing_secret` or `verify_tls`.**
+
+  > **Corrected after release.** This entry had the direction of the defect backwards, and
+  > the fix it describes did not work. The webhook API's **request** side reads
+  > `signing-secret` and `verify-tls` (hyphenated) and its **responses** report
+  > `signing_secret` and `verify_tls` (snake_case) — verified against the live API. So the
+  > hyphenated names this entry blames were the correct ones for a request, the snake_case
+  > names 0.5.0 moved to are the ones the request side ignores, and 0.5.0 reproduced the
+  > very bug it claimed to fix. The original text is kept below as it shipped; see the
+  > SECURITY entry under Unreleased for what is actually true and what to do about it.
+
   `circleci-sdk-go` tags those fields `json:"signing-secret"` and
   `json:"verify-tls"` (hyphenated), while the CircleCI webhook API reads
   `signing_secret` and `verify_tls`. The API ignores keys it does not recognise, so
@@ -364,6 +452,12 @@ sources, 2 ephemeral resources and 3 provider functions**, and stops depending o
     `public-key`/`created-at` on checkout keys, and `created-at` on project environment
     variables. Three of one mistake in one library is why this was a removal rather
     than a patch
+
+    > **Corrected after release.** Two of those three hold: checkout-key and project
+    > environment-variable *responses* really are snake_case, re-verified against the live
+    > API. The webhook one does not — the webhook routes read hyphenated keys on a request,
+    > so the SDK's tags were right there and this release's change to snake_case broke them.
+    > See the SECURITY entry under Unreleased.
   * untyped errors (every failure collapsed to one formatted string), which forced
     drift detection to match on the text `"404"` — and that also matches a 5xx whose
     body happens to contain it, **silently removing live resources from state**

@@ -46,13 +46,14 @@ org). To test what we ship, we need one of each.
 |---|---|---|---|
 | 1 | **GitHub App** | `circleci/<uuid>` | The modern default. Pipeline definitions and triggers use `github_app`. Groups/RBAC require a standalone org. |
 | 2 | **GitHub OAuth** | `github/<org>` (`gh/<org>`) | The legacy path most existing customers are on. The only place legacy scheduled pipelines and `github_oauth` triggers exist. |
-| 3 | **GitLab Cloud** | `circleci/<uuid>` | Standalone. Checkout keys are documented as unavailable — we need to prove our resources fail cleanly rather than confusingly. |
-| 4 | **GitLab self-managed** | `circleci/<uuid>` | Separate connection type from GitLab Cloud; worth confirming it is not silently different. |
-| 5 | **Bitbucket Cloud** | `bitbucket/<org>` (`bb/<org>`) | Different feature set again; `set_github_status` is meaningless here. |
-| 6 | **GitHub Enterprise Server** | `circleci/<uuid>` | The `github_server` provider value in `circleci_pipeline_definition` / `circleci_trigger` exists solely for this and is currently untested. |
-| 7 | **CircleCI Server** | n/a — separate installation | The `deployment = "server"` path. Orthogonal to the above: Server does not route `/api/v3`, and `circleci_pipeline_definition` / `circleci_trigger` do not exist there at all. |
+| 3 | **GitHub OAuth + GitHub App** | `github/<org>` (`gh/<org>`) | A hybrid: OAuth-connected, and *also* carrying a GitHub App installation. Confirmed distinct from #2 — `GET /api/v2/github-app/organization/{id}/installation` answers 200 here and 404 on an OAuth-only org — so it is the only fixture that can point the GitHub App routes at an organization whose projects are OAuth projects. |
+| 4 | **GitLab Cloud** | `circleci/<uuid>` | Standalone. Checkout keys are documented as unavailable — we need to prove our resources fail cleanly rather than confusingly. |
+| 5 | **GitLab self-managed** | `circleci/<uuid>` | Separate connection type from GitLab Cloud; worth confirming it is not silently different. |
+| 6 | **Bitbucket Cloud** | `bitbucket/<org>` (`bb/<org>`) | Different feature set again; `set_github_status` is meaningless here. |
+| 7 | **GitHub Enterprise Server** | `circleci/<uuid>` | The `github_server` provider value in `circleci_pipeline_definition` / `circleci_trigger` exists solely for this and is currently untested. |
+| 8 | **CircleCI Server** | n/a — separate installation | The `deployment = "server"` path. Orthogonal to the above: Server does not route `/api/v3`, and `circleci_pipeline_definition` / `circleci_trigger` do not exist there at all. |
 
-Numbers 1–6 are organizations on CircleCI Cloud. Number 7 is a whole
+Numbers 1–7 are organizations on CircleCI Cloud. Number 8 is a whole
 installation, and is the one that needs the most lead time.
 
 ### Per organization, please also create
@@ -72,41 +73,61 @@ Every per-integration fixture variable is named `CIRCLECI_TEST_<KEY>_<SUFFIX>`
 — see the key table and the suffix list in README.md's "Fixture identifiers"
 section, which is the canonical reference for the naming scheme. Because the
 integration is baked into the variable *name* rather than into which context
-supplies it, all six integrations' fixtures can live side by side in a single
-context:
+supplies it, all seven integrations' fixtures can be configured side by side
+without a context each.
 
-```
-tfprovider-acc
-```
+The split is by *sensitivity*, not by integration:
 
-Restrict it to this project only (`circleci_context_restriction`, or the web
-UI) so an unrelated project cannot read the tokens. CircleCI Server is a
-separate axis (deployment, not VCS integration — see "Accounts required"
-above) and keeps its own context, since its variables (`CIRCLE_HOST`,
-`CIRCLE_DEPLOYMENT`, `CIRCLE_RUNNER_HOST`) are not part of this per-integration
-scheme at all:
+- **The token lives in a context**, and it is the only thing in it:
+
+  ```
+  terraform-provider-acc-token
+  ```
+
+  Restrict it to this project *and* to the `labs` branch
+  (`circleci_context_restriction`, or the web UI) so neither an unrelated
+  project nor an unreviewed branch can read it. That restriction is also the
+  control that stops a pull request from a fork reaching the token, because
+  CircleCI enforces it before the job starts.
+
+- **Every fixture identifier lives in `.circleci/config.yml`**, in the
+  `environment` block of the acceptance job for that organization. Org and
+  project UUIDs and slugs are not secrets, and putting them in the config makes
+  "which organization does CI write to?" a reviewable diff instead of an
+  invisible edit in the context UI. See "In CI" below.
+
+CircleCI Server is a separate axis (deployment, not VCS integration — see
+"Accounts required" above) and keeps its own context, since its variables
+(`CIRCLE_HOST`, `CIRCLE_DEPLOYMENT`, `CIRCLE_RUNNER_HOST`) are not part of this
+per-integration scheme at all:
 
 ```
 tfprovider-acc-circleci-server
 ```
 
-### Seeding `tfprovider-acc`
+### Seeding the fixture variables
 
-Populate every `CIRCLECI_TEST_<KEY>_<SUFFIX>` name up front, even for
-integrations without a provisioned account yet — set those to a placeholder
-(`REPLACE_ME`, `TODO`, or `CHANGEME`; see README.md's "Placeholder values skip
-cleanly"). A placeholder is treated exactly like an unset variable, so the
-full variable list is visible in the context UI and fillable incrementally,
-without ever making a test run against a nonsense organization. `CIRCLECI_TEST_VCS_TYPE`
-then picks, per CI job, which one of the (possibly still-placeholder) integrations that job's
-tests actually exercise.
+A variable may be left out entirely, or set to a placeholder (`REPLACE_ME`,
+`TODO`, or `CHANGEME`; see README.md's "Placeholder values skip cleanly").
+A placeholder is treated exactly like an unset variable, so where it helps to
+have the full list visible and fillable in one place — a context UI, say — a
+placeholder keeps the name on screen without ever making a test run against a
+nonsense organization. In `.circleci/config.yml` the same job is served by
+simply omitting the line: the acceptance jobs there set only the identifiers
+that exist, and each missing one produces a skip that names itself.
+`CIRCLECI_TEST_VCS_TYPE` then picks, per CI job, which integration that job's
+tests exercise.
 
-### Variables in the shared context
+### The variables
+
+`CIRCLE_TOKEN` is the only one of these that belongs in the context. Every
+other row is a fixture identifier and belongs in the job's `environment` block
+in `.circleci/config.yml`.
 
 | Variable | Notes |
 |---|---|
 | `CIRCLE_TOKEN` | Org-admin personal API token |
-| `CIRCLECI_TEST_VCS_TYPE` | One of `github_app`, `github_oauth`, `gitlab`, `gitlab_selfmanaged`, `bitbucket`, `github_server`. **Tests use this to select which integration's variables to read, and to skip combinations the integration does not support** — see below |
+| `CIRCLECI_TEST_VCS_TYPE` | One of `github_app`, `github_oauth`, `github_hybrid`, `gitlab`, `gitlab_selfmanaged`, `bitbucket`, `github_server`. **Tests use this to select which integration's variables to read, and to skip combinations the integration does not support** — see below |
 | `CIRCLECI_TEST_<KEY>_ORG_ID` / `_ORG_SLUG` / `_ORG_NAME` | The primary organization for that integration |
 | `CIRCLECI_TEST_<KEY>_ALT_ORG_ID` / `_ALT_ORG_SLUG` | A second org, for the org-move test |
 | `CIRCLECI_TEST_<KEY>_PROJECT_ID` / `_PROJECT_SLUG` | The writable throwaway project |
@@ -118,8 +139,11 @@ tests actually exercise.
 | `CIRCLECI_TEST_<KEY>_WEBHOOK_ID` / `_WEBHOOK_NAME` / `_WEBHOOK_URL` | A pre-existing webhook |
 | `CIRCLECI_TEST_<KEY>_RUNNER_NAMESPACE` | Namespace for runner resource classes |
 
-`<KEY>` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or
-`BB_CLOUD` — fill in the row for every integration you have an account for.
+`<KEY>` is `GH_APP`, `GH_OAUTH`, `GH_HYBRID`, `GH_SERVER`, `GL_CLOUD`, `GL_SM`
+or `BB_CLOUD` — fill in the row for every integration you have an account for.
+`GH_HYBRID` is account #3 above (OAuth-connected *and* carrying a GitHub App
+installation); it needs its own row precisely because it is a different
+organization from `GH_OAUTH`, not another name for it.
 
 ### Static, single-integration variables
 
@@ -156,6 +180,121 @@ Any variable left unset, or left at a placeholder value, skips the tests that
 need it, naming both which variable and which of the two it was in the skip
 message. There is no way to make a test silently pass without its fixture.
 
+### Reproducing a CI job exactly
+
+The four organizations CI runs against are disposable and their identifiers are
+not secrets, so the fixture values are in `.circleci/config.yml` in plain text,
+in each acceptance job's `environment` block. To reproduce one locally, copy
+that block:
+
+```sh
+export CIRCLE_TOKEN=...                  # your own token, not CI's
+export CIRCLECI_TEST_VCS_TYPE=github_app
+export CIRCLECI_TEST_GH_APP_ORG_ID=e75c804e-7f5c-4506-9dad-03fc86af39d1
+export CIRCLECI_TEST_GH_APP_ORG_SLUG=circleci/Va2k7FVcHE7EyFDbRioifr
+export CIRCLECI_TEST_GH_APP_ORG_NAME=gh-app-cci-1
+export CIRCLECI_TEST_GH_APP_PROJECT_ID=18ae5fa4-d11c-4fe1-a1a7-fbcae4d037de
+
+TF_ACC=1 task test -- ./internal/provider/...
+```
+
+The other three jobs differ only in which key they set: `GH_OAUTH`
+(gh-oauth-cci-1, plus `_ALT_ORG_ID`/`_ALT_ORG_SLUG` for the org-move test),
+`GH_HYBRID` (gh-oauth-cci-2) and `GL_CLOUD` (gitlab-test). Take the values from
+the config rather than from here, so there is one copy to keep correct.
+
+To run a single test, add `-run`:
+
+```sh
+TF_ACC=1 task test -- -run TestAccTriggerResourceWebhook ./internal/provider/...
+```
+
+### Seeing the coverage summary locally
+
+`task test` and `task ci:test` both run `gotestsum`, whose default `pkgname`
+format prints one line per package and *discards* a passing package's own
+stdout — which is where the coverage block described below is written. It is
+not missing, it is swallowed. Ask for a format that keeps it:
+
+```sh
+GOTESTSUM_FORMAT=standard-quiet TF_ACC=1 task test -- ./internal/provider/...
+```
+
+Plain `go test ./internal/provider/...` shows it too. The CI jobs set that same
+variable, for the same reason.
+
+## In CI
+
+`.circleci/config.yml` has four acceptance jobs, one per organization we have:
+`acceptance-gh-app`, `acceptance-gh-oauth`, `acceptance-gh-hybrid` and
+`acceptance-gl-cloud`. Each runs `./internal/provider/...` — where every
+acceptance test lives — with `CIRCLECI_TEST_VCS_TYPE` set to its integration
+and that integration's fixture variables set inline. `task ci:test` sets
+`TF_ACC=1`, so nothing needs to switch the tests on; what the jobs supply is
+the token and the fixtures.
+
+**They do not run on a push, and they do not gate anything.** They talk to a
+live installation, so they fail for reasons unrelated to the commit — an API
+blip, a rate limit, an object a killed earlier run never destroyed — and a red
+build that means "maybe the API was unwell" quickly means nothing at all. They
+also *cannot* run on a pull request: the context is restricted to the `labs`
+branch, so a PR build would fail on a missing credential rather than skip.
+
+Instead they live in their own workflow, compiled into a pipeline only when the
+`run-acceptance-tests` pipeline parameter is true. A push cannot set it; a
+scheduled trigger or an authenticated API call can:
+
+```sh
+curl -X POST https://circleci.com/api/v2/project/<project-slug>/pipeline \
+  -H "Circle-Token: $CIRCLE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"branch":"labs","parameters":{"run-acceptance-tests":true}}'
+```
+
+Nightly is the intended cadence, with that on-demand trigger for after you have
+touched a resource — the case where a failure is actually attributable to
+something.
+
+**Serial groups.** Two runs against the same organization corrupt each other:
+these tests create and delete projects, flip org-wide settings and replace
+policy bundles. Each job therefore declares a `serial-group`, and the grouping
+follows the organizations rather than the jobs — one group per organization,
+except that `acceptance-gh-oauth` and `acceptance-gh-hybrid` share one, because
+the OAuth job's org-move test moves a project into the hybrid job's
+organization. Four separate groups would serialize nothing that needs it and
+one shared group would serialize everything, turning four ~40-minute jobs into
+a ~160-minute nightly for no safety gained. The config comment explains what
+would change that: a test writing something account-wide rather than
+org-scoped.
+
+**What each job stores.** `test-reports/` goes up as an artifact, including:
+
+| File | What it is |
+|---|---|
+| `vcs-coverage.txt` | The coverage block below, plus how many `TestAcc*` tests ran and skipped, plus every skip with its reason |
+| `acceptance.log` | The full test output |
+| `tests.xml`, `coverage.out` | The usual JUnit and coverage files |
+
+**Two things fail the job even when every test passes**, because a run that
+talked to no organization at all passes every assertion it makes:
+
+- No coverage block was printed. For a job that sets `CIRCLECI_TEST_VCS_TYPE`,
+  that means no VCS-gated test ever reached the gate.
+- Every `TestAcc*` test skipped. Green, and nothing created.
+
+Neither fires on "Exercised by this run (0)", which is the *correct* result for
+`acceptance-gl-cloud` and `acceptance-gh-hybrid`: all four VCS-gated tests
+require a GitHub App, OAuth, Server or Bitbucket fixture (see the table below),
+so none of them can run there. The ran/skipped counts are what to read in those
+two jobs.
+
+**Filling in the rest.** Each job sets only the identifiers that exist today —
+the organization and the writable project. `PROJECT_SLUG`, `STATIC_PROJECT_*`,
+`PIPELINE_ID`, `TRIGGER_*`, `CONTEXT_*`, `WEBHOOK_*`, `RUNNER_NAMESPACE` and the
+static `GH_APP_REPO_*` pair are deliberately absent rather than guessed: an
+absent variable skips with its own name in the message, while a wrong one fails
+against a nonsense identifier in a way that reads exactly like a regression. So
+the artifact of a green run doubles as the to-do list for the next one.
+
 ## What a run covers, and how to tell
 
 Most resources behave identically on every VCS integration, so most
@@ -185,6 +324,17 @@ depends on a static, single-integration fixture variable documented above
 those skip on an unrelated integration for free, with no VCS check needed,
 because the variable itself is simply unset there.
 
+**`github_hybrid` is deliberately absent from all four rows above.** A hybrid
+organization's *connection* is GitHub OAuth, so each of those four features
+would in fact work there — but that is exactly the point: running them against
+`github_hybrid` re-measures `github_oauth` at the cost of a whole extra CI job,
+because the App installation a hybrid org carries changes nothing any of these
+four tests touches. Where the key earns its keep is the `github-app/*` routes
+(`circleci_github_app_installation`, `circleci_github_app_repository`), which
+today have only fake-backed tests; the first live test of those is what should
+name `github_hybrid`. Until then a `github_hybrid` run reports these four as
+named skips, which is the honest answer rather than a silent one.
+
 At the end of a run, `TestMain` prints which of the VCS-gated tests above ran
 against the configured integration and which skipped because the fixture was
 a different one:
@@ -209,9 +359,13 @@ it cannot possibly pass; it does not make the test run anywhere it *can*. A
 single CI job still only ever has one `CIRCLECI_TEST_VCS_TYPE` configured, so
 a single green run still only measures one integration — the "Exercised by
 this run" list above is that run's honest ceiling, not the suite's. Turning
-that into actual per-integration evidence needs seven CI jobs, each pointed at
-a different context (see "Credentials layout" above); this gating is what
-makes such a matrix meaningful instead of merely green. Until that matrix
-exists, GitHub Enterprise Server, Bitbucket Cloud and CircleCI Server in
-particular remain reasoned rather than measured, exactly as README.md's
-compatibility matrix says.
+that into per-integration evidence takes one job per integration, which is
+what the four jobs in "In CI" above are; this gating is what makes such a
+matrix meaningful instead of merely green.
+
+Four of the eight rows in "Accounts required" have a job today. GitLab
+self-managed, Bitbucket Cloud, GitHub Enterprise Server and CircleCI Server
+have no organization provisioned, so they have no job either, and they remain
+reasoned rather than measured exactly as README.md's compatibility matrix
+says. Adding one is adding a job: copy an existing acceptance job, change the
+key in its `environment` block, and give it its own `serial-group`.
