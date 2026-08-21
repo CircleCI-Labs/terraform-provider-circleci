@@ -260,7 +260,7 @@ Changing the definition *id* does: a trigger is created under a definition and t
 - `event_source_repo_full_name` (String) The full name of the event source repository.
 - `event_source_web_hook_url` (String, Sensitive) The webhook URL for webhook-based triggers, including the secret that authenticates an inbound POST as a query parameter.
 
-~> **The API can redact this on read, not only on create.** `GET /projects/{project_id}/triggers/{trigger_id}` — the same route this resource's Read uses on every refresh and on import — answers with the literal string `**REDACTED**` in place of the secret when the calling token is not allowed to see it. Read stores whatever it gets with no check, so a token downgrade (or importing with a lower-privileged token than the one that created the trigger) silently replaces a working URL with an unusable one in state. There is no write-only counterpart to recover from this: unlike a practitioner-supplied secret, this URL is minted by CircleCI, not configured, so there is nothing to re-supply — the only fix is to replace the trigger, which mints a new one.
+~> **Only the create response carries the real secret; reads redact it.** `GET /projects/{project_id}/triggers/{trigger_id}` — the same route this resource's Read uses on every refresh and on import — answers with the literal string `**REDACTED**` in place of the secret, and so does the `PATCH` update route. Probed 2026-08-21 with the very token that had just created the trigger: the create response carried the signed URL and the immediately following read carried `**REDACTED**`, so this is not merely a question of the calling token being insufficiently privileged. Read stores whatever it gets with no check, so the first refresh after an apply replaces a working URL with an unusable one in state. There is no write-only counterpart to recover from this: unlike a practitioner-supplied secret, this URL is minted by CircleCI, not configured, so there is nothing to re-supply — the only fix is to replace the trigger, which mints a new one.
 - `id` (String) The unique identifier of the trigger.
 
 ## Changing the pipeline definition replaces the trigger
@@ -309,9 +309,11 @@ to import (both documented on their own attribute above, and covered by
   id into the generated configuration, which fails plan-time validation on the next
   `terraform plan` — this provider only accepts the two aliases. Edit the generated
   attribute to `system` or `current` before applying.
-- A `webhook` trigger's `event_source_web_hook_url` reads back exactly as created only
-  when the token used to import has permission to see the embedded secret. A
-  lower-privileged token gets the API's `**REDACTED**` placeholder instead, and nothing
-  in this provider can recover the real value after that — there is no write-only
-  attribute for it, because CircleCI mints this URL rather than accepting one from
-  configuration.
+- A `webhook` trigger's `event_source_web_hook_url` does not read back as created at all.
+  Only the create response carries the embedded secret; `GET
+  /projects/{project_id}/triggers/{trigger_id}` — what import and every refresh use —
+  answers with the API's `**REDACTED**` placeholder, as does the `PATCH` update route.
+  Probed with the same token that had just created the trigger, so this is not simply a
+  matter of the importing token being less privileged. Nothing in this provider can
+  recover the real value afterwards — there is no write-only attribute for it, because
+  CircleCI mints this URL rather than accepting one from configuration.

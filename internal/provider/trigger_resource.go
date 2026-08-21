@@ -182,12 +182,14 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"event_source_web_hook_url": schema.StringAttribute{
 				MarkdownDescription: "The webhook URL for webhook-based triggers, including the secret that " +
 					"authenticates an inbound POST as a query parameter.\n\n" +
-					"~> **The API can redact this on read, not only on create.** `GET " +
+					"~> **Only the create response carries the real secret; reads redact it.** `GET " +
 					"/projects/{project_id}/triggers/{trigger_id}` — the same route this resource's Read " +
 					"uses on every refresh and on import — answers with the literal string `**REDACTED**` in " +
-					"place of the secret when the calling token is not allowed to see it. Read stores " +
-					"whatever it gets with no check, so a token downgrade (or importing with a lower-privileged " +
-					"token than the one that created the trigger) silently replaces a working URL with an " +
+					"place of the secret, and so does the `PATCH` update route. Probed 2026-08-21 with the " +
+					"very token that had just created the trigger: the create response carried the signed URL " +
+					"and the immediately following read carried `**REDACTED**`, so this is not merely a " +
+					"question of the calling token being insufficiently privileged. Read stores whatever it " +
+					"gets with no check, so the first refresh after an apply replaces a working URL with an " +
 					"unusable one in state. There is no write-only counterpart to recover from this: unlike " +
 					"a practitioner-supplied secret, this URL is minted by CircleCI, not configured, so there " +
 					"is nothing to re-supply — the only fix is to replace the trigger, which mints a new one.",
@@ -418,32 +420,79 @@ func (r *triggerResource) Create(ctx context.Context, req resource.CreateRequest
 		circleCiTerrformTriggerResource.EventSourceScheduleAttributionActor = types.StringNull()
 	}
 
+	// No early return on these diagnostics, and none on anything else below
+	// either. Past this point the API has already created a trigger, so every
+	// path has to reach the resp.State.Set at the end of this function: a
+	// diagnostic that skipped it would leave a live trigger with no record in
+	// Terraform state, and the next apply would create a second one. That is
+	// issue #6, and it is why this tail has exactly one exit.
 	parametersState, paramDiags := triggerParametersFromAPI(newReturnedTrigger.ParameterStrings())
 	resp.Diagnostics.Append(paramDiags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
 	circleCiTerrformTriggerResource.Parameters = parametersState
 
 	circleCiTerrformTriggerResource.Disabled = types.BoolValue(newReturnedTrigger.IsDisabled())
 
-	// CreateTrigger "returns it as stored" (see that method's doc comment):
-	// the create response is a full Trigger, the same shape GetTrigger
-	// returns, so CreatedAt is already populated here. A follow-up GetTrigger
-	// used to be made purely to pick up CreatedAt (and re-set
-	// EventSourceRepoFullName, already set above from this same response) —
-	// and its failure returned before resp.State.Set below, so a trigger the
-	// API had already created successfully was left with no record in
-	// Terraform state at all. Trusting the create response avoids that
-	// extra round-trip and the failure mode that came with it.
-	circleCiTerrformTriggerResource.CreatedAt = types.StringValue(newReturnedTrigger.CreatedAt)
+	// created_at has to be read back: the create response does not carry it.
+	// Probed 2026-08-21 against circleci.com —
+	//
+	//	POST .../pipeline-definitions/{d}/triggers -> 200, body keys
+	//	  id name event_name description checkout_ref config_ref event_source
+	//	  disabled (+ parameters, when the request sent any). No created_at.
+	//	GET  .../projects/{p}/triggers/{id}        -> same keys PLUS
+	//	  "created_at":"2026-08-21T15:28:58.954521Z"
+	//
+	// — and recorded in CreateTrigger's doc comment. A comment here used to
+	// claim the opposite ("the create response is a full Trigger, the same
+	// shape GetTrigger returns, so CreatedAt is already populated") and dropped
+	// this read on that basis. The claim came from the OpenAPI document, not
+	// from the API: created_at stayed "" in state, which fails
+	// ImportStateVerify and, worse for a practitioner, shows a permanent diff
+	// on created_at at every refresh after apply.
+	//
+	// The read was dropped for a real reason, though — see the comment above on
+	// the single exit. Both defects are real, so the read is back but it may
+	// only ADD created_at; it may not gate writing state.
+	//
+	// Only CreatedAt is taken from it, deliberately. The read shape is not a
+	// superset of the create shape: GET answers with event_source.webhook.url as
+	// the literal "**REDACTED**" (same probe, using the very token that had just
+	// created the trigger), so re-mapping the whole response — which is what the
+	// old read-back did — would trade the real signed webhook URL for a
+	// placeholder in the state this apply writes. Read clobbers it on the next
+	// refresh regardless, which is a separate and pre-existing hazard documented
+	// on the event_source_web_hook_url attribute above; that is a reason to fix
+	// Read, not a reason for Create to throw the value away too.
+	circleCiTerrformTriggerResource.CreatedAt = types.StringValue("")
 
-	// Set state to fully populated data
-	diags = resp.State.Set(ctx, circleCiTerrformTriggerResource)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	readBack, err := r.client.GetTrigger(
+		ctx,
+		circleCiTerrformTriggerResource.ProjectId.ValueString(),
+		newReturnedTrigger.ID,
+	)
+	if err != nil {
+		// A warning, not an error, and that choice is the whole point of the fix.
+		// Terraform marks an object tainted when an apply reports an error yet
+		// returns a non-null state, so the next apply would destroy and recreate
+		// a trigger that is in fact perfectly good. Everything except created_at
+		// is already correct in state, and created_at repopulates by itself on
+		// the next refresh or plan (Read sets it from this same route) with no
+		// practitioner action at all. An error here would trade a self-healing
+		// problem for a destructive one.
+		resp.Diagnostics.AddWarning(
+			"Created CircleCI trigger, but could not read back created_at",
+			"The trigger was created successfully and is recorded in state, so no "+
+				"resource has been leaked. Reading it back to populate the computed "+
+				"created_at attribute failed, because the create response does not "+
+				"include it. created_at is empty in state for now and will be filled "+
+				"in by the next refresh or plan; no action is required.\n\n"+
+				circleci.Detail(err),
+		)
+	} else {
+		circleCiTerrformTriggerResource.CreatedAt = types.StringValue(readBack.CreatedAt)
 	}
+
+	// Set state to fully populated data. Unconditional, and the only exit.
+	resp.Diagnostics.Append(resp.State.Set(ctx, circleCiTerrformTriggerResource)...)
 }
 
 // Read refreshes the Terraform state with the latest data.

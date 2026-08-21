@@ -60,6 +60,19 @@ type fakeTriggerAPI struct {
 	// normal behavior.
 	failStatus int
 	failBody   string
+
+	// failNextGetAttempts makes that many of the next GET *attempts* answer 500
+	// and then stops, leaving every other route alone. It exists for one job
+	// failStatus above cannot do: failing the read-back that Create makes, while
+	// letting the plugin-testing framework's later refreshes succeed, so a test
+	// can see what Create leaves in state when the read-back fails. See
+	// TestTriggerResourceUnit_CreateSurvivesAFailedReadBack.
+	//
+	// Attempts, not requests: the provider's HTTP client wraps retryablehttp
+	// with RetryMax = 3 (internal/httpcl/client.go), so one logical GET is up to
+	// four attempts against this handler and a 500 answered once is simply
+	// retried into a success. failOneLogicalGet below is the count that matters.
+	failNextGetAttempts int
 }
 
 func newFakeTriggerAPI(t *testing.T) (*fakeTriggerAPI, string) {
@@ -297,10 +310,39 @@ func (a *fakeTriggerAPI) create(w http.ResponseWriter, r *http.Request) {
 	id := fmt.Sprintf("22222222-3333-4444-5555-%012d", a.nextID)
 	record := a.buildRecord(id, body)
 	a.triggers[projectID+"/"+id] = record
+	response := createResponse(record)
 	a.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(record)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// createResponse is what POST answers with, as distinct from what GET, PATCH
+// and this fake's own store hold: the create route's body omits created_at.
+//
+// Probed 2026-08-21 against circleci.com, one webhook and one schedule
+// trigger — see CreateTrigger's doc comment in internal/circleci/trigger.go
+// for the transcript. POST returns 200 with
+// id/name/event_name/description/checkout_ref/config_ref/event_source/disabled
+// (plus parameters when the request sent any); GET, PATCH and the list route
+// return all of that plus created_at.
+//
+// This fake used to echo the stored record verbatim, created_at and all, which
+// is precisely why not one mocked test caught the regression that dropped
+// Create's read-back on the claim that the create response carried it. Every
+// test passed against a fake that was more generous than production. A
+// provider that trusts POST for created_at must fail here — see
+// TestTriggerResourceUnit_CreateReadsBackCreatedAt.
+func createResponse(record map[string]any) map[string]any {
+	response := make(map[string]any, len(record))
+	for key, value := range record {
+		if key == "created_at" {
+			continue
+		}
+		response[key] = value
+	}
+
+	return response
 }
 
 // buildRecord turns a create/update request body into the stored
@@ -367,6 +409,12 @@ func (a *fakeTriggerAPI) get(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if a.checkFail(w) {
+		return
+	}
+	if a.consumeFailNextGetAttempt() {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"internal server error"}`)
+
 		return
 	}
 
@@ -503,6 +551,50 @@ func (a *fakeTriggerAPI) setFail(status int, body string) {
 	a.failBody = body
 }
 
+// failOneLogicalGet is how many attempt-level failures it takes to make exactly
+// one of the provider's GET calls fail: the first attempt plus every retry
+// retryablehttp will make for it (RetryMax = 3 in internal/httpcl/client.go).
+//
+// Arming fewer than this does not fail a read at all — the client retries the
+// 500 into a success — which is how a first attempt at
+// TestTriggerResourceUnit_CreateSurvivesAFailedReadBack managed to arm a
+// failure, observe none, and still look like it had tested something. If that
+// retry count ever changes, arming this many either leaves failures behind for
+// the next read (too few retries) or lets the read succeed (too many); both
+// break the tests below loudly, and both are checked explicitly there.
+const failOneLogicalGet = 4
+
+// armGetFailures arms the next count GET attempts to answer HTTP 500.
+func (a *fakeTriggerAPI) armGetFailures(count int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.failNextGetAttempts = count
+}
+
+// remainingFailNextGetAttempts reports how many armed GET failures were never
+// spent.
+func (a *fakeTriggerAPI) remainingFailNextGetAttempts() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.failNextGetAttempts
+}
+
+// consumeFailNextGetAttempt reports whether this GET attempt should fail,
+// spending one of the armed failures if so.
+func (a *fakeTriggerAPI) consumeFailNextGetAttempt() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.failNextGetAttempts <= 0 {
+		return false
+	}
+	a.failNextGetAttempts--
+
+	return true
+}
+
 func (a *fakeTriggerAPI) clearFail() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -623,27 +715,36 @@ func TestTriggerResourceUnit_GithubAppCRUD(t *testing.T) {
 	}
 }
 
-// TestTriggerResourceUnit_CreateDoesNotNeedASecondReadToPopulateState is a
-// regression test for issue #6.
+// TestTriggerResourceUnit_CreateReadsBackCreatedAt and
+// TestTriggerResourceUnit_CreateSurvivesAFailedReadBack are the pair that
+// pins the two defects Create has to satisfy at once. Neither one alone is a
+// sufficient test: this resource has already been broken in both directions,
+// each time by a change that fixed the other.
 //
-// Create used to follow a successful CreateTrigger with a GetTrigger call
-// made for no reason but to pick up CreatedAt — even though CreateTrigger
-// "returns it as stored" (see that method's doc comment in
-// internal/circleci/trigger.go): the create response is already a full
-// Trigger, the same shape GetTrigger returns, so CreatedAt was sitting right
-// there unused. Because that extra call happened *before* resp.State.Set,
-// its failure returned early and left a trigger the API had already created
-// with no record in Terraform state at all — the next apply would try to
-// create it again. The fix trusts the create response directly and makes no
-// such call.
+//  1. created_at must end up in state after a create. The create route does
+//     not return it — POST answers 200 with no created_at key, while GET,
+//     PATCH and the list route all carry it (probed 2026-08-21; the transcript
+//     is in CreateTrigger's doc comment in internal/circleci/trigger.go) — so
+//     Create has to read the trigger back. When it did not, created_at sat at
+//     "" in state: ImportStateVerify failed, and every refresh after an apply
+//     showed a permanent diff.
 //
-// This is checked by counting requests rather than by failing a follow-up
-// read, because after the fix there is no follow-up read left to fail. A
-// single create-and-verify test step should produce exactly one POST (the
-// create) and exactly one GET (the plugin-testing framework's own
-// post-apply refresh, which confirms the plan comes back empty) — not two
-// GETs, which is what the extra internal GetTrigger call used to add.
-func TestTriggerResourceUnit_CreateDoesNotNeedASecondReadToPopulateState(t *testing.T) {
+//  2. No path may exist where the API created a trigger and state was not
+//     written. That is issue #6: the read-back used to `return` on failure
+//     *before* resp.State.Set, so a trigger the API had already created was
+//     left unrecorded and the next apply created a second one.
+//
+// The first test covers (1) and the second covers (2). The obvious way to
+// satisfy either — drop the read, or gate state on it — fails the other.
+//
+// The previous version of this file had only (2), written as a request count
+// asserting Create makes NO follow-up read, and justified in a comment
+// claiming the create response already carried created_at. It passed, because
+// the fake's create response echoed its whole stored record, created_at
+// included. Production omits it. That is the loop this file is supposed to
+// break, so the fake's POST now omits created_at too (see createResponse) and
+// a provider that trusts POST for it fails right here.
+func TestTriggerResourceUnit_CreateReadsBackCreatedAt(t *testing.T) {
 	api, host := newFakeTriggerAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
@@ -652,31 +753,137 @@ func TestTriggerResourceUnit_CreateDoesNotNeedASecondReadToPopulateState(t *test
 			{
 				Config: triggerFakeGithubAppConfig(host, "1234", "all-pushes", false),
 				ConfigStateChecks: []statecheck.StateCheck{
-					// The value the fake's create response carries (see buildRecord),
-					// proving created_at came from the create response and not from a
-					// second call.
+					// The timestamp the fake stores (see buildRecord) and serves from
+					// GET only. It is reachable in state after an apply if and only if
+					// Create read the trigger back; the create response has no
+					// created_at at all, so without the read-back this is "".
 					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("created_at"), knownvalue.StringExact("2024-06-01T00:00:00.000Z")),
 				},
 			},
 		},
 	})
 
-	var creates, gets int
+	// The read-back is asserted structurally as well as by its effect: the very
+	// next request after the create must be a GET of the trigger just created.
+	// Total GET counts are not usable here — the plugin-testing framework issues
+	// its own refreshes after the apply, and how many is its business — but
+	// "the request immediately after the POST is a read of the new trigger" is
+	// exactly the invariant, and it fails with an explanation attached if a
+	// future change drops the read-back as an "extra round-trip" again.
+	recorded := api.recorded()
+
+	createIndex := -1
+	for i, req := range recorded {
+		if req.Method == http.MethodPost {
+			if createIndex != -1 {
+				t.Fatalf("saw more than one create request: %+v", recorded)
+			}
+			createIndex = i
+		}
+	}
+	if createIndex == -1 {
+		t.Fatalf("no create request recorded: %+v", recorded)
+	}
+	if createIndex == len(recorded)-1 {
+		t.Fatalf("nothing followed the create; Create must read the trigger back to "+
+			"populate created_at, which the create response does not carry: %+v", recorded)
+	}
+
+	readBack := recorded[createIndex+1]
+	wantPath := "/api/v2/projects/" + fakeTriggerProjectID + "/triggers/22222222-3333-4444-5555-000000000001"
+	if readBack.Method != http.MethodGet || readBack.Path != wantPath {
+		t.Errorf("request after the create was %s %s, want GET %s (Create's read-back "+
+			"for created_at): %+v", readBack.Method, readBack.Path, wantPath, recorded)
+	}
+}
+
+// TestTriggerResourceUnit_CreateSurvivesAFailedReadBack is the issue #6 half:
+// when the read-back fails, the trigger the API just created must still be in
+// state.
+//
+// The failure is armed for exactly one logical GET — Create's read-back, the
+// first GET of the run — so everything the framework does afterwards succeeds
+// and the step can be inspected. See failOneLogicalGet for why that is four
+// attempts rather than one.
+//
+// Three separate things fail here if Create is wrong:
+//
+//   - A Create that returned early on the read-back error writes no state, so
+//     there is no circleci_trigger.test for the state checks to find, and the
+//     second step creates a second trigger — which the create count at the end
+//     catches. That is issue #6 exactly.
+//   - A Create that reported an *error* instead of a warning fails the step
+//     outright at the apply. That is the design decision this test pins:
+//     Terraform taints an object whose apply returned an error, so the next
+//     apply destroys and recreates a trigger that is in fact perfectly good.
+//     Losing created_at heals on the next refresh; destroying a live trigger
+//     does not heal at all.
+//   - A Create that never read back at all passes step 1 (created_at is ""
+//     either way) but is caught by TestTriggerResourceUnit_CreateReadsBackCreatedAt,
+//     and here too: the armed failures go unspent and land on the framework's
+//     own refresh instead, which the leftover check at the end reports.
+//
+// The state checks run against the state the apply left behind, before the
+// framework's own follow-up refresh — which is what makes the "" observable at
+// all.
+func TestTriggerResourceUnit_CreateSurvivesAFailedReadBack(t *testing.T) {
+	api, host := newFakeTriggerAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				PreConfig: func() { api.armGetFailures(failOneLogicalGet) },
+				Config:    triggerFakeGithubAppConfig(host, "1234", "all-pushes", false),
+				ConfigStateChecks: []statecheck.StateCheck{
+					// The resource is managed: this is the id the fake assigns to the
+					// first trigger it creates, so state holds the trigger that was
+					// actually created rather than nothing.
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("id"), knownvalue.StringExact("22222222-3333-4444-5555-000000000001")),
+					// Degraded, not lost: created_at is the one attribute the failed
+					// read-back was for. It repopulates on the next refresh.
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("created_at"), knownvalue.StringExact("")),
+					// Everything else came from the create response, so a failed
+					// read-back costs nothing else.
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_source_repo_full_name"), knownvalue.StringExact(resolveFullName("1234"))),
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_preset"), knownvalue.StringExact("all-pushes")),
+				},
+			},
+			{
+				// The failure was transient. A refresh fills created_at in with no
+				// practitioner action, which is the reason a failed read-back is a
+				// warning: unlike a lost resource, this repairs itself.
+				Config: triggerFakeGithubAppConfig(host, "1234", "all-pushes", false),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("created_at"), knownvalue.StringExact("2024-06-01T00:00:00.000Z")),
+				},
+			},
+		},
+	})
+
+	// Exactly one create across both steps. Two would mean the first step lost
+	// the resource from state and the second re-created it, which is the issue #6
+	// failure mode itself.
+	var creates int
 	for _, req := range api.recorded() {
-		switch req.Method {
-		case http.MethodPost:
+		if req.Method == http.MethodPost {
 			creates++
-		case http.MethodGet:
-			gets++
 		}
 	}
 	if creates != 1 {
-		t.Errorf("saw %d create requests, want exactly 1: %+v", creates, api.recorded())
+		t.Errorf("saw %d create requests across two steps, want exactly 1; more than one "+
+			"means a failed read-back dropped the trigger from state and the next apply "+
+			"created another: %+v", creates, api.recorded())
 	}
-	if gets != 1 {
-		t.Errorf("saw %d GET requests for one create-and-verify step, want exactly 1 (the "+
-			"framework's own post-apply refresh); Create must not make its own follow-up "+
-			"read to populate state: %+v", gets, api.recorded())
+
+	// Every armed failure must have been spent, or the read-back was not what
+	// failed and this test proved nothing. Leftovers mean either that Create made
+	// no read-back at all, or that the client stopped retrying as often as
+	// failOneLogicalGet assumes.
+	if left := api.remainingFailNextGetAttempts(); left != 0 {
+		t.Errorf("%d of the %d armed GET failures were never used, so Create's read-back "+
+			"was not the request that failed: either there is no read-back, or "+
+			"failOneLogicalGet no longer matches the HTTP client's retry count", left, failOneLogicalGet)
 	}
 }
 

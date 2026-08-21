@@ -228,6 +228,10 @@ type TriggerEventSource struct {
 // Disabled is a pointer because the API omits the field rather than sending
 // false for an enabled trigger, so nil and false are both "enabled" and must
 // not be conflated with "unknown".
+//
+// CreatedAt is empty on the value CreateTrigger returns and only on that one:
+// the create route omits created_at while Get, Update and List all send it. See
+// CreateTrigger's doc comment for the measured responses.
 type Trigger struct {
 	ID          string             `json:"id"`
 	Name        string             `json:"name"`
@@ -349,9 +353,34 @@ type CreateTriggerInput struct {
 	Disabled    *bool                   `json:"disabled,omitempty"`
 }
 
-// CreateTrigger creates a trigger on a pipeline definition and returns it as
-// stored. The route is nested under the pipeline definition — see
-// triggersRoute — unlike Get/Update/Delete below.
+// CreateTrigger creates a trigger on a pipeline definition. The route is nested
+// under the pipeline definition — see triggersRoute — unlike Get/Update/Delete
+// below.
+//
+// The response is NOT the same shape GetTrigger returns: it answers HTTP 200
+// (not 201) and its body omits created_at. Probed 2026-08-21 against
+// circleci.com, one webhook trigger and one schedule trigger:
+//
+//	POST .../pipeline-definitions/{d}/triggers -> 200
+//	  {"id","name","event_name","description","checkout_ref","config_ref",
+//	   "event_source","disabled"}            (+ "parameters", when sent)
+//	GET  .../projects/{p}/triggers/{id}      -> the same keys PLUS
+//	  "created_at":"2026-08-21T15:28:58.954521Z"
+//	PATCH .../projects/{p}/triggers/{id}     -> also carries created_at
+//	GET  .../pipeline-definitions/{d}/triggers -> also carries created_at
+//
+// So a caller that needs CreatedAt after a create has to read the trigger back.
+// POST is the only one of the four routes missing the field, which is exactly
+// what made it easy to assume it was there. This doc comment previously said the create
+// response "returns it as stored", and trigger_resource.go's Create dropped its
+// read-back citing that sentence — leaving created_at as "" in state forever.
+// The published OpenAPI document is what says otherwise; the API is what was
+// measured.
+//
+// The read-back is not interchangeable with this response in the other
+// direction either: GET and PATCH both return event_source.webhook.url as the
+// literal "**REDACTED**" (observed above with the creating token), while this
+// response carries the real signed URL.
 //
 // CircleCI Cloud only. See triggersRoute.
 func (c *Client) CreateTrigger(ctx context.Context, projectID, pipelineDefinitionID string, input CreateTriggerInput) (*Trigger, error) {

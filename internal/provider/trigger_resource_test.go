@@ -478,6 +478,27 @@ func TestAccTriggerResourceUpdateRemovesRepoExternalId(t *testing.T) {
 				Config:      testAccTriggerResourceGithubAppConfigNoRepoExternalId(projectID, pipelineID),
 				ExpectError: regexp.MustCompile(`requires[\s]+event_source_repo_external_id`),
 			},
+			{
+				// Back to the valid configuration, purely so the run can clean up
+				// after itself. The step above leaves the *invalid* configuration as
+				// the last one written to disk, and the framework's post-test destroy
+				// plans against whatever configuration is there — so ValidateConfig
+				// rejected it again during teardown and the destroy never ran:
+				//
+				//   Error running post-test destroy, there may be dangling resources:
+				//   Error: Invalid CircleCI trigger configuration
+				//   CircleCI trigger with github_app provider requires
+				//   event_source_repo_external_id (the GitHub repository ID)
+				//
+				// That failed the test and left a real trigger behind in the test
+				// organization on every run. This step is a no-op against state —
+				// step 2 never applied — but it makes the last configuration on disk
+				// valid, which is what teardown needs. TestAccTriggerResourceMissingRepoExternalId
+				// below gets away without one because its single ExpectError step
+				// creates nothing, and the framework skips the destroy entirely when
+				// state is empty.
+				Config: testAccTriggerResourceGithubAppConfig(projectID, pipelineID, repoExternalID),
+			},
 		},
 	})
 }

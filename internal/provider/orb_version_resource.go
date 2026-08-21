@@ -204,10 +204,15 @@ func (r *orbVersionResource) Create(ctx context.Context, req resource.CreateRequ
 	plan.Version = types.StringValue(published.Version)
 	plan.CreatedAt = types.StringValue(published.CreatedAt)
 
-	// Unlike issue #6, this call cannot be dropped: attributes.source is never
-	// present on a publish response in practice (see orbVersionWire's comment
-	// and the orbVersionEntity fixture in orb_test.go, which models exactly what
-	// production sends), so this always runs, not merely as a fallback.
+	// This call cannot be dropped: attributes.source is never present on a
+	// publish response in practice (see orbVersionWire's comment and the
+	// orbVersionEntity fixture in orb_test.go, which models exactly what
+	// production sends), so this always runs, not merely as a fallback. The same
+	// is true of trigger_resource.go's read-back for created_at — an earlier
+	// version of this comment said otherwise, on the strength of a claim about
+	// the trigger create response that turned out to be false; the lesson issue
+	// #6 actually teaches is about where state is written, not about removing
+	// the second call.
 	source := published.Source
 	if source == "" {
 		source, err = r.client.GetOrbSource(ctx, published.ID)
