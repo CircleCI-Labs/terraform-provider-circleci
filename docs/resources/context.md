@@ -77,8 +77,16 @@ Changing this value forces a new resource to be created.
 
 ## Import
 
-Import is supported using `organization_id/context_id`:
+A context id on its own is enough. The organization is read from the API, so there is nothing else to look up and nothing to get wrong:
+
+```shell
+terraform import circleci_context.example "<context_id>"
+```
+
+The `organization_id/context_id` form is still accepted, for configurations and scripts already written against it:
 
 ```shell
 terraform import circleci_context.example "<organization_id>/<context_id>"
 ```
+
+In that form the organization is **checked, not trusted**. If it disagrees with the organization the API reports for that context, the import fails and names both values. Earlier provider versions stored the supplied organization without checking it, which was unsafe: `org_id` forces replacement, so a single mistyped character produced a successful-looking import followed by a plan that destroyed the context along with every environment variable and restriction on it. Prefer the bare context id.

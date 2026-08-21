@@ -310,3 +310,114 @@ func TestGetContextNotFound(t *testing.T) {
 		t.Errorf("GetContext error = %v, want a not found error", err)
 	}
 }
+
+// TestGetContextDecodesOrgID pins the field that makes an import verifiable.
+//
+// The body is the measured shape of GET /api/v2/context/{id} on CircleCI Cloud,
+// including the inline environment_variables and restrictions that this client
+// deliberately does not decode. They are here so that a future change which does
+// decode them starts from the real shape — note that an inline variable object
+// has no context_id, unlike the dedicated list route's.
+//
+// Context.OrgID went missing for a whole release behind a comment asserting that
+// this route "does not report which organization a context belongs to", which is
+// why the import trusted an unvalidated string from the practitioner.
+func TestGetContextDecodesOrgID(t *testing.T) {
+	t.Parallel()
+
+	client, seen := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeListJSON(w, `{
+			"id": "ctx-1",
+			"name": "build",
+			"created_at": "2024-01-02T03:04:05.000Z",
+			"org_id": "`+testContextOrgID+`",
+			"environment_variables": [
+				{
+					"variable": "PROBE_VAR",
+					"truncated_value": "ghij",
+					"created_at": "2024-01-02T03:04:05.000Z",
+					"updated_at": "2024-01-02T03:04:05.000Z"
+				}
+			],
+			"restrictions": [
+				{
+					"context_id": "ctx-1",
+					"id": "rst-1",
+					"name": "All members",
+					"restriction_type": "group",
+					"restriction_value": "`+testContextOrgID+`"
+				}
+			]
+		}`)
+	})
+
+	found, err := client.GetContext(context.Background(), "ctx-1")
+	if err != nil {
+		t.Fatalf("GetContext: %v", err)
+	}
+
+	if found.OrgID != testContextOrgID {
+		t.Errorf("OrgID = %q, want %q", found.OrgID, testContextOrgID)
+	}
+	if found.ID != "ctx-1" {
+		t.Errorf("ID = %q, want %q", found.ID, "ctx-1")
+	}
+	if found.Name != "build" {
+		t.Errorf("Name = %q, want %q", found.Name, "build")
+	}
+	if found.CreatedAt != "2024-01-02T03:04:05.000Z" {
+		t.Errorf("CreatedAt = %q, want %q", found.CreatedAt, "2024-01-02T03:04:05.000Z")
+	}
+
+	if got, want := (*seen)[0].path, "/api/v2/context/ctx-1"; got != want {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+}
+
+// TestCreateAndListContextsReportNoOrgID pins the asymmetry documented on
+// Context.OrgID: only the single-context read reports the owning organization.
+//
+// This is the trap the field introduces. A caller that reads OrgID off a
+// CreateContext or ListContexts result gets "" and, if it stores that, writes an
+// empty organization into Terraform state. The bodies below are the measured
+// create and list shapes; neither has an org_id key.
+//
+// Unlike the other tests added with the org_id fix, this one passes both before
+// and after it — it guards a change nobody has made yet rather than reproducing a
+// shipped bug. The change it guards against is the tempting one: having
+// CreateContext fill OrgID in from the organization argument it was passed, so
+// the field looks uniformly populated. That would be a value this client invented
+// rather than one the API reported, and it would make every future caller's
+// "OrgID is set, so it must be verified" assumption wrong.
+func TestCreateAndListContextsReportNoOrgID(t *testing.T) {
+	t.Parallel()
+
+	created, err := func() (*circleci.Context, error) {
+		client, _ := newListServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeListJSON(w, `{"id":"ctx-1","name":"build","created_at":"2024-01-02T03:04:05.000Z"}`)
+		})
+
+		return client.CreateContext(context.Background(), testContextOrgID, "build")
+	}()
+	if err != nil {
+		t.Fatalf("CreateContext: %v", err)
+	}
+	if created.OrgID != "" {
+		t.Errorf("CreateContext OrgID = %q, want empty: the create route does not report org_id", created.OrgID)
+	}
+
+	client, _ := pageListServer(t,
+		`{"items":[{"id":"ctx-1","name":"build","created_at":"2024-01-02T03:04:05.000Z"}],"next_page_token":null}`,
+	)
+
+	listed, err := client.ListContexts(context.Background(), testContextOrgID)
+	if err != nil {
+		t.Fatalf("ListContexts: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("ListContexts returned %d contexts, want 1", len(listed))
+	}
+	if listed[0].OrgID != "" {
+		t.Errorf("ListContexts OrgID = %q, want empty: the list route does not report org_id", listed[0].OrgID)
+	}
+}

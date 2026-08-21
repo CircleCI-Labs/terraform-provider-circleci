@@ -34,6 +34,13 @@ const ContextOwnerTypeOrganization = "organization"
 // CreatedAt is kept as the string the API sent (an RFC 3339 timestamp) so that
 // it round-trips into Terraform state exactly as received.
 //
+// OrgID is the organization that owns the context, and it is reported by ONE
+// route only: the single-context read, GET /context/{id}. Neither the create
+// response nor the list response carries it, so OrgID is empty on values
+// returned by CreateContext, ListContexts and FindContextByName. Do not treat
+// it as always populated — check it, or read the context back through
+// GetContext. See that method for the measured response shape.
+//
 // The list endpoint can also embed each context's environment variables, behind
 // an include-env-vars query parameter. That is deliberately not requested here:
 // the values come back truncated, and a dedicated data source already reads them.
@@ -41,6 +48,7 @@ type Context struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
+	OrgID     string `json:"org_id"`
 }
 
 // ListContexts returns every context owned by an organization, following
@@ -67,6 +75,29 @@ func (c *Client) ListContexts(ctx context.Context, organizationID string) ([]Con
 }
 
 // GetContext returns one context by id.
+//
+// This route reports MORE than the create and list routes do, and in particular
+// it reports the owning organization. Measured against CircleCI Cloud:
+//
+//	GET /api/v2/context/{id} ->
+//	  { "id", "name", "created_at",
+//	    "org_id": "<the owning organization's UUID>",
+//	    "environment_variables": [ { "variable", "truncated_value",
+//	                                 "created_at", "updated_at" } ],
+//	    "restrictions":          [ { "context_id", "id", "name",
+//	                                 "restriction_type", "restriction_value" } ] }
+//
+// Only org_id is decoded onto Context. The inline environment_variables and
+// restrictions are left on the wire: dedicated data sources already read both
+// through their own routes, and the inline variable objects carry no context_id
+// (unlike the ones the dedicated list route returns), so they are not the same
+// shape and cannot be shared.
+//
+// org_id is what makes an import verifiable rather than a matter of trusting the
+// practitioner's typing — see contextResource.ImportState. A comment here
+// previously claimed this route "does not report which organization a context
+// belongs to"; that was false, and it is why the import was written to trust an
+// unvalidated string.
 //
 // A context that does not exist, belongs to another organization, or is
 // inaccessible to the configured token all answer HTTP 403, not 404: the

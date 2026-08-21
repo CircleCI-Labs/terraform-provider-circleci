@@ -209,6 +209,23 @@ func (a *contextFakeAPI) seedContext(id, orgID, createdAt string) {
 	}
 }
 
+// setContextOrg changes which organization a context reports as its owner,
+// bypassing any route, so a test can simulate state that names the wrong
+// organization — the situation the old unvalidated import produced. Only the
+// single-context read reports org_id, so this is visible through that route
+// alone.
+func (a *contextFakeAPI) setContextOrg(contextID, orgID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	ctx, ok := a.contexts[contextID]
+	if !ok {
+		a.t.Fatalf("setContextOrg: no such context %q", contextID)
+	}
+
+	ctx.orgID = orgID
+}
+
 // seedEnvVar adds an environment variable directly to a seeded context,
 // bypassing the PUT route, for data-source read tests.
 func (a *contextFakeAPI) seedEnvVar(contextID, name, value, createdAt, updatedAt string) {
@@ -409,9 +426,18 @@ func (a *contextFakeAPI) getContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// getOrgContext also reports org_id, environment_variables and restrictions;
-	// included here for wire fidelity even though the clients under test only
-	// read id/name/created_at from this route.
+	// This route reports org_id, and it is the ONLY context route that does —
+	// create and list both omit it. org_id is load-bearing now rather than
+	// present for fidelity alone: contextResource's Read and ImportState both
+	// take the owning organization from here rather than trusting state or the
+	// import id, so a fake that omitted it would make an unverifiable import
+	// look verified.
+	//
+	// environment_variables and restrictions are reported inline too. They stay
+	// empty here because nothing decodes them, but the keys are present because
+	// the real route always sends them. Note that an inline variable object
+	// carries no context_id, unlike the one the dedicated environment-variable
+	// list route returns above — the two shapes differ.
 	a.write(w, http.StatusOK, map[string]any{
 		"id":                    ctx.id,
 		"name":                  ctx.name,

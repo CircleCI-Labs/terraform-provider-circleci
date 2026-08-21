@@ -108,8 +108,93 @@ func TestContextResourceUnit_Import(t *testing.T) {
 	})
 }
 
-func TestContextResourceUnit_ImportInvalidID(t *testing.T) {
+// TestContextResourceUnit_ImportBareContextID proves the import is authoritative
+// from the API rather than from the practitioner's typing.
+//
+// A bare context id carries no organization at all, so the only way the resulting
+// state can name the right one is by reading it from GET /context/{id}. The state
+// is persisted and the following step asserts an EMPTY plan, which is the whole
+// point: org_id forces replacement, so an import that stored the wrong
+// organization would show up here as a destroy-and-create rather than as a
+// no-op.
+//
+// Before the fix this failed at the import step — a bare id was rejected as
+// "Invalid Import ID Format", because the organization could only ever come from
+// the id string.
+func TestContextResourceUnit_ImportBareContextID(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+
+	// The context already exists at CircleCI and Terraform has never seen it,
+	// which is the situation an import actually addresses. Seeding it (rather
+	// than creating it through Terraform and importing over the top) is what
+	// lets the import land in an EMPTY state, so the import is the only thing
+	// that can put an organization there.
+	api.seedContext("ctx-seeded", contextUnitOrgID, "2024-01-02T03:04:05.000Z")
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// Provider only: nothing in state yet.
+				Config: contextFakeProviderConfig(host),
+			},
+			{
+				Config:             contextResourceUnitConfig(host, contextUnitOrgID),
+				ResourceName:       "circleci_context.test",
+				ImportState:        true,
+				ImportStatePersist: true,
+				// Deliberately just the context id: no organization anywhere in
+				// the import id.
+				ImportStateId: "ctx-seeded",
+			},
+			{
+				Config: contextResourceUnitConfig(host, contextUnitOrgID),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectEmptyPlan(),
+					},
+				},
+			},
+		},
+	})
+
+	// The import must have gone to the API to learn the organization; there is
+	// nowhere else it could have come from.
+	var sawRead bool
+	for _, req := range api.recorded() {
+		if req == "GET /api/v2/context/ctx-seeded" {
+			sawRead = true
+		}
+	}
+	if !sawRead {
+		t.Errorf("import did not read the context from the API, got %q", api.recorded())
+	}
+}
+
+// TestContextResourceUnit_ImportWrongOrgIsRejected is the regression test for the
+// silent data loss.
+//
+// The import id here is well-formed and names a real context, but its
+// organization is wrong by one character. The old implementation split the string
+// and wrote that organization into state with no validation of any kind, so the
+// import reported success; because org_id forces replacement, the very next plan
+// then read "1 to add, 1 to destroy" and applying it destroyed a live context
+// along with every environment variable and restriction on it. Nothing in that
+// sequence looked like a failure — the import succeeded and the plan looked like
+// a legitimate replacement.
+//
+// The error must name BOTH organizations, because either could be the mistake:
+// the practitioner may have mistyped the organization, or may be importing a
+// context they did not mean to.
+//
+// Before the fix there was no error at all and this failed with "Error running
+// import: ... expected an error but got none".
+func TestContextResourceUnit_ImportWrongOrgIsRejected(t *testing.T) {
 	_, host := newContextFakeAPI(t)
+
+	// contextUnitOrgID with its final digit changed: the single mistyped
+	// character that used to be enough to destroy a context.
+	const mistypedOrgID = "org-11111111-1111-1111-1111-111111111112"
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -120,8 +205,118 @@ func TestContextResourceUnit_ImportInvalidID(t *testing.T) {
 			{
 				ResourceName:  "circleci_context.test",
 				ImportState:   true,
-				ImportStateId: "not-a-valid-composite-id",
-				ExpectError:   regexp.MustCompile(`Invalid Import ID Format`),
+				ImportStateId: mistypedOrgID + "/ctx-1",
+				// Both the supplied and the real organization must appear.
+				ExpectError: regexp.MustCompile(
+					`(?s)Import ID organization does not match the API.*` +
+						regexp.QuoteMeta(mistypedOrgID) +
+						`.*` + regexp.QuoteMeta(contextUnitOrgID),
+				),
+			},
+		},
+	})
+}
+
+// TestContextResourceUnit_ImportUnresolvableID covers the two remaining shapes of
+// a bad import id: one with nothing where the context id belongs, and one naming
+// a context the API will not resolve.
+//
+// The second case is why "not-a-valid-composite-id" no longer produces a format
+// error: a bare id is now legitimate, so an id with no slash in it is taken as a
+// context id and fails when the API declines to resolve it. That is a better
+// diagnostic than the old format complaint, which fired without ever asking the
+// API whether the id was real.
+func TestContextResourceUnit_ImportUnresolvableID(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		importID  string
+		wantError *regexp.Regexp
+	}{
+		// The empty import id is deliberately not a case here: the test harness
+		// treats an unset ImportStateId as "use the resource's own id", so it
+		// would exercise a successful import and pass for the wrong reason.
+		// This covers the same guard with a composite id whose context half is
+		// empty.
+		"organization with no context id": {
+			importID:  contextUnitOrgID + "/",
+			wantError: regexp.MustCompile(`Invalid Import ID Format`),
+		},
+		"context the API will not resolve": {
+			importID:  "not-a-valid-composite-id",
+			wantError: regexp.MustCompile(`Unable to import CircleCI context not-a-valid-composite-id`),
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, host := newContextFakeAPI(t)
+
+			resource.UnitTest(t, resource.TestCase{
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				Steps: []resource.TestStep{
+					{
+						Config: contextResourceUnitConfig(host, contextUnitOrgID),
+					},
+					{
+						ResourceName:  "circleci_context.test",
+						ImportState:   true,
+						ImportStateId: test.importID,
+						ExpectError:   test.wantError,
+					},
+				},
+			})
+		})
+	}
+}
+
+// TestContextResourceUnit_ReadTakesOrganizationFromAPI proves Read no longer
+// copies state's organization back over itself.
+//
+// Read used to preserve whatever state held, on the stated grounds that the read
+// route "does not report which organization a context belongs to" — a comment
+// that was simply false. The consequence was that a wrong organization in state,
+// however it got there, was invisible forever: no refresh could correct it, and
+// it kept forcing a replacement on every plan.
+//
+// Here the API's answer changes under Terraform. A plan must notice. Before the
+// fix the plan was empty, because Read never looked.
+func TestContextResourceUnit_ReadTakesOrganizationFromAPI(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+
+	const otherOrgID = "org-22222222-2222-2222-2222-222222222222"
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextResourceUnitConfig(host, contextUnitOrgID),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_context.test", tfjsonpath.New("org_id"), knownvalue.StringExact(contextUnitOrgID),
+					),
+				},
+			},
+			{
+				PreConfig: func() {
+					// The context is now reported as owned by a different
+					// organization than the one in state and in config.
+					api.setContextOrg("ctx-1", otherOrgID)
+				},
+				Config: contextResourceUnitConfig(host, contextUnitOrgID),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						// Not an empty plan: the configured organization no
+						// longer matches reality, and there is no route that
+						// moves a context, so replacement is the only way to
+						// satisfy the configuration.
+						plancheck.ExpectResourceAction(
+							"circleci_context.test", plancheck.ResourceActionDestroyBeforeCreate,
+						),
+					},
+				},
 			},
 		},
 	})
