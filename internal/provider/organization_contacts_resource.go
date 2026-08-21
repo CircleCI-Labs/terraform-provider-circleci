@@ -186,8 +186,28 @@ func (r *organizationContactsResource) Read(ctx context.Context, req resource.Re
 
 	contacts, err := r.client.GetOrganizationContacts(ctx, orgID)
 	if err != nil {
-		// The organization itself is gone, so there is nothing left to manage.
+		// A 404 here names its own ambiguity: reproduced against the live API on
+		// 2026-08-21, GET .../contacts for an organization the caller cannot see
+		// answers 404 with {"message": "Organization not found, or user does not
+		// have access."} — the identical wording IsUnauthorized's doc comment
+		// describes for v3 in general (internal/circleci/error.go): a permission
+		// problem surfaces as a 404, not a 403. There is nothing left for this
+		// resource to manage either way, so it still comes out of state — but
+		// dropping it with no diagnostic at all would leave a practitioner
+		// staring at a vanished resource with no explanation, so this warns
+		// exactly like circleci_organization's own Read does for the identical
+		// ambiguity.
 		if circleci.IsNotFound(err) {
+			resp.Diagnostics.AddWarning(
+				"CircleCI organization contacts not found during Read",
+				fmt.Sprintf(
+					"Organization %s could not be retrieved from CircleCI, so its contact lists could "+
+						"not either. This means either the organization was deleted, or the configured "+
+						"token can no longer view it — the API answers the same way for both. Removing "+
+						"%s from state.",
+					orgID, organizationContactsTypeName,
+				),
+			)
 			resp.State.RemoveResource(ctx)
 
 			return

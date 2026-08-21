@@ -318,8 +318,29 @@ func (r *organizationSettingsResource) Read(ctx context.Context, req resource.Re
 
 	settings, err := r.client.GetOrganizationSettings(ctx, orgID)
 	if err != nil {
-		// The organization itself is gone, so there is nothing left to manage.
+		// A 404 here names its own ambiguity: reproduced against the live API on
+		// 2026-08-21, GET .../settings for an organization id that does not exist
+		// answers 404 with {"error": {"type": "404", "title": "Org not found."}}
+		// — the same "Org not found." wording GetOrganization documents as
+		// anti-enumeration (internal/circleci/organization.go), and the same
+		// general pattern IsUnauthorized's doc comment names for v3: a permission
+		// problem surfaces as a 404, not a 403. There is nothing left for this
+		// resource to manage either way, so it still comes out of state — but
+		// dropping it with no diagnostic at all would leave a practitioner
+		// staring at a vanished resource with no explanation, so this warns
+		// exactly like circleci_organization's own Read does for the identical
+		// ambiguity.
 		if circleci.IsNotFound(err) {
+			resp.Diagnostics.AddWarning(
+				"CircleCI organization settings not found during Read",
+				fmt.Sprintf(
+					"Organization %s could not be retrieved from CircleCI, so its settings could not "+
+						"either. This means either the organization was deleted, or the configured token "+
+						"can no longer view it — the API answers the same way for both. Removing "+
+						"%s from state.",
+					orgID, organizationSettingsTypeName,
+				),
+			)
 			resp.State.RemoveResource(ctx)
 
 			return
