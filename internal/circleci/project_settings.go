@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -46,6 +47,40 @@ type ProjectSettings struct {
 	DisableSSH *bool `json:"disable_ssh,omitempty"`
 	// ForksReceiveSecretEnvVars runs forked pull requests with this project's
 	// environment variables and secrets, and shares the build cache with forks.
+	//
+	// WRITABLE IN ONE DIRECTION ONLY ON A STANDALONE ORGANIZATION. Setting it to
+	// false is accepted everywhere. Setting it to TRUE is refused on a project
+	// whose slug's VCS segment is "circleci" — measured over the network against
+	// the live API on three separate standalone organizations (one backed by the
+	// GitHub App, one by GitLab, and one repo-less organization created for the
+	// probe and owned by the calling token):
+	//
+	//	PATCH /api/v2/project/circleci/<org>/<project>/settings
+	//	      {"advanced":{"forks_receive_secret_env_vars":true}}
+	//	→ 403  {"message":"Permission denied."}
+	//
+	// The same request against a classic organization ("gh/<org>/<repo>", also
+	// spelled "github/...") answers 200 — measured on two separate GitHub OAuth
+	// organizations. It is not a role problem: the probe organization was created
+	// by the token making the request, and the refusal is identical there.
+	//
+	// Two details make this worse than a plain rejection, and are why
+	// UpdateProjectSettings refuses to send it rather than letting the route
+	// answer:
+	//
+	//   - It is refused even when the value is already true. A no-op write of the
+	//     project's own current value still answers 403, so this is a rejection of
+	//     the field's true value and not a state transition check.
+	//   - The 403 is NOT atomic. Every other field in the same body is applied
+	//     first and keeps its new value — measured: a body carrying
+	//     {"forks_receive_secret_env_vars":true,"autocancel_builds":true} answered
+	//     403 and left autocancel_builds true. That is the opposite of OSS below,
+	//     where the 400 is a schema rejection and nothing at all is written.
+	//
+	// A project's default value is true (see the default snapshot in
+	// internal/provider/project_fake_test.go), so on a standalone organization the
+	// setting is effectively a one-way switch: it can be turned off and never
+	// turned back on through this route.
 	ForksReceiveSecretEnvVars *bool `json:"forks_receive_secret_env_vars,omitempty"`
 	// OSS reports whether the project is treated as free and open source, which
 	// grants additional credits and makes builds publicly visible.
@@ -217,6 +252,10 @@ func (c *Client) UpdateProjectSettings(ctx context.Context, vcsType, orgName, pr
 
 	var envelope projectSettingsEnvelope
 
+	if err := checkForkSecretsEnableSupported(vcsType, settings); err != nil {
+		return nil, err
+	}
+
 	err := c.PatchV2(
 		ctx,
 		projectSettingsRoute,
@@ -225,7 +264,7 @@ func (c *Client) UpdateProjectSettings(ctx context.Context, vcsType, orgName, pr
 		RouteParams(vcsType, orgName, projectName),
 	)
 	if err != nil {
-		return nil, err
+		return nil, annotateForkSecretsDenial(settings, err)
 	}
 
 	updated := envelope.Advanced
@@ -275,5 +314,89 @@ func checkBranchOverridesCleared(sent, got ProjectSettings) error {
 		ErrCannotClearBranchOverrides,
 		len(*got.PROnlyBranchOverrides),
 		strings.Join(*got.PROnlyBranchOverrides, ", "),
+	)
+}
+
+// StandaloneSlugVCSType is the VCS segment of a project or organization slug
+// belonging to a CircleCI-native ("standalone") organization: "circleci", as in
+// "circleci/<org-identifier>/<project-identifier>".
+//
+// The segment is case-sensitive on this route — measured over the network:
+// "circleci/..." answers 200 and "CircleCI/..." answers
+// 404 "Project not found." — so comparisons against it are exact rather than
+// case-insensitive.
+const StandaloneSlugVCSType = OrganizationVCSTypeStandalone
+
+// ErrCannotEnableForkSecrets reports that a write asked to enable
+// forks_receive_secret_env_vars on a standalone organization's project, which
+// the settings route refuses.
+//
+// It exists as a sentinel so a caller can recognise this one case without
+// matching on message text, the same way ErrCannotClearBranchOverrides does. See
+// ProjectSettings.ForksReceiveSecretEnvVars for the measurements behind it.
+var ErrCannotEnableForkSecrets = errors.New(
+	"CircleCI's project settings API refuses to enable forks_receive_secret_env_vars on a " +
+		"standalone (circleci/...) organization's project: the request answers 403 " +
+		"\"Permission denied.\" even when the setting is already true, and applies every other " +
+		"field in the same request before failing",
+)
+
+// checkForkSecretsEnableSupported refuses, before any request is made, a write
+// that would ask a standalone organization's project to enable
+// forks_receive_secret_env_vars.
+//
+// Pre-flight rather than after the fact, which is the opposite of
+// checkBranchOverridesCleared. The reason is that this particular 403 is not
+// atomic: the route applies every other field in the body and only then refuses,
+// so letting the request go out would change settings on a project while
+// reporting failure — and a Terraform Create that fails does not write state, so
+// those changes would be left behind untracked. There is no way to recover them
+// afterwards, and no way to retry that succeeds. The only safe place to stop is
+// before the request.
+//
+// The cost of being pre-flight is that this guard would have to be removed if
+// CircleCI ever allows the write. That is deliberate: an error naming the
+// setting and the organization class is far better than a silent partial write,
+// and the sentinel above makes the guard easy to find.
+func checkForkSecretsEnableSupported(vcsType string, settings ProjectSettings) error {
+	if settings.ForksReceiveSecretEnvVars == nil || !*settings.ForksReceiveSecretEnvVars {
+		return nil
+	}
+
+	if vcsType != StandaloneSlugVCSType {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w. Set forks_receive_secret_env_vars to false, or remove it from the configuration to "+
+			"leave whatever the project already has in place",
+		ErrCannotEnableForkSecrets,
+	)
+}
+
+// annotateForkSecretsDenial adds the one explanation an HTTP 403 from the
+// settings route almost always needs.
+//
+// The pre-flight guard above catches the standalone case, which is the one this
+// client can predict. A classic organization can still answer 403 — a token that
+// is not an organization administrator on a project with
+// write_settings_requires_admin enabled, for instance — and when the body
+// carried forks_receive_secret_env_vars: true the bare "Permission denied."
+// gives a practitioner nothing to act on. It also warns that the other settings
+// in the request may already have been written, because on this route they are.
+func annotateForkSecretsDenial(sent ProjectSettings, err error) error {
+	if !HasStatus(err, http.StatusForbidden) {
+		return err
+	}
+
+	if sent.ForksReceiveSecretEnvVars == nil || !*sent.ForksReceiveSecretEnvVars {
+		return err
+	}
+
+	return fmt.Errorf(
+		"%w (the request set forks_receive_secret_env_vars to true, which this route commonly "+
+			"refuses; note that it applies the other settings in the same request before failing, "+
+			"so they may already have been written)",
+		err,
 	)
 }

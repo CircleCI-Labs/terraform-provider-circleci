@@ -5,7 +5,9 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -123,7 +125,10 @@ func (f *fakeProjectSettingsAPI) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	case http.MethodGet:
 		f.write(w, http.StatusOK, map[string]any{"advanced": f.current})
 	case http.MethodPatch:
-		f.patch(w, r)
+		// parts[3] is the slug's VCS segment, which is what decides whether
+		// enabling forks_receive_secret_env_vars is refused. See
+		// standaloneForkSecretsDenied in project_fake_test.go.
+		f.patch(w, r, parts[3])
 	default:
 		f.write(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method Not Allowed"})
 	}
@@ -134,9 +139,11 @@ func (f *fakeProjectSettingsAPI) ServeHTTP(w http.ResponseWriter, r *http.Reques
 //
 // Validation and merge semantics both live in project_fake_test.go, shared with
 // the other settings fake so the two cannot drift on what "the API" means: see
-// settingsPatchBody for which bodies are rejected and applySettingsPatch for the
-// two things the real route does to pr_only_branch_overrides.
-func (f *fakeProjectSettingsAPI) patch(w http.ResponseWriter, r *http.Request) {
+// settingsPatchBody for which bodies are rejected outright, and
+// applySettingsPatchForSlug for the two things the real route does to
+// pr_only_branch_overrides and for the one field it writes around and then
+// refuses with 403.
+func (f *fakeProjectSettingsAPI) patch(w http.ResponseWriter, r *http.Request, vcsType string) {
 	var raw map[string]any
 
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -156,7 +163,13 @@ func (f *fakeProjectSettingsAPI) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applySettingsPatch(f.current, advanced)
+	if applySettingsPatchForSlug(vcsType, f.current, advanced) {
+		// Every other setting in the body is already written. See
+		// applySettingsPatchForSlug in project_fake_test.go.
+		f.write(w, http.StatusForbidden, map[string]string{"message": "Permission denied."})
+
+		return
+	}
 
 	f.write(w, http.StatusOK, map[string]any{"advanced": f.current})
 }
@@ -787,10 +800,11 @@ func TestProjectSettingsResourceSchema(t *testing.T) {
 // projectSettingsTestProvider registers circleci_project_settings for the tests
 // below.
 //
-// The resource is not registered in provider.go yet, and this wrapper keeps the
-// end-to-end tests working either way: once it is registered, the factory list
-// already contains it and nothing is appended, so the resource is never declared
-// twice.
+// The resource IS registered in provider.go — Resources there lists
+// NewProjectSettingsResource — so this wrapper appends nothing today. It stays
+// because it costs one type and makes these tests independent of that
+// registration: the loop finds the existing factory and returns the list
+// unchanged, so the resource can never be declared twice.
 type projectSettingsTestProvider struct {
 	fwprovider.Provider
 }
@@ -1049,4 +1063,386 @@ func TestProjectSettingsResourceUnit_ImportRoundTrips(t *testing.T) {
 			},
 		},
 	})
+}
+
+// testProjectSettingsSlugFor builds a resource config for an arbitrary slug, so
+// the standalone-organization tests below can use a "circleci/…" slug while every
+// other test here keeps using testProjectSettingsSlug.
+func testProjectSettingsResourceConfigForSlug(host, slug, settings string) string {
+	return fmt.Sprintf(`
+provider "circleci" {
+  host = %[1]q
+  key  = "fake"
+}
+
+resource "circleci_project_settings" "test" {
+  slug = %[2]q
+%[3]s
+}
+`, host, slug, settings)
+}
+
+// testStandaloneProjectSettingsSlug is a project in a standalone
+// (CircleCI-native) organization. Both segments are the 22-character identifiers
+// the real API uses for such a project — the settings route rejects organization
+// and project *names* there ("Invalid project slug", measured), so a realistic
+// slug matters for anything that parses one.
+const testStandaloneProjectSettingsSlug = "circleci/T4ByWwp8uucrumRKY8wEmp/B1bv3rjTroryDXCWBp32Y6"
+
+// TestProjectSettingsResourceRejectsEnablingForkSecretsOnStandalone is the
+// plan-time half of the guard on the route's second unwritable field.
+//
+// Measured over the network, not through a fake: on a project whose slug's VCS
+// segment is "circleci",
+//
+//	PATCH /api/v2/project/circleci/<org>/<project>/settings
+//	      {"advanced":{"forks_receive_secret_env_vars":true}}
+//	→ 403  {"message":"Permission denied."}
+//
+// on all three standalone organizations probed — GitHub App backed, GitLab
+// backed, and a repo-less organization created by the token making the request —
+// and it is refused even when the setting is already true. The identical body
+// against a classic organization answers 200.
+//
+// The step must fail during PLAN, before any request. The route applies every
+// other field in the body before answering 403, so an apply that reaches the wire
+// changes the project and then reports failure, and a failed Create writes no
+// state — the changes are left behind untracked.
+func TestProjectSettingsResourceRejectsEnablingForkSecretsOnStandalone(t *testing.T) {
+	api, host := startFakeProjectSettingsAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProjectSettingsResourceConfigForSlug(host, testStandaloneProjectSettingsSlug,
+					`  forks_receive_secret_env_vars = true`),
+				// PlanOnly is the assertion, not a shortcut: with the config
+				// validator removed, circleci.UpdateProjectSettings still refuses the
+				// write, so an apply-shaped step would still error and pass. Only a
+				// plan-only step distinguishes "rejected before Terraform commits to
+				// anything" from "rejected halfway through an apply".
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?s)forks_receive_secret_env_vars.*standalone organization`),
+			},
+		},
+	})
+
+	if requests := api.recordedRequests(); len(requests) != 0 {
+		t.Errorf("the provider made %d requests: %v. The configuration must be rejected at plan time, "+
+			"because this route writes the other settings in the same body before answering 403",
+			len(requests), requests)
+	}
+}
+
+// TestProjectSettingsResourceAllowsDisablingForkSecretsOnStandalone is the other
+// half: false is the value that MATTERS on a standalone organization, because the
+// project default is true and turning the setting off is the security-relevant
+// direction. A guard keyed on the field rather than on the value would make it
+// unmanageable exactly where it is needed.
+func TestProjectSettingsResourceAllowsDisablingForkSecretsOnStandalone(t *testing.T) {
+	api, host := startFakeProjectSettingsAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProjectSettingsResourceConfigForSlug(host, testStandaloneProjectSettingsSlug,
+					`  forks_receive_secret_env_vars = false`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_project_settings.test",
+						tfjsonpath.New("forks_receive_secret_env_vars"),
+						knownvalue.Bool(false),
+					),
+				},
+			},
+		},
+	})
+
+	body := api.onlyPatch(t)
+	assertPatchKeys(t, body, "forks_receive_secret_env_vars")
+
+	if got := body["forks_receive_secret_env_vars"]; got != false {
+		t.Errorf("forks_receive_secret_env_vars sent as %v, want false", got)
+	}
+}
+
+// TestProjectSettingsResourceAllowsEnablingForkSecretsOnClassicOrganization keeps
+// the plan-time guard from spreading to the organizations where the write works:
+// measured over the network, "gh/…" and "github/…" both answer 200 for the body
+// that "circleci/…" refuses.
+func TestProjectSettingsResourceAllowsEnablingForkSecretsOnClassicOrganization(t *testing.T) {
+	api, host := startFakeProjectSettingsAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: projectSettingsProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProjectSettingsResourceConfigForSlug(host, testProjectSettingsSlug,
+					`  forks_receive_secret_env_vars = true`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_project_settings.test",
+						tfjsonpath.New("forks_receive_secret_env_vars"),
+						knownvalue.Bool(true),
+					),
+				},
+			},
+		},
+	})
+
+	body := api.onlyPatch(t)
+	assertPatchKeys(t, body, "forks_receive_secret_env_vars")
+
+	if got := body["forks_receive_secret_env_vars"]; got != true {
+		t.Errorf("forks_receive_secret_env_vars sent as %v, want true", got)
+	}
+}
+
+// TestIsStandaloneProjectSlug pins the one string comparison the plan-time guard
+// turns on, including the case sensitivity the route itself has: measured,
+// "circleci/…" answers 200 and "CircleCI/…" answers 404 "Project not found.", so
+// a mis-cased slug is a not-found project rather than a standalone one.
+func TestIsStandaloneProjectSlug(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		slug string
+		want bool
+	}{
+		{testStandaloneProjectSettingsSlug, true},
+		{"circleci/org/project", true},
+		{"github/acme/repo", false},
+		{"gh/acme/repo", false},
+		{"bitbucket/acme/repo", false},
+		// Case-sensitive on this route, so not standalone as far as the guard goes.
+		{"CircleCI/org/project", false},
+		// A repository that merely starts with the word.
+		{"github/acme/circleci", false},
+		{"", false},
+		{"circleci", false},
+	}
+
+	for _, c := range cases {
+		if got := isStandaloneProjectSlug(c.slug); got != c.want {
+			t.Errorf("isStandaloneProjectSlug(%q) = %v, want %v", c.slug, got, c.want)
+		}
+	}
+}
+
+// TestAccProjectSettingsResourceLive drives circleci_project_settings against a
+// real installation, on a project this test creates and destroys.
+//
+// Every other end-to-end test of this resource runs against the fake in this
+// file, which means nothing here had ever confirmed the resource can write what
+// its schema claims. This does, for every setting the API accepts, including the
+// two the fake-backed tests avoid:
+//
+//   - write_settings_requires_admin, which is writable on all four organization
+//     classes (measured) but is dangerous to flip on a shared fixture: a run that
+//     died between setting it and putting it back could leave the project needing
+//     organization-administrator rights that the restore itself would then be
+//     refused. On a project this test owns and deletes, there is nothing to strand.
+//   - forks_receive_secret_env_vars set to FALSE, which is a one-way change on a
+//     standalone organization — measured, enabling it again answers 403. Again
+//     safe only because the project is discarded.
+//
+// A self-created project also means a known starting state — the defaults
+// TestAccProjectSettingsDefaults pins — so "the API accepted this and changed
+// nothing" is distinguishable from "it was already that value". A setting the
+// route accepted with 200 and silently ignored would fail the state check on the
+// step that wrote it, and again on the plan-only step that follows.
+//
+// It runs on a standalone organization because that is the only class where a
+// project can be created at all: the same create against a classic (gh/<org>)
+// organization answers 404 "GitHub response: Not Found", since there it only
+// adopts an existing repository. The four-class coverage comes from
+// TestAccProjectSettingsDataSource, which drives this same resource against the
+// per-integration fixture projects.
+func TestAccProjectSettingsResourceLive(t *testing.T) {
+	testAccPreCheck(t)
+
+	client := testAccProjectSettingsClient(t)
+	ctx := context.Background()
+
+	org, err := client.CreateOrganization(ctx, circleci.OrganizationInput{
+		Name:    "tf-acc-settings-" + strings.ToLower(rand.Text()[:10]),
+		VCSType: circleci.OrganizationVCSTypeStandalone,
+	})
+	if err != nil {
+		t.Fatalf("could not create a standalone organization to own the test project: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := client.DeleteOrganization(ctx, org.ID); err != nil {
+			t.Errorf("could not delete the organization %s (%s) this test created: %v", org.Name, org.ID, err)
+		}
+	})
+
+	project, err := client.CreateProject(ctx, org.ID, "tf-acc-settings")
+	if err != nil {
+		t.Fatalf("could not create a project in %s: %v", org.Slug, err)
+	}
+
+	// Everything the resource claims it can write, all at once and all away from
+	// the default. build_fork_prs and forks_receive_secret_env_vars are named
+	// together because explicitForkSecretsValidator requires it, and false is the
+	// only value forks_receive_secret_env_vars can take here.
+	const managed = `
+  auto_cancel_builds            = true
+  build_fork_prs                = true
+  build_prs_only                = true
+  disable_ssh                   = true
+  forks_receive_secret_env_vars = false
+  set_github_status             = false
+  setup_workflows               = false
+  write_settings_requires_admin = true
+  pr_only_branch_overrides      = ["main", "release", "tf-acc-live"]`
+
+	config := testAccProjectSettingsLiveConfig(project.Slug, managed)
+	const target = "circleci_project_settings.live"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("auto_cancel_builds"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("build_fork_prs"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("build_prs_only"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("disable_ssh"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("forks_receive_secret_env_vars"), knownvalue.Bool(false)),
+					// Both of these start out TRUE on a fresh project, so a route that
+					// ignored the write would leave them true and fail here. That is the
+					// same pair the data source acceptance test used to assert backwards.
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("set_github_status"), knownvalue.Bool(false)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("setup_workflows"), knownvalue.Bool(false)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("write_settings_requires_admin"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("pr_only_branch_overrides"),
+						knownvalue.SetExact([]knownvalue.Check{
+							knownvalue.StringExact("main"),
+							knownvalue.StringExact("release"),
+							knownvalue.StringExact("tf-acc-live"),
+						})),
+					// Read-only, and the API reports it whatever the configuration says.
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("oss"), knownvalue.NotNull()),
+				},
+			},
+			{
+				// Refreshed and replanned. A setting accepted with 200 and then
+				// ignored shows up here as a plan that never empties: the refresh
+				// reports the old value and the configuration asks for the new one.
+				// Three of these are order-sensitive lists on the wire, which is the
+				// other thing this step catches.
+				Config:             config,
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+			{
+				// Written back to the defaults, which proves the writes go both ways
+				// rather than only away from the default. write_settings_requires_admin
+				// going back to false is the one that would fail if the token had been
+				// locked out by the step above.
+				Config: testAccProjectSettingsLiveConfig(project.Slug, `
+  auto_cancel_builds            = false
+  build_fork_prs                = false
+  forks_receive_secret_env_vars = false
+  build_prs_only                = false
+  disable_ssh                   = false
+  set_github_status             = true
+  setup_workflows               = true
+  write_settings_requires_admin = false
+  pr_only_branch_overrides      = ["main"]`),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("set_github_status"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("setup_workflows"), knownvalue.Bool(true)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("write_settings_requires_admin"), knownvalue.Bool(false)),
+					statecheck.ExpectKnownValue(target, tfjsonpath.New("pr_only_branch_overrides"),
+						knownvalue.SetExact([]knownvalue.Check{knownvalue.StringExact("main")})),
+				},
+			},
+		},
+	})
+}
+
+// TestAccProjectSettingsResourceCannotEnableForkSecretsLive is the live proof of
+// the one thing the plan-time guard asserts about the API.
+//
+// It creates a standalone organization's project — where the default is already
+// true — and asks for true. If CircleCI ever starts accepting that write, this is
+// the test that says so, and the guard in
+// noEnablingForkSecretsOnStandaloneValidator should then be removed. Until then
+// the configuration must be rejected during PLAN, because the route applies the
+// rest of the body before answering 403.
+func TestAccProjectSettingsResourceCannotEnableForkSecretsLive(t *testing.T) {
+	testAccPreCheck(t)
+
+	client := testAccProjectSettingsClient(t)
+	ctx := context.Background()
+
+	org, err := client.CreateOrganization(ctx, circleci.OrganizationInput{
+		Name:    "tf-acc-forksec-" + strings.ToLower(rand.Text()[:10]),
+		VCSType: circleci.OrganizationVCSTypeStandalone,
+	})
+	if err != nil {
+		t.Fatalf("could not create a standalone organization: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := client.DeleteOrganization(ctx, org.ID); err != nil {
+			t.Errorf("could not delete the organization %s (%s) this test created: %v", org.Name, org.ID, err)
+		}
+	})
+
+	project, err := client.CreateProject(ctx, org.ID, "tf-acc-forksec")
+	if err != nil {
+		t.Fatalf("could not create a project in %s: %v", org.Slug, err)
+	}
+
+	// The API's side of the same claim, made directly so that a failure here
+	// distinguishes "the provider guard is wrong" from "the API changed".
+	enabled := true
+
+	vcsType, orgSegment, projectSegment, ok := splitProjectSlugForTest(project.Slug)
+	if !ok {
+		t.Fatalf("the created project's slug %q is not vcs-type/org/project", project.Slug)
+	}
+
+	if _, err := client.UpdateProjectSettings(ctx, vcsType, orgSegment, projectSegment,
+		circleci.ProjectSettings{ForksReceiveSecretEnvVars: &enabled}); err == nil {
+		t.Error("enabling forks_receive_secret_env_vars on a standalone organization's project " +
+			"succeeded. The API used to answer 403 \"Permission denied.\" for this, even when the " +
+			"setting was already true; if that has changed, remove the pre-flight guard in " +
+			"circleci.UpdateProjectSettings and noEnablingForkSecretsOnStandaloneValidator.")
+	} else if !errors.Is(err, circleci.ErrCannotEnableForkSecrets) {
+		t.Errorf("error = %v, want ErrCannotEnableForkSecrets from the pre-flight guard", err)
+	}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccProjectSettingsLiveConfig(project.Slug,
+					`  forks_receive_secret_env_vars = true`),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?s)forks_receive_secret_env_vars.*standalone organization`),
+			},
+		},
+	})
+}
+
+// testAccProjectSettingsLiveConfig builds a configuration against a real
+// installation: no host and no key, so the provider resolves both the way it does
+// in production.
+func testAccProjectSettingsLiveConfig(slug, settings string) string {
+	return fmt.Sprintf(`
+resource "circleci_project_settings" "live" {
+  slug = %[1]q
+%[2]s
+}
+`, slug, settings)
 }

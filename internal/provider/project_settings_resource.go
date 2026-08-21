@@ -240,7 +240,15 @@ func (r *projectSettingsResource) Schema(_ context.Context, _ resource.SchemaReq
 				"Disable SSH re-runs for this project, so jobs cannot be re-run with SSH debugging access.",
 			),
 			"forks_receive_secret_env_vars": toggle(
-				"Run forked pull requests with this project's configuration, environment variables and secrets. The build cache is also shared between the original repository and all forks, so enabling this exposes both to anyone who can open a pull request.",
+				"Run forked pull requests with this project's configuration, environment variables and secrets. " +
+					"The build cache is also shared between the original repository and all forks, so enabling this " +
+					"exposes both to anyone who can open a pull request." +
+					"\n\n~> **Cannot be enabled on a standalone organization.** For a project whose slug begins " +
+					"`circleci/`, setting this to `true` is rejected at plan time, because CircleCI's API answers " +
+					"`403 Permission denied.` for that write — even when the setting is already `true` — and " +
+					"applies every other setting in the same request before refusing. A project's default is " +
+					"`true`, so on those organizations the setting is effectively one-way: `false` is accepted and " +
+					"cannot be undone through the API. Classic organizations (`gh/…`, `bb/…`) accept both values.",
 			),
 			"oss": schema.BoolAttribute{
 				MarkdownDescription: "Whether the project is treated as free and open source, which grants additional " +
@@ -301,6 +309,7 @@ func (r *projectSettingsResource) ConfigValidators(_ context.Context) []resource
 	return []resource.ConfigValidator{
 		explicitForkSecretsValidator{},
 		noClearingBranchOverridesValidator{},
+		noEnablingForkSecretsOnStandaloneValidator{},
 	}
 }
 
@@ -720,4 +729,91 @@ func warnAbandonedProjectSettings(state, plan projectSettingsResourceModel, slug
 			slug, strings.Join(abandoned, ", "),
 		),
 	)
+}
+
+// noEnablingForkSecretsOnStandaloneValidator rejects
+// forks_receive_secret_env_vars = true on a standalone organization's project at
+// plan time.
+//
+// The settings route refuses that write with 403 "Permission denied." on every
+// project whose slug's VCS segment is "circleci" — measured over the network on
+// three standalone organizations, including one created by the token making the
+// request, and refused even when the setting is already true. See
+// ProjectSettings.ForksReceiveSecretEnvVars in
+// internal/circleci/project_settings.go for the full measurement.
+//
+// circleci.UpdateProjectSettings already refuses to send it, which is what
+// prevents the route's non-atomic 403 from writing the other settings in the same
+// request and then failing. This validator exists on top of that for the reason
+// noClearingBranchOverridesValidator does: the client guard fires during apply,
+// where the practitioner has already committed to a change, while this one fires
+// at plan and names the attribute.
+//
+// It is deliberately keyed on the configured slug rather than on anything looked
+// up remotely, because a validator makes no API calls. An unknown slug — one
+// interpolated from another resource — cannot be judged here and falls through to
+// the client guard.
+type noEnablingForkSecretsOnStandaloneValidator struct{}
+
+func (noEnablingForkSecretsOnStandaloneValidator) Description(_ context.Context) string {
+	return "forks_receive_secret_env_vars cannot be enabled on a standalone (circleci/...) " +
+		"organization's project; CircleCI's API refuses the write with HTTP 403"
+}
+
+func (v noEnablingForkSecretsOnStandaloneValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (noEnablingForkSecretsOnStandaloneValidator) ValidateResource(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var (
+		slug        types.String
+		forkSecrets types.Bool
+	)
+
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("slug"), &slug)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("forks_receive_secret_env_vars"), &forkSecrets)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if forkSecrets.IsNull() || forkSecrets.IsUnknown() || !forkSecrets.ValueBool() {
+		return
+	}
+
+	if slug.IsNull() || slug.IsUnknown() || !isStandaloneProjectSlug(slug.ValueString()) {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		path.Root("forks_receive_secret_env_vars"),
+		"Cannot enable forks_receive_secret_env_vars on a standalone organization",
+		"CircleCI's project settings API refuses to enable forks_receive_secret_env_vars for a "+
+			"project in a standalone organization — one whose slug begins \"circleci/\". The request "+
+			"answers 403 \"Permission denied.\" even when the setting is already true, so there is no "+
+			"value of this attribute other than false that the API will accept for "+
+			slug.ValueString()+".\n\n"+
+			"Worse, that 403 is not atomic: the route writes every other setting in the same request "+
+			"before refusing. Terraform would report a failed apply for changes CircleCI had already "+
+			"made, and would not record them in state.\n\n"+
+			"Set forks_receive_secret_env_vars = false, or remove it from the configuration to leave "+
+			"whatever the project already has in place. A project's default is true, so removing it "+
+			"keeps fork builds able to see this project's secrets — which is why "+
+			"explicitForkSecretsValidator insists the attribute be named whenever build_fork_prs is "+
+			"enabled.",
+	)
+}
+
+// isStandaloneProjectSlug reports whether slug names a project in a standalone
+// (CircleCI-native) organization.
+//
+// The comparison is exact, not case-insensitive: the settings route treats the
+// VCS segment case-sensitively, answering 200 for "circleci/..." and
+// 404 "Project not found." for "CircleCI/..." — measured over the network. A
+// mis-cased slug therefore fails as a not-found project, which is a separate and
+// already-clear error, so widening this check would only mislabel it.
+func isStandaloneProjectSlug(slug string) bool {
+	vcsType, _, ok := strings.Cut(slug, "/")
+
+	return ok && vcsType == circleci.StandaloneSlugVCSType
 }

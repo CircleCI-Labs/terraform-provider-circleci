@@ -102,6 +102,25 @@ project CircleCI computes it as enabled unless it has been set explicitly. So
 reading it back and finding `true` does not imply anyone chose that. Assert on the
 pair, as the example does.
 
+## What a project reports before anything has been set
+
+Reading these values and finding `false` everywhere is a reasonable guess and a
+wrong one. A project created moments earlier answers:
+
+```json
+{"advanced":{"autocancel_builds":false,"build_fork_prs":false,"build_prs_only":false,
+             "disable_ssh":false,"forks_receive_secret_env_vars":true,
+             "pr_only_branch_overrides":["main"],"set_github_status":true,
+             "setup_workflows":true,"write_settings_requires_admin":false,
+             "oss":false}}
+```
+
+`set_github_status`, `setup_workflows` and `forks_receive_secret_env_vars` are
+**true**, and `pr_only_branch_overrides` is seeded with the default branch. The
+same snapshot came back from fixture projects on four different organization
+classes. Write a `check` block against these values rather than against an
+assumption of `false`.
+
 ## `oss` is reported but cannot be written
 
 `oss` appears here because the API returns it. It is **not** writable: a `PATCH`
