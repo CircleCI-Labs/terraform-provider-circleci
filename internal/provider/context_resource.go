@@ -184,12 +184,28 @@ func (r *contextResource) Read(ctx context.Context, req resource.ReadRequest, re
 	state.Id = types.StringValue(found.ID)
 	state.Name = types.StringValue(found.Name)
 	state.CreatedAt = types.StringValue(found.CreatedAt)
-	// The organization is preserved from state: internal/circleci's Context does
-	// not carry one, because the read route does not report which organization a
-	// context belongs to. Whichever name state holds is mirrored onto the other,
-	// so a configuration written against either one is stable — see
-	// org_id_deprecation.go.
-	setOrgIDs(&state.OrganizationId, &state.OrgId, effectiveOrgID(state.OrganizationId, state.OrgId))
+	// The organization comes from the API, not from state. The read route reports
+	// org_id — see internal/circleci's GetContext for the measured shape — so this
+	// is real drift detection rather than a value copied back over itself.
+	//
+	// This used to preserve whatever state held, on the stated grounds that "the
+	// read route does not report which organization a context belongs to". That was
+	// false. Preserving state's copy meant a wrong organization, however it got
+	// into state, was never corrected by a refresh: it survived every plan and kept
+	// forcing a replacement, because org_id replaces the resource when configured.
+	//
+	// Fall back to state only when the API reports no org_id at all, which Cloud
+	// never does. That is a guard for a deployment this has not been measured
+	// against, not a known case: overwriting a good state value with an empty
+	// string would be worse than leaving it alone.
+	organizationID := found.OrgID
+	if organizationID == "" {
+		organizationID = effectiveOrgID(state.OrganizationId, state.OrgId)
+	}
+
+	// Whichever name state holds is mirrored onto the other, so a configuration
+	// written against either one is stable — see org_id_deprecation.go.
+	setOrgIDs(&state.OrganizationId, &state.OrgId, organizationID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -250,25 +266,128 @@ func (r *contextResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.client = client
 }
 
+// ImportState imports a context by id.
+//
+// Accepted forms:
+//
+//	CONTEXT_ID                  — preferred; the organization is read from the API
+//	ORGANIZATION_ID/CONTEXT_ID  — the documented composite form, still supported
+//
+// THE ORGANIZATION ALWAYS COMES FROM THE API. It is never taken from the import
+// id, because org_id forces replacement: this used to split the composite id and
+// write the caller's first field into state with no validation at all, so a single
+// mistyped digit produced a successful-looking import followed by a plan reading
+// "1 to add, 1 to destroy" — destroying a live context and taking every
+// environment variable and restriction on it along with it. Nothing in that
+// sequence looked like an error to the practitioner; the plan looked like a
+// legitimate replacement.
+//
+// When the composite form is used, the supplied organization is treated as an
+// assertion to CHECK, not as a value to store. If it disagrees with the API the
+// import fails and names both, because either one could be the typo: preferring
+// the API silently would hide that the practitioner is importing a context they
+// did not mean to, and preferring the caller's is the original bug.
 func (r *contextResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	// Expected format: "ORGANIZATION_ID/CONTEXT_ID"
-	parts := strings.SplitN(req.ID, "/", 2)
+	suppliedOrgID, contextID := splitContextImportID(req.ID)
 
-	if len(parts) != 2 {
+	if contextID == "" {
 		resp.Diagnostics.AddError(
 			"Invalid Import ID Format",
-			fmt.Sprintf("Expected import ID format: 'organization_id/context_id'. Got: %s", req.ID),
+			fmt.Sprintf(
+				"Expected a context id, or 'organization_id/context_id'. Got: %q.\n\n"+
+					"A bare context id is enough — the organization is read from the API.",
+				req.ID,
+			),
 		)
 
 		return
 	}
 
-	organizationID := parts[0]
-	contextID := parts[1]
+	// The read route is the authority on which organization owns this context.
+	found, err := r.client.GetContext(ctx, contextID)
+	if err != nil {
+		if circleci.IsUnauthorized(err) {
+			resp.Diagnostics.AddError(
+				"Unable to import CircleCI context "+contextID,
+				fmt.Sprintf(
+					"The API denied access to this context. Either no context has that id, "+
+						"or it belongs to a different organization, or the configured token "+
+						"lacks permission — the API returns the same response for all three "+
+						"and does not distinguish them.\n\n"+
+						"Check that the id is a context id (not an organization id) and that "+
+						"it was copied whole.\n\n%s",
+					circleci.Detail(err),
+				),
+			)
+
+			return
+		}
+
+		resp.Diagnostics.AddError(
+			"Unable to import CircleCI context "+contextID,
+			circleci.Detail(err),
+		)
+
+		return
+	}
+
+	organizationID := found.OrgID
+
+	switch {
+	case organizationID == "" && suppliedOrgID == "":
+		// Only reachable on a deployment whose read route omits org_id, which
+		// Cloud does not. Ask for the composite form rather than writing an
+		// empty organization into state.
+		resp.Diagnostics.AddError(
+			"Unable to determine the organization for CircleCI context "+contextID,
+			"The API did not report an org_id for this context, so the organization "+
+				"cannot be verified. Import using 'organization_id/context_id' instead.",
+		)
+
+		return
+
+	case organizationID == "":
+		// Nothing to check it against; trust the caller, as the old code always
+		// did, but only in the one case where there is no alternative.
+		organizationID = suppliedOrgID
+
+	case suppliedOrgID != "" && suppliedOrgID != organizationID:
+		resp.Diagnostics.AddError(
+			"Import ID organization does not match the API",
+			fmt.Sprintf(
+				"The import id gives organization %q, but the API reports that context %s "+
+					"is owned by organization %q.\n\n"+
+					"One of the two is wrong, and importing either way would be unsafe: "+
+					"org_id forces replacement, so storing the wrong organization would make "+
+					"the next plan destroy and recreate this context, losing its environment "+
+					"variables and restrictions.\n\n"+
+					"Import using just the context id to take the organization from the API:\n"+
+					"  terraform import circleci_context.example %s",
+				suppliedOrgID, contextID, organizationID, contextID,
+			),
+		)
+
+		return
+	}
 
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), contextID)...)
 	// Both organization attribute names are set, so a configuration written
 	// against either one imports cleanly. See org_id_deprecation.go.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("organization_id"), organizationID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("org_id"), organizationID)...)
+}
+
+// splitContextImportID splits an import id into its optional organization and its
+// context id.
+//
+// A bare id is a context id: that is the form worth optimising for, since the
+// organization is read from the API either way. Anything with a slash is the
+// documented composite form.
+func splitContextImportID(importID string) (organizationID, contextID string) {
+	organizationID, contextID, found := strings.Cut(importID, "/")
+	if !found {
+		return "", organizationID
+	}
+
+	return organizationID, contextID
 }
