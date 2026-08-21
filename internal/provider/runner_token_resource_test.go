@@ -7,15 +7,23 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // The resource class here is unique per run, and no longer the same literal
@@ -177,6 +185,187 @@ resource "circleci_runner_token" "test" {
 			},
 		},
 	})
+}
+
+// TestRunnerTokenResource_ReadPreservesTokenAcrossRefresh is a fake-backed
+// regression test for the central claim this resource makes about the
+// secret: once a token is created, its value survives a later refresh, even
+// though [NET] confirms (see TestAccRunnerTokenResource, which passed
+// against both a standalone and a classic real organization) that
+// GET /api/v3/runner/token never discloses it again.
+//
+// The fake mirrors that: the create response carries the secret, the list
+// response (which Read calls) omits the "token" key entirely, matching the
+// real API's json:"token,omitempty" shape. A plain Config-only step is not
+// enough to catch a regression here: terraform-plugin-testing's post-apply
+// "refresh plan" check only fails on an unexpected DIFF, and a Computed
+// attribute silently going from a known value to null during refresh is not
+// a diff by that check's definition (nothing in config asked for a specific
+// value, so the planned value simply tracks whatever Read produced, the same
+// as the null-after-import case in TestRunnerTokenImport). So this uses an
+// explicit RefreshState step and inspects the actually-refreshed state on
+// disk with a plain TestCheckFunc, the same shape
+// TestContextResourceUnit_DestroyAlreadyGoneSucceeds uses to make an
+// otherwise-invisible Read outcome assertable.
+//
+// Confirmed by reverting the fix: adding `state.Token = types.StringNull()`
+// right after the "preserve value from state" comment in Read makes this
+// test fail with "Attribute 'token' not found" (the refreshed state has no
+// value for it at all); removing that line restores a pass. See the report
+// for both outputs.
+func TestRunnerTokenResource_ReadPreservesTokenAcrossRefresh(t *testing.T) {
+	api := newRunnerFakeAPI(t)
+	const tokenID = "11111111-2222-3333-4444-555555555555"
+	const secretValue = "fake-secret-jwvI2h8fW3q"
+
+	api.respond("POST", "/api/v3/runner/token", `{
+		"id": "`+tokenID+`",
+		"resource_class": "acc-ns/linux",
+		"nickname": "ci",
+		"created_at": "2026-01-01T00:00:00Z",
+		"token": "`+secretValue+`"
+	}`)
+	// The list response Read calls omits "token" entirely -- the real shape,
+	// per Token's json:"token,omitempty" tag and the [NET] observation above.
+	api.respond("GET", "/api/v3/runner/token", `{"items":[
+		{"id": "`+tokenID+`", "resource_class": "acc-ns/linux", "nickname": "ci", "created_at": "2026-01-01T00:00:00Z"}
+	]}`)
+
+	config := runnerProviderConfig(api.URL()) + `
+resource "circleci_runner_token" "test" {
+  org_id         = "00000000-1111-2222-3333-444444444444"
+  resource_class = "acc-ns/linux"
+  nickname       = "ci"
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: runnerProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_runner_token.test",
+						tfjsonpath.New("token"),
+						knownvalue.StringExact(secretValue),
+					),
+				},
+			},
+			{
+				RefreshState: true,
+				Check: resource.TestCheckResourceAttr(
+					"circleci_runner_token.test", "token", secretValue,
+				),
+			},
+		},
+	})
+
+	if requests := api.requestsFor("GET", "/api/v3/runner/token"); len(requests) == 0 {
+		t.Error("expected at least one GET /api/v3/runner/token request (the explicit refresh), got none")
+	}
+}
+
+// TestRunnerTokenResource_DeleteAlreadyGoneSucceeds and
+// TestRunnerTokenResource_DeleteFailureSurfacesError together are the
+// resource-level counterpart to circleci.TestDeleteTokenNotFound: that test
+// only proves the client function returns an error satisfying IsNotFound for
+// a 404, not that Delete on the resource actually swallows it (and only it).
+// These call Delete directly, the same way
+// TestGroupMembershipResourceDelete_toleratesAlreadyDeletedGroup does for
+// group_membership, to check both directions the task description asks
+// for: absence is success, but a genuine failure still surfaces.
+func TestRunnerTokenResource_DeleteAlreadyGoneSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			http.Error(w, `{"message":"not found with provided token: check permissions to view or admin self-hosted runners"}`, http.StatusNotFound)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	r := &runnerTokenResource{client: circleci.New(circleci.Config{Host: "http://127.0.0.1:1", RunnerHost: srv.URL, Token: "tok"})}
+	schema := runnerTokenResourceSchemaForTest(t)
+	state := runnerTokenStateForTest(t, schema, runnerTokenResourceModel{
+		Id:            types.StringValue("11111111-2222-3333-4444-555555555555"),
+		ResourceClass: types.StringValue("acc-ns/linux"),
+		Nickname:      types.StringValue("ci"),
+		CreatedAt:     types.StringValue("2026-01-01T00:00:00Z"),
+		Token:         types.StringValue("secret"),
+	})
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Errorf("Delete of an already-gone token returned diagnostics, want none: %v", resp.Diagnostics)
+	}
+}
+
+// TestRunnerTokenResource_DeleteFailureSurfacesError is the flip side of
+// TestRunnerTokenResource_DeleteAlreadyGoneSucceeds: a delete failure that is
+// NOT "already gone" must still fail the destroy, or a genuinely-stuck
+// token would be silently dropped from state while remaining live on the
+// service.
+func TestRunnerTokenResource_DeleteFailureSurfacesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			http.Error(w, `{"message":"internal error"}`, http.StatusInternalServerError)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	r := &runnerTokenResource{client: circleci.New(circleci.Config{Host: "http://127.0.0.1:1", RunnerHost: srv.URL, Token: "tok"})}
+	schema := runnerTokenResourceSchemaForTest(t)
+	state := runnerTokenStateForTest(t, schema, runnerTokenResourceModel{
+		Id:            types.StringValue("11111111-2222-3333-4444-555555555555"),
+		ResourceClass: types.StringValue("acc-ns/linux"),
+		Nickname:      types.StringValue("ci"),
+		CreatedAt:     types.StringValue("2026-01-01T00:00:00Z"),
+		Token:         types.StringValue("secret"),
+	})
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Error("Delete swallowed a non-404 failure, want it to surface as an error")
+	}
+}
+
+// runnerTokenResourceSchemaForTest returns the resource's schema, the same
+// way budgetResourceSchemaForTest does.
+func runnerTokenResourceSchemaForTest(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	(&runnerTokenResource{}).Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	return resp.Schema
+}
+
+// runnerTokenStateForTest builds a tfsdk.State from a fully-populated model,
+// the same way budgetStateForTest does.
+func runnerTokenStateForTest(t *testing.T, schema rschema.Schema, model runnerTokenResourceModel) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
 }
 
 func testAccRunnerTokenConfig(organizationId, resourceClass, nickname string) string {
