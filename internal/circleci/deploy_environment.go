@@ -20,6 +20,13 @@ import (
 // project settings, pipeline/run, groups, usage export jobs and
 // orbs/namespaces through its proxy, never /api/v2/deploy/*. Callers must gate
 // on Client.IsCloud (see requireCloud in internal/provider).
+//
+// requireCloud's own diagnostic message says "backed by the CircleCI v3 API",
+// which is not the reason any deploy/release type is gated — every route in
+// this file is v2. That approximation is accepted elsewhere in this codebase
+// for the same reason (see otel_exporter_resource.go's ModifyPlan comment):
+// the alternative is a second diagnostic message to maintain for every type
+// gated on something other than v3.
 const (
 	deployEnvironmentsRoute = "/deploy/environments"
 	deployEnvironmentRoute  = "/deploy/environments/%s"

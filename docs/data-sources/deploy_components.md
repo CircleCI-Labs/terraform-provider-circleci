@@ -53,6 +53,8 @@ output "circleci_component_names" {
 ### Optional
 
 - `name` (String) Component name to filter by. Leave unset to list every component.
+
+~> **This is a substring match, not an exact match.** A value that appears anywhere within a component's name matches, so this filter can return more than one component even when it names one exactly.
 - `org_id` (String) The unique identifier (UUID) of the organization to read deploy components from.
 
 This is the same field as the deprecated `organization_id`; set exactly one of the two.
@@ -77,4 +79,6 @@ Read-Only:
 - `name` (String) Name of the component.
 - `project_id` (String) Unique identifier (UUID) of the CircleCI project the component is associated with. Null when the component has no associated project.
 - `release_count` (Number) Total number of releases recorded for this component.
+
+~> **[`circleci_deploy_components`](deploy_components) (the list) has been observed to always return `0` for this attribute**, even for a component with a substantial release history; only [`circleci_deploy_component`](deploy_component) (the singular lookup by id) returned the true count for the same component at the same time. Do not rely on this value unless it was read through the singular data source.
 - `updated_at` (String) When the component was last updated, as an RFC 3339 timestamp.

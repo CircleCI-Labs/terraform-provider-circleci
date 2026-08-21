@@ -73,15 +73,50 @@ func TestAccDeployComponentsDataSource(t *testing.T) {
 						tfjsonpath.New("components").AtSliceIndex(0).AtMapKey("name"),
 						knownvalue.StringExact("release-agent"),
 					),
+					// 0, not the component's true release count: [NET] this data
+					// source's underlying route (the plural list) has been observed to
+					// always answer release_count: 0. See TestAccDeployComponentDataSource
+					// for the same component read through the singular data source, where
+					// the real count comes back. Don't "fix" this expectation to a
+					// plausible-looking non-zero value; that would be re-encoding the
+					// belief this test exists to prevent.
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_components.test",
 						tfjsonpath.New("components").AtSliceIndex(0).AtMapKey("release_count"),
-						knownvalue.Int64Exact(42),
+						knownvalue.Int64Exact(0),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_deploy_components.test",
 						tfjsonpath.New("components").AtSliceIndex(0).AtMapKey("archived_at"),
 						knownvalue.Null(),
+					),
+				},
+			},
+		},
+	})
+}
+
+// TestAccDeployComponentsDataSource_emptyOrg is the components equivalent of
+// TestAccDeployEnvironmentsDataSource_emptyOrg: an org that has never used
+// deploy/release tracking answers [NET] with HTTP 200 and an empty items
+// array, which must read as an empty (non-null) list rather than an error.
+func TestAccDeployComponentsDataSource_emptyOrg(t *testing.T) {
+	_, host := newMockDeployAPI(t)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: deployProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: deployProviderConfig(host, "cloud") + fmt.Sprintf(`
+data "circleci_deploy_components" "test" {
+  organization_id = %[1]q
+}
+`, testDeployEmptyOrganizationID),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"data.circleci_deploy_components.test",
+						tfjsonpath.New("components"),
+						knownvalue.ListSizeExact(0),
 					),
 				},
 			},

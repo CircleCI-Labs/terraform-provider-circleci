@@ -24,7 +24,12 @@ import (
 // one of them is a pure read with no writable counterpart in this provider,
 // so there is nothing to create first.
 //
-// The response bodies are the shapes production sends.
+// The response bodies are the shapes production sends, verified [NET]
+// against real CircleCI organizations for this workstream — including two
+// quirks that are easy to assume away when writing a fake from a spec
+// instead of a real response: the components list route's always-zero
+// release_count (see the components handler below) and the plain
+// `{"message":"Not found."}` 404 body, with no permissions wording.
 
 // deployProvider serves only the deploy/release data sources.
 //
@@ -68,8 +73,25 @@ provider "circleci" {
 }
 
 const (
-	// testDeployOrganizationID is the organization the mock API serves.
+	// testDeployOrganizationID is the organization the mock API serves seeded
+	// environments and components for.
 	testDeployOrganizationID = "b9291e0d-a11e-41fb-8517-c545388b5953"
+	// testDeployEmptyOrganizationID is a second, equally real organization that
+	// has simply never used deploy/release tracking.
+	//
+	// [NET] Every one of this provider's four disposable acceptance-test
+	// fixture organizations answers exactly this way for both
+	// GET /api/v2/deploy/environments and GET /api/v2/deploy/components: HTTP
+	// 200 with `{"items":[],"next_page_token":""}`, scoped by a valid,
+	// existing org-id that the caller has access to. That is indistinguishable
+	// on the wire from "the deploys product was never enabled for this org" —
+	// there is no separate signal for that — so this fixture models the one
+	// shape this family's four required test fixtures actually exercise.
+	// Before this org-id branch existed, the mock ignored org-id entirely and
+	// handed back the seeded environment/component for *any* org, so it could
+	// not represent this case at all — see TestAccDeployEnvironmentsDataSource_emptyOrg
+	// and TestAccDeployComponentsDataSource_emptyOrg.
+	testDeployEmptyOrganizationID = "5b6a4b0e-3f0f-4d3a-9d5f-2f7e6c8b9a10"
 	// testDeployEnvironmentID is a pre-seeded environment id.
 	testDeployEnvironmentID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
 	// testDeployComponentID is a pre-seeded component id.
@@ -120,6 +142,17 @@ func (m *mockDeployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Unlock()
 
 	switch {
+	// The seeded environment belongs only to testDeployOrganizationID: every
+	// other org-id — in particular testDeployEmptyOrganizationID — gets back
+	// no items, matching the real API scoping a list by org-id (confirmed
+	// [NET]; see testDeployEmptyOrganizationID's comment). A handler keyed on
+	// path alone, ignoring the org-id query parameter, cannot represent an org
+	// with no deploy data at all, which is what all four of this provider's
+	// real acceptance-test fixtures actually are.
+	case r.URL.Path == "/api/v2/deploy/environments" && r.Method == http.MethodGet &&
+		r.URL.Query().Get("org-id") != testDeployOrganizationID:
+		m.writeJSON(w, http.StatusOK, `{"items":[],"next_page_token":""}`)
+
 	case r.URL.Path == "/api/v2/deploy/environments" && r.Method == http.MethodGet:
 		m.writeJSON(w, http.StatusOK, fmt.Sprintf(`{
 			"items": [{
@@ -143,16 +176,29 @@ func (m *mockDeployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"description": "Production environment"
 		}`, testDeployEnvironmentID))
 
+	// [NET] A deploy environment/component/settings id that does not exist
+	// answers 404 with exactly this body, with no mention of permissions.
 	case strings.HasPrefix(r.URL.Path, "/api/v2/deploy/environments/") && r.Method == http.MethodGet:
-		m.writeJSON(w, http.StatusNotFound, `{"message":"Resource not found or permission denied"}`)
+		m.writeJSON(w, http.StatusNotFound, `{"message":"Not found."}`)
 
+	// Same org-id scoping as the environments handler above, and for the same
+	// reason: the seeded component belongs only to testDeployOrganizationID.
+	case r.URL.Path == "/api/v2/deploy/components" && r.Method == http.MethodGet &&
+		r.URL.Query().Get("org-id") != testDeployOrganizationID:
+		m.writeJSON(w, http.StatusOK, `{"items":[],"next_page_token":""}`)
+
+	// release_count is 0 here, not the singular Get response's 42, on
+	// purpose: [NET] the plural list route has been observed to always
+	// answer release_count: 0 for every component, while the singular Get
+	// for the very same component id answers the true count, reproducibly.
+	// See circleci.DeployComponent's ReleaseCount doc comment.
 	case r.URL.Path == "/api/v2/deploy/components" && r.Method == http.MethodGet:
 		m.writeJSON(w, http.StatusOK, fmt.Sprintf(`{
 			"items": [{
 				"id": %[1]q,
 				"project_id": %[2]q,
 				"name": "release-agent",
-				"release_count": 42,
+				"release_count": 0,
 				"labels": [{"key": "team", "value": "deploy"}],
 				"created_at": "2024-04-24T15:10:21.123Z",
 				"updated_at": "2024-04-24T15:10:21.123Z"
@@ -197,7 +243,7 @@ func (m *mockDeployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}`, testDeployComponentID, testDeployProjectID))
 
 	case strings.HasPrefix(r.URL.Path, "/api/v2/deploy/components/") && r.Method == http.MethodGet:
-		m.writeJSON(w, http.StatusNotFound, `{"message":"Resource not found or permission denied"}`)
+		m.writeJSON(w, http.StatusNotFound, `{"message":"Not found."}`)
 
 	case r.URL.Path == "/api/v2/deploy/projects/"+testDeployProjectID+"/settings" && r.Method == http.MethodGet:
 		m.writeJSON(w, http.StatusOK, `{"rollback_pipeline_definition_id": "1e2d3c4b-5a69-7887-9a0b-1c2d3e4f5061"}`)

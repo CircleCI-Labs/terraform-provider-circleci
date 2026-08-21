@@ -84,10 +84,13 @@ func TestDeployEnvironmentServiceGet(t *testing.T) {
 func TestDeployEnvironmentServiceGetNotFound(t *testing.T) {
 	t.Parallel()
 
+	// [NET] A deploy environment, component or project-settings id that does
+	// not exist answers 404 with exactly `{"message":"Not found."}` — no
+	// mention of permissions, unlike some other v2 routes in this provider.
 	client, _ := newDeployServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"message":"Resource not found or permission denied"}`))
+		_, _ = w.Write([]byte(`{"message":"Not found."}`))
 	})
 
 	_, err := client.DeployEnvironments().Get(context.Background(), "does-not-exist")

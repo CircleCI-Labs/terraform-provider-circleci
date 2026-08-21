@@ -63,8 +63,14 @@ func deployComponentAttributes(idAttribute schema.Attribute) map[string]schema.A
 			Computed:            true,
 		},
 		"release_count": schema.Int64Attribute{
-			MarkdownDescription: "Total number of releases recorded for this component.",
-			Computed:            true,
+			MarkdownDescription: "Total number of releases recorded for this component.\n\n" +
+				"~> **[`circleci_deploy_components`](deploy_components) (the list) has been " +
+				"observed to always return `0` for this attribute**, even for a component with a " +
+				"substantial release history; only [`circleci_deploy_component`](deploy_component) " +
+				"(the singular lookup by id) returned the true count for the same component at the " +
+				"same time. Do not rely on this value unless it was read through the singular data " +
+				"source.",
+			Computed: true,
 		},
 		"labels": schema.MapAttribute{
 			MarkdownDescription: "Labels attached to the component, as a map of label key to value.",
@@ -124,8 +130,11 @@ func (d *deployComponentsDataSource) Schema(_ context.Context, _ datasource.Sche
 				Optional: true,
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "Component name to filter by. Leave unset to list every component.",
-				Optional:            true,
+				MarkdownDescription: "Component name to filter by. Leave unset to list every component.\n\n" +
+					"~> **This is a substring match, not an exact match.** A value that appears " +
+					"anywhere within a component's name matches, so this filter can return more " +
+					"than one component even when it names one exactly.",
+				Optional: true,
 			},
 			"components": schema.ListNestedAttribute{
 				MarkdownDescription: "The components matching the given filters, sorted by name and project id.",
