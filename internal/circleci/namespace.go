@@ -99,9 +99,23 @@ func (c *Client) CreateNamespace(ctx context.Context, req CreateNamespaceRequest
 
 // RenameNamespace renames an existing namespace in place.
 //
-// This is a genuine update rather than a replacement: the namespace keeps its ID
-// and its orbs. Orb references in configuration files that used the old name
-// stop resolving, so callers should surface that.
+// The route's shape is a genuine update rather than a replacement: a namespace
+// that this succeeds against keeps its ID and its orbs. Orb references in
+// configuration files that used the old name stop resolving, so callers should
+// surface that.
+//
+// [NET, measured against a live account]: in every attempt this investigation
+// made — on a namespace the calling token's organization had just created, and
+// on one belonging to an unrelated organization, with two different tokens —
+// the route answered 403 Forbidden ({"error":{"title":"Forbidden."}}) and left
+// the namespace's name unchanged. CircleCI's own support documentation
+// (https://support.circleci.com/hc/en-us/articles/21518826780827,
+// "Transferring and Renaming Namespaces") says a rename or transfer is done by
+// filing a support ticket, not through this API, which matches what was
+// observed: this investigation found no account-level permission that made the
+// route answer anything else. Treat a 403 from this call as permanent — see
+// namespaceForbiddenDetail in internal/provider/orb_namespace_resource.go —
+// not as a transient authorization gap worth retrying.
 func (c *Client) RenameNamespace(ctx context.Context, id, name string) (*Namespace, error) {
 	var env Entity[namespaceWire]
 	err := c.PostV3(ctx, "/namespaces/%s/rename", renameNamespaceRequest{Name: name}, &env,
@@ -114,7 +128,20 @@ func (c *Client) RenameNamespace(ctx context.Context, id, name string) (*Namespa
 	return env.Data.toNamespace(), nil
 }
 
-// DeleteNamespace deletes a namespace by its UUID, along with the orbs it owns.
+// DeleteNamespace deletes a namespace by its UUID, along with the orbs it owns
+// — if the API accepts the request at all.
+//
+// [NET, measured against a live account]: every attempt this investigation
+// made — same two namespaces and two tokens as RenameNamespace — answered 403
+// Forbidden and left the namespace in place; a namespace it created moments
+// before, DELETEd immediately afterward, was still there on the next GET.
+// This investigation found no self-service way to delete a namespace: unlike
+// deleting an organization (see DeleteOrganization), there is no documented
+// support path either, only the rename/transfer one linked from
+// RenameNamespace. `terraform destroy` on the resource built on this method
+// must not report success it did not achieve — see the Delete method of
+// circleci_orb_namespace, which surfaces this error rather than dropping the
+// namespace from state.
 func (c *Client) DeleteNamespace(ctx context.Context, id string) error {
 	return c.DeleteV3(ctx, "/namespaces/%s", RouteParams(id))
 }

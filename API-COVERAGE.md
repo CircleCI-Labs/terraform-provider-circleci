@@ -207,7 +207,7 @@ see the corrected "Users, pipeline runs, workflows and jobs" section under v2 ab
 | Route | Provider |
 |---|---|
 | `GET /namespaces`, `GET /namespaces/:id` | `circleci_orb_namespace` |
-| `POST /namespaces`, `POST /namespaces/:id/rename`, `DELETE /namespaces/:id` | `circleci_orb_namespace` — `rename` is a real in-place update |
+| `POST /namespaces`, `POST /namespaces/:id/rename`, `DELETE /namespaces/:id` | `circleci_orb_namespace` — `rename`'s *shape* is a real in-place update (keeps id and orbs on success), but [NET] every account tested got `403 Forbidden` from both `rename` and `delete`, on namespaces both inside and outside the calling account's own organization; CircleCI's support docs describe rename/transfer as a support-ticket process, and this investigation found no self-service delete path at all. `name` is still left as a non-replacing update — see `circleci_orb_namespace`'s docs — precisely so this 403 is a clean failed apply, not Terraform destroying the namespace to retry as a replacement. |
 | `GET /orb/packages`, `GET /orb/packages/:id` | `circleci_orbs`, `circleci_orb` |
 | `POST /orb/packages` | `circleci_orb` |
 | `POST /orb/packages/:id/set-listed` | `circleci_orb` (`listed`) |

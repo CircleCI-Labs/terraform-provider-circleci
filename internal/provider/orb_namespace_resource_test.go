@@ -4,7 +4,9 @@
 package provider
 
 import (
+	"crypto/rand"
 	"fmt"
+	"net/http"
 	"regexp"
 	"testing"
 
@@ -212,5 +214,169 @@ resource "circleci_orb_namespace" "test" {
 				PlanOnly:           true,
 			},
 		},
+	})
+}
+
+// TestAccOrbNamespaceResource_RenameForbiddenGivesSupportTicketGuidance drives
+// a rename through the exact response [NET] shows a real account gets — 403
+// Forbidden — and requires the diagnostic to say why retrying will not help,
+// rather than reading as a generic, retryable API error.
+//
+// Without namespaceForbiddenDetail, the diagnostic is only circleci.Detail's
+// passthrough of the API body ("Forbidden."), which does not mention a support
+// ticket and would fail this test's ExpectError.
+func TestAccOrbNamespaceResource_RenameForbiddenGivesSupportTicketGuidance(t *testing.T) {
+	api := newOrbFakeAPI(t)
+
+	config := func(name string) string {
+		return orbProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_orb_namespace" "test" {
+  name            = %q
+  organization_id = %q
+}
+`, name, orbTestOrgID)
+	}
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config("acme")},
+			{
+				PreConfig: func() { api.setFailRenameNamespaceStatus(http.StatusForbidden) },
+				Config:    config("acme-renamed"),
+				ExpectError: regexp.MustCompile(
+					`(?s)Forbidden.*support ticket.*support\.circleci\.com`,
+				),
+			},
+		},
+	})
+
+	// The rename was attempted — this is not a validator short-circuiting
+	// before any request — but it must not have been retried.
+	if got := api.requestsFor("POST", "/rename"); len(got) != 1 {
+		t.Errorf("rename requests = %d, want exactly 1", len(got))
+	}
+	// And the namespace itself must be untouched: a 403 from the API, wrapped
+	// in a better message, is not license to guess at a different outcome.
+	for _, ns := range api.namespaces {
+		if ns.Name != "acme" {
+			t.Errorf("namespace name = %q, want %q: a failed rename must not change it", ns.Name, "acme")
+		}
+	}
+}
+
+// TestAccOrbNamespaceResource_DeleteForbiddenFailsDestroy drives a destroy
+// through the same 403 [NET] shows a real delete gets, and requires
+// `terraform destroy` to fail loudly with the support-ticket guidance rather
+// than reporting a removal that did not happen.
+func TestAccOrbNamespaceResource_DeleteForbiddenFailsDestroy(t *testing.T) {
+	api := newOrbFakeAPI(t)
+
+	config := orbProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_orb_namespace" "test" {
+  name            = "acme"
+  organization_id = %q
+}
+`, orbTestOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config},
+			{
+				PreConfig: func() { api.setFailDeleteNamespaceStatus(http.StatusForbidden) },
+				Config:    config,
+				Destroy:   true,
+				ExpectError: regexp.MustCompile(
+					`(?s)Forbidden.*support ticket.*support\.circleci\.com`,
+				),
+			},
+			{
+				// Confirms the namespace survived the failed destroy above: if
+				// Delete had wrongly dropped it from state, this step would plan
+				// to recreate it instead of finding nothing to do. Also lets the
+				// TestCase's own final destroy succeed.
+				PreConfig: func() { api.setFailDeleteNamespaceStatus(0) },
+				Config:    config,
+				PlanOnly:  true,
+			},
+		},
+	})
+}
+
+// TestAccOrbNamespaceResource_SecondCreateNamesTheExistingNamespace is [NET]:
+// it runs against a real account (skips otherwise, via testAccPreCheck and
+// testOrgID/testOrgName) rather than the fake, because this is exactly the
+// diagnostic the task called out as mattering most — a practitioner who
+// fat-fingers a second `circleci_orb_namespace` for an organization that
+// already has one cannot undo whatever happens next, so the error had better
+// name the namespace that already exists rather than reading as a generic
+// failure.
+//
+// The primary test organization for the active integration is known, from
+// manual investigation during this task, to already own a namespace named
+// after the organization itself; every disposable fixture organization
+// available did. If that ever stops being true for a given integration, this
+// test fails clearly (no error at all, since the create would then succeed)
+// rather than silently passing on a namespace it just leaked.
+func TestAccOrbNamespaceResource_SecondCreateNamesTheExistingNamespace(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: fmt.Sprintf(`
+resource "circleci_orb_namespace" "test" {
+  name            = %q
+  organization_id = %q
+}
+`, "tfp-second-create-"+rand.Text()[:12], testOrgID(t)),
+			ExpectError: regexp.MustCompile(
+				`(?s)only create one namespace.*` + regexp.QuoteMeta(testOrgName(t)),
+			),
+		}},
+	})
+}
+
+// TestAccOrbNamespaceResource_NameAlreadyClaimedByAnotherOrg is [NET], for the
+// same reason as TestAccOrbNamespaceResource_SecondCreateNamesTheExistingNamespace:
+// the other undoable mistake this resource can make is claiming a name a
+// different organization already owns, and the diagnostic needs to say so
+// plainly.
+//
+// It needs a target organization with no namespace of its own — every
+// pre-provisioned fixture this investigation found already owns one, which is
+// what made TestAccOrbNamespaceResource_SecondCreateNamesTheExistingNamespace
+// possible in the first place — so it creates one, then asks that fresh
+// organization for the name testOrgName's organization already owns. Both
+// resources are in the same config so a single apply exercises the conflict
+// and the TestCase's automatic destroy cleans up the organization afterward.
+func TestAccOrbNamespaceResource_NameAlreadyClaimedByAnotherOrg(t *testing.T) {
+	claimedName := testOrgName(t)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: fmt.Sprintf(`
+resource "circleci_organization" "fresh" {
+  name     = %q
+  vcs_type = "circleci"
+}
+
+resource "circleci_orb_namespace" "test" {
+  name            = %q
+  organization_id = circleci_organization.fresh.id
+}
+`, "tfp-orb-namespace-conflict-"+rand.Text()[:12], claimedName),
+			// The measured message names the rejected name before saying why:
+			// `Cannot create namespace 'X': a namespace with that name already
+			// exists.` — the quoted name has to come first in the pattern too.
+			// Terraform's own error rendering can wrap that message onto a new
+			// line between "already" and "exists", hence \s+ rather than a
+			// literal space.
+			ExpectError: regexp.MustCompile(
+				`(?s)` + regexp.QuoteMeta(claimedName) + `.*already\s+exists`,
+			),
+		}},
 	})
 }

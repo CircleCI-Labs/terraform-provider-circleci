@@ -34,10 +34,17 @@ const (
 	}}`
 
 	// orbListPage is the collection shape: references.namespace has an id only,
-	// and there are no timestamps or usage counts.
+	// and created_at/home_url are absent. Usage counts, however, ARE present —
+	// confirmed [NET] against a live account (GET /orb/packages, both
+	// filter[namespace_id] and filter[name]): every collection response this
+	// investigation captured included last_30_days_build_count/project_count/
+	// org_count in attributes, at the same value the detail route reports.
 	orbListPage = `{"data":[{
 		"id":"33333333-3333-3333-3333-333333333333",
-		"attributes":{"name":"acme/node","is_private":false,"is_listed":true},
+		"attributes":{
+			"name":"acme/node","is_private":false,"is_listed":true,
+			"last_30_days_build_count":7,"last_30_days_project_count":3,"last_30_days_org_count":2
+		},
 		"references":{
 			"namespace":{"id":"11111111-1111-1111-1111-111111111111"},
 			"orb_versions":[{"id":"44444444-4444-4444-4444-444444444444","attributes":{"version":"1.2.3","created_at":"2026-02-02T00:00:00Z"}}],
@@ -146,6 +153,12 @@ func TestGetOrbPackageEmptyEntityIsNotFound(t *testing.T) {
 // wire types. The collection's namespace reference has no name, so a package that
 // came from a listing must report an empty Namespace rather than a wrong one, and
 // callers that need the name have to refetch by id.
+//
+// It also pins the opposite mistake: the collection is not as thin as it looks.
+// created_at and home_url really are absent from it, but the usage counts are
+// not — see orbListPage's comment — and a wire type that fails to decode them
+// would silently report real traffic as zero on every circleci_orbs (plural)
+// and circleci_orb_categories read.
 func TestListOrbPackagesUsesTheThinnerCollectionShape(t *testing.T) {
 	t.Parallel()
 
@@ -172,8 +185,14 @@ func TestListOrbPackagesUsesTheThinnerCollectionShape(t *testing.T) {
 	if pkgs[0].Namespace != "" {
 		t.Errorf("Namespace = %q, want it empty: the collection does not return the namespace name", pkgs[0].Namespace)
 	}
-	if pkgs[0].CreatedAt != "" || pkgs[0].Last30DaysBuildCount != 0 {
-		t.Errorf("package = %+v, want no created_at or usage counts from a listing", pkgs[0])
+	if pkgs[0].CreatedAt != "" {
+		t.Errorf("package = %+v, want no created_at from a listing", pkgs[0])
+	}
+	// The usage counts ARE present on a listing response — see orbListPage's
+	// comment — and must be decoded rather than silently zeroed.
+	if pkgs[0].Last30DaysBuildCount != 7 || pkgs[0].Last30DaysProjectCount != 3 || pkgs[0].Last30DaysOrgCount != 2 {
+		t.Errorf("usage counts = %d/%d/%d, want 7/3/2 decoded from the listing",
+			pkgs[0].Last30DaysBuildCount, pkgs[0].Last30DaysProjectCount, pkgs[0].Last30DaysOrgCount)
 	}
 	// What the collection does return is still decoded.
 	if pkgs[0].LatestVersion != "1.2.3" || len(pkgs[0].Categories) != 1 {
