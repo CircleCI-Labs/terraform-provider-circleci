@@ -71,22 +71,37 @@ func (r *projectResource) Metadata(_ context.Context, req resource.MetadataReque
 // Schema defines the schema for the resource.
 func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a CircleCI project and its advanced settings.",
+		MarkdownDescription: "Manages a CircleCI project and its advanced settings.\n\n" +
+			"~> **What an apply does depends on the organization.** On a **standalone** " +
+			"(CircleCI-native, `circleci/…`) organization this creates a new project with no " +
+			"repository behind it. On a **classic**, VCS-backed (`gh/…`, `bb/…`) organization it " +
+			"can only **adopt a repository that already exists** — a repository named `name` must " +
+			"already be present in that organization and be visible to the token, or the apply " +
+			"fails with `404 GitHub response: Not Found`. See the resource documentation.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The unique identifier of the project.",
 				Computed:            true,
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "The name of the project repository. Changing this value forces a new resource to be created.",
-				Required:            true,
+				MarkdownDescription: "The name of the project. Changing this value forces a new resource to be " +
+					"created.\n\nOn a **classic**, VCS-backed organization this must be the name of a " +
+					"repository that **already exists** in that organization: CircleCI adopts the " +
+					"repository, it does not create one. On a **standalone** organization it is simply the " +
+					"name of the new project, and no repository is involved.",
+				Required: true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"slug": schema.StringAttribute{
-				MarkdownDescription: "The project slug in the format `vcs-type/org-name/repo-name`.",
-				Computed:            true,
+				MarkdownDescription: "The project slug, as CircleCI reports it. On a **classic**, VCS-backed " +
+					"organization that is `vcs-type/org-name/repo-name`, for example " +
+					"`gh/acme/my-repo`. On a **standalone** organization it is " +
+					"`circleci/<org-fragment>/<project-fragment>`, where both segments are opaque " +
+					"identifiers — the second is neither the project name nor its UUID. Use this value " +
+					"verbatim when importing; a slug assembled from names is rejected there.",
+				Computed: true,
 			},
 			"organization_name": schema.StringAttribute{
 				MarkdownDescription: "The name of the owning organization.",
@@ -223,7 +238,7 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI project",
-			"Could not create CircleCI project, unexpected error: "+err.Error(),
+			projectCreateFailureDetail(plan.Name.ValueString(), err),
 		)
 		return
 	}
@@ -367,6 +382,14 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
+	// ImportState (below) writes nothing but slug, so this Read is the only
+	// opportunity Terraform gives the provider to populate the rest of an
+	// imported project. Every attribute other than slug is null here and only
+	// here: Create and Update both resolve id, and no other path can reach Read
+	// with a null one. See the settings block below, and BUG P3 in
+	// TestProjectResourceUnit_ImportPopulatesEverySetting.
+	importing := projectState.Id.IsNull()
+
 	apiProject, err := r.client.GetProject(ctx, projectState.Slug.ValueString())
 	if err != nil {
 		// A project that no longer exists is drift, not an error. Without this,
@@ -417,48 +440,46 @@ func (r *projectResource) Read(ctx context.Context, req resource.ReadRequest, re
 		)
 		return
 	}
-	// projectSettingRefresh (project_settings_resource.go) is what circleci_project_settings
-	// uses for the same purpose: a toggle that was null before this Read stays null
-	// rather than adopting whatever the API happens to report.
+	// Two different rules, and which applies turns on `importing`. See
+	// projectSettingImport for the whole argument; in outline:
 	//
-	// This resource's toggles are Optional+Computed rather than Optional-only, so
-	// they cannot stay null forever the way circleci_project_settings' can — Create
-	// must resolve every one of them to a known value, because a Computed attribute
-	// cannot be left unknown once an apply finishes. But once a toggle *is* null in
-	// state — which is exactly the state ImportState leaves every toggle in, since it
-	// sets only slug — adopting the API's value unconditionally here used to make
-	// this Read indistinguishable from a practitioner declaring the value outright.
-	// Because these attributes are Optional+Computed, a null config falls back to
-	// the prior *state* value on the next plan, so the adopted value would then be
-	// read back out of the plan and sent to the API on the next Update — pinning
-	// whatever CircleCI happened to report at the moment of that one Read, and
-	// fighting any later change of CircleCI's own default for a setting nobody ever
-	// configured.
-	projectState.AutoCancelBuilds = projectSettingRefresh(projectState.AutoCancelBuilds, projectSettings.AutocancelBuilds)
-	projectState.BuildForkPrs = projectSettingRefresh(projectState.BuildForkPrs, projectSettings.BuildForkPrs)
-	projectState.BuildPrsOnly = projectSettingRefresh(projectState.BuildPrsOnly, projectSettings.BuildPrsOnly)
-	projectState.DisableSSH = projectSettingRefresh(projectState.DisableSSH, projectSettings.DisableSSH)
-	projectState.ForksReceiveSecretEnvVars = projectSettingRefresh(projectState.ForksReceiveSecretEnvVars, projectSettings.ForksReceiveSecretEnvVars)
+	//   - On an ORDINARY refresh, a toggle that is already null in state stays
+	//     null. Adopting the API's value there would make a setting nobody
+	//     configured indistinguishable from one a practitioner set outright, and
+	//     because these attributes are Optional+Computed the adopted value would
+	//     be carried into the next plan and written back on the next Update —
+	//     pinning whatever CircleCI happened to report at the moment of that one
+	//     Read. That is what projectSettingRefresh (project_settings_resource.go)
+	//     exists for, and circleci_project_settings uses it for the same reason.
+	//   - On the Read that FOLLOWS AN IMPORT, every value the API can supply is
+	//     adopted. An import whose state omits nine of this resource's attributes
+	//     is not an import: `terraform plan` against it proposes a change for
+	//     every one the practitioner then writes down, and ImportStateVerify — the
+	//     framework's own definition of a faithful import — fails against the same
+	//     project created through Create, which resolves all nine. Adopting here
+	//     makes an imported project indistinguishable from a created one, which is
+	//     the whole contract of import. The pinning argument above does not apply,
+	//     because Create pins exactly the same way and always has.
+	projectState.AutoCancelBuilds = projectSettingImport(importing, projectState.AutoCancelBuilds, projectSettings.AutocancelBuilds)
+	projectState.BuildForkPrs = projectSettingImport(importing, projectState.BuildForkPrs, projectSettings.BuildForkPrs)
+	projectState.BuildPrsOnly = projectSettingImport(importing, projectState.BuildPrsOnly, projectSettings.BuildPrsOnly)
+	projectState.DisableSSH = projectSettingImport(importing, projectState.DisableSSH, projectSettings.DisableSSH)
+	projectState.ForksReceiveSecretEnvVars = projectSettingImport(importing, projectState.ForksReceiveSecretEnvVars, projectSettings.ForksReceiveSecretEnvVars)
 	// oss is always adopted, unlike every other setting: it is Computed-only and
 	// cannot be written, so reporting what CircleCI holds can never turn into a
 	// write the practitioner did not ask for. See project_settings_resource.go's
 	// refresh method, which documents the same exception.
 	projectState.OSS = types.BoolPointerValue(projectSettings.OSS)
-	projectState.SetGithubStatus = projectSettingRefresh(projectState.SetGithubStatus, projectSettings.SetGithubStatus)
-	projectState.SetupWorkflows = projectSettingRefresh(projectState.SetupWorkflows, projectSettings.SetupWorkflows)
-	projectState.WriteSettingsRequiresAdmin = projectSettingRefresh(projectState.WriteSettingsRequiresAdmin, projectSettings.WriteSettingsRequiresAdmin)
+	projectState.SetGithubStatus = projectSettingImport(importing, projectState.SetGithubStatus, projectSettings.SetGithubStatus)
+	projectState.SetupWorkflows = projectSettingImport(importing, projectState.SetupWorkflows, projectSettings.SetupWorkflows)
+	projectState.WriteSettingsRequiresAdmin = projectSettingImport(importing, projectState.WriteSettingsRequiresAdmin, projectSettings.WriteSettingsRequiresAdmin)
 
-	// Gated on being null exactly like every boolean toggle just above, and for
-	// the same reason (see the long comment there): pr_only_branch_overrides is
-	// Optional+Computed too, and adopting whatever CircleCI currently holds
-	// whenever this attribute happens to be undeclared — which is exactly the
-	// state ImportState leaves it in, since it sets only slug — would make "not
-	// managed" indistinguishable from "managed as whatever the API reports",
-	// and pin that value for the next Update to send back. This used to run
-	// unconditionally, which meant importing a project adopted its branch
-	// overrides on the very first refresh even though the equivalent booleans
-	// stayed null until a configuration named them.
-	if !projectState.PROnlyBranchOverrides.IsNull() {
+	// The ninth attribute, and it follows the same two rules as the eight booleans
+	// above for the same reasons: on an ordinary refresh an undeclared
+	// pr_only_branch_overrides stays null, so that "not managed" does not become
+	// "managed as whatever the API reports"; on the Read after an import it is
+	// adopted, so that the imported state matches what Create would have produced.
+	if importing || !projectState.PROnlyBranchOverrides.IsNull() {
 		overrides, overrideDiags := branchOverrideSet(ctx, projectSettings.PROnlyBranchOverrides)
 		resp.Diagnostics.Append(overrideDiags...)
 		if resp.Diagnostics.HasError() {
@@ -591,8 +612,12 @@ func (r *projectResource) Delete(ctx context.Context, req resource.DeleteRequest
 	err := r.client.DeleteProject(ctx, state.Slug.ValueString())
 	if err != nil {
 		// Already gone is the desired end state, so a destroy of a project someone
-		// removed in the UI succeeds rather than erroring on the way out.
+		// removed in the UI succeeds rather than erroring on the way out — but only
+		// once "gone" has been distinguished from "not visible to this token". See
+		// deletedProjectIsReallyGone.
 		if circleci.IsNotFound(err) {
+			r.deletedProjectIsReallyGone(ctx, state, &resp.Diagnostics)
+
 			return
 		}
 
@@ -602,6 +627,104 @@ func (r *projectResource) Delete(ctx context.Context, req resource.DeleteRequest
 		)
 		return
 	}
+}
+
+// deletedProjectIsReallyGone decides whether a 404 from DELETE means the project
+// no longer exists, or only that this token cannot see it. It reports true when
+// the destroy should be allowed to succeed, and appends an error and reports
+// false when it must not.
+//
+// WHY THIS EXISTS. `DELETE /api/v2/project/{slug}` answers
+// 404 {"message":"Project not found"} in two situations that look identical from
+// the client, and one of them is not a deletion at all. Measured over the
+// network, with two personal API tokens belonging to two different accounts:
+//
+//	# token A creates a project in an organization only A can reach
+//	POST /api/v2/organization/e75c…/project  {"name":"my-project"}
+//	→ 200, slug circleci/Va2k…/TFtestProjFragment012
+//
+//	# token B, which cannot see that organization, tries to delete it
+//	DELETE /api/v2/project/circleci/Va2k…/TFtestProjFragment012   (token B)
+//	→ 404 {"message":"Project not found"}
+//
+//	# and the project is still there
+//	GET /api/v2/project/circleci/Va2k…/TFtestProjFragment012      (token A)
+//	→ 200
+//
+// Treating that 404 as "already gone" — which this function's caller did
+// unconditionally before — makes Terraform report a successful destroy and drop
+// the resource from state while the project is still live, still runnable and now
+// invisible to Terraform. That is silent orphaning, the same shape as the bug
+// already fixed in the URL orb allow list. Retrying the DELETE, or following it
+// with a GET, cannot tell the two apart: the same token gets 404 either way.
+//
+// The ORGANIZATION lookup can tell them apart, and it is the only thing that can
+// without a second credential. Also measured, same two tokens:
+//
+//	GET /api/v2/organization/e75c…   (token B) → 404 {"message":"Org not found."}
+//	GET /api/v2/organization/e75c…   (token A) → 200
+//
+// So: if the token can still reach the organization the project belonged to, a
+// 404 for the project is taken at face value and the destroy succeeds. If it
+// cannot reach the organization either, the 404 says nothing about the project
+// and the destroy fails loudly with the resource left in state.
+//
+// TWO LIMITS, both deliberate:
+//
+//   - A whole organization deleted outside Terraform now fails this destroy
+//     instead of quietly succeeding, because its projects are unreachable for
+//     the same reason a permissions loss makes them unreachable. The diagnostic
+//     names that case and says what to do about it. Making a practitioner run
+//     one `terraform state rm` is a much smaller harm than orphaning a live
+//     project without telling them.
+//   - A token that can see the organization but not this particular project —
+//     if CircleCI's project-level permissions ever produce that — is still
+//     mistaken for a deleted project. This narrows the hole rather than closing
+//     it, because the API offers nothing else to distinguish the two.
+//
+// Any error from the organization lookup other than 404 leaves the destroy
+// succeeding: a transient 5xx on a confirmation request must not fail a destroy
+// whose DELETE has already been answered.
+func (r *projectResource) deletedProjectIsReallyGone(
+	ctx context.Context,
+	state projectResourceModel,
+	diags *diag.Diagnostics,
+) bool {
+	organizationID := effectiveOrgID(state.OrganizationId, state.OrgId)
+	if organizationID == "" {
+		// Nothing to check against. State written by a version of this provider
+		// that predates the organization pair, or a hand-edited state file.
+		return true
+	}
+
+	_, orgErr := r.client.GetOrganization(ctx, organizationID)
+	if orgErr == nil {
+		return true
+	}
+
+	if !circleci.IsNotFound(orgErr) {
+		return true
+	}
+
+	diags.AddError(
+		"Could not confirm the CircleCI project was deleted",
+		fmt.Sprintf(
+			"Deleting project %s answered HTTP 404 \"Project not found\", and organization %s is "+
+				"not visible to this token either (\"Org not found.\").\n\n"+
+				"CircleCI answers 404 both for a project that no longer exists and for one this "+
+				"token is not allowed to see, so the project may still exist. Terraform has kept "+
+				"it in state rather than reporting a successful destroy: dropping it would leave a "+
+				"live project running with nothing managing it.\n\n"+
+				"If the token has lost access to the organization, restore its access and destroy "+
+				"again. If the organization itself was deleted, the project is gone with it — "+
+				"remove the resource from state with:\n\n"+
+				"    terraform state rm <resource address>",
+			state.Slug.ValueString(),
+			organizationID,
+		),
+	)
+
+	return false
 }
 
 // Configure adds the provider configured client to the resource.
@@ -620,6 +743,19 @@ func (r *projectResource) Configure(_ context.Context, req resource.ConfigureReq
 	r.client = client
 }
 
+// ImportState imports a project by its slug.
+//
+// It writes only slug, which is the only thing the import ID carries. Everything
+// else — id, name, the organization pair, vcs_info, and all nine settings
+// attributes — is filled in by the Read that Terraform runs immediately
+// afterwards, which detects the import from the null id and adopts every value
+// the API can supply. See the settings block in Read.
+//
+// It deliberately does not validate the slug either: circleci.GetProject's own
+// segment-count guard (projectSlugPath) rejects a malformed one during that Read
+// with a diagnostic naming the expected shape, and duplicating the check here
+// would mean two places to keep in step. See
+// TestProjectResourceUnit_ImportMalformedSlugFailsCleanly.
 func (r *projectResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resp.Diagnostics.Append(resp.State.SetAttribute(
 		ctx, path.Root("slug"), req.ID,
@@ -628,6 +764,83 @@ func (r *projectResource) ImportState(ctx context.Context, req resource.ImportSt
 	if resp.Diagnostics.HasError() {
 		return
 	}
+}
+
+// projectSettingImport folds an API-reported setting back into state, choosing
+// between the two rules Read needs.
+//
+// importing is true only for the Read that Terraform runs straight after
+// ImportState, detected there by a null id. Then the API's value is adopted
+// outright: an import must leave state describing the project as it actually is,
+// so that `terraform plan` afterwards is empty and ImportStateVerify — which
+// compares an imported instance against the same resource created through
+// Create — passes. Import previously wrote nothing but slug, leaving these nine
+// attributes null while Create resolved every one of them, which is BUG P3: it
+// failed ImportStateVerify in all four of this resource's acceptance tests and
+// made the first plan after an import propose a change for every setting the
+// practitioner wrote down, whether or not it already held that value.
+//
+// Otherwise this defers to projectSettingRefresh, which keeps an
+// already-null toggle null. See the settings block in Read for why the
+// distinction matters, and why the "adopting pins the value" objection that
+// shapes projectSettingRefresh does not apply to an import.
+func projectSettingImport(importing bool, prior types.Bool, reported *bool) types.Bool {
+	if importing {
+		return types.BoolPointerValue(reported)
+	}
+
+	return projectSettingRefresh(prior, reported)
+}
+
+// projectCreateFailureDetail renders a failed project create for a diagnostic.
+//
+// It exists because of the single most confusing failure this resource has (BUG
+// P4): POST /api/v2/organization/{id}/project is TWO different operations
+// depending on what kind of organization it is pointed at, and only one of them
+// can create anything.
+//
+//   - On a STANDALONE (CircleCI-native, `circleci/…`) organization it genuinely
+//     creates a new, repository-less project. Measured over the network against a
+//     standalone organization created seconds earlier and connected to no VCS at
+//     all: 200, with vcs_info.provider "CircleCI".
+//
+//   - On a CLASSIC, VCS-backed (`gh/…`, `bb/…`) organization it can only ADOPT a
+//     repository that already exists on the VCS. It never creates one. Measured
+//     over the network against two different GitHub-backed organizations, with a
+//     repository name that does not exist in either:
+//
+//     POST /api/v2/organization/{uuid}/project  {"name":"no-such-repo"}
+//     → 404  {"message":"GitHub response: Not Found"}
+//
+// The practitioner used to get neither of those facts, nor even the API's own
+// message: Create passed err.Error() straight through, so the whole diagnostic
+// was `POST /api/v2/organization/<uuid>/project: 404 Not Found`. circleci.Detail
+// recovers the body's message, and on a 404 the precondition is spelled out,
+// because a missing repository is by far the likeliest cause and is not
+// guessable from the response.
+//
+// The hint is attached on 404 only, and it names both possibilities rather than
+// asserting one: the organization ID alone does not say which class the
+// organization is, and finding out would cost a second request on an error path.
+func projectCreateFailureDetail(name string, err error) string {
+	detail := "Could not create CircleCI project, unexpected error: " + circleci.Detail(err)
+
+	if !circleci.IsNotFound(err) {
+		return detail
+	}
+
+	return detail + fmt.Sprintf(
+		"\n\nThis route behaves differently depending on the organization:\n\n"+
+			"  * On a standalone (CircleCI-native, \"circleci/…\") organization it creates a new, "+
+			"repository-less project.\n"+
+			"  * On a classic, VCS-backed (\"gh/…\", \"bb/…\") organization it can only ADOPT a "+
+			"repository that already exists — it never creates one.\n\n"+
+			"So on a classic organization this 404 most likely means CircleCI could not find a "+
+			"repository named %q in that organization. Create the repository on the VCS first, and "+
+			"check that the token's VCS account can see it. Otherwise, check that the organization "+
+			"ID is correct and that this token can reach that organization.",
+		name,
+	)
 }
 
 // branchOverrides converts a Terraform set of branch names into plain strings.
