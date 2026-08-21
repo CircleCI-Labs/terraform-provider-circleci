@@ -209,8 +209,14 @@ func TestProjectGroupServiceGetPropagatesErrors(t *testing.T) {
 // match, but only the latter means the grant was actually revoked. A caller
 // that checks the broader IsNotFound, rather than
 // errors.Is(err, circleci.ErrNotFound), cannot tell a revoked grant from an
-// organization or project the token has lost access to -- both of which the
-// route answers with the same 404.
+// organization or project the token has lost access to.
+//
+// [NET, 2026-08-21] The real route answers that case with 403 "Permission
+// denied.", not 404 -- confirmed against a real organization with a bogus
+// project id, and separately with both a bogus organization and project id.
+// This test still fakes a 404 to prove the *mechanism* generically covers a
+// transport failure, distinct from the emptyList case above; the 403 case
+// used in production is exercised by TestProjectGroupServiceGetPropagatesErrors.
 func TestProjectGroupServiceGetDistinguishesTransport404FromEmptyList(t *testing.T) {
 	t.Parallel()
 

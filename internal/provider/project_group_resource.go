@@ -210,29 +210,41 @@ func (r *projectGroupResource) Read(ctx context.Context, req resource.ReadReques
 		// that may drop this resource from state.
 		//
 		// A *transport* failure looking up the list itself must not, even though
-		// circleci.IsNotFound would say yes to a 404 there: the route 404s both when
-		// the organization or project no longer exists and when the token has lost
-		// access to one that does, which is not the same thing as the grant being
-		// revoked. Dropping state there would have the next apply call Assign again
-		// -- harmless today only because Assign happens to be idempotent, not
-		// because dropping state was the right call. Report it instead and leave
-		// state alone.
+		// circleci.IsNotFound would say yes to a 404 there: the route answers an
+		// error status both when the organization or project no longer exists and
+		// when the token has lost access to one that does, which is not the same
+		// thing as the grant being revoked. Dropping state there would have the
+		// next apply call Assign again -- harmless today only because Assign
+		// happens to be idempotent, not because dropping state was the right call.
+		// Report it instead and leave state alone.
+		//
+		// [NET, 2026-08-21] The status is 403 "Permission denied.", not 404: a live
+		// request against a real organization with a bogus project id, and
+		// separately with both a bogus organization and project id, both came back
+		// 403 on the list route. The 404 check is kept alongside it in case some
+		// other path answers that instead -- a classic (non-standalone) organization's
+		// project, for instance, answers a third way again, 400 "Endpoint is not
+		// supported for this organization" -- but 403 is the verified case for a
+		// missing organization or project, so it is checked first and given the
+		// same treatment as 404 rather than falling through to the generic branch
+		// below, which would report an accurate but unhelpfully generic error.
 		if errors.Is(err, circleci.ErrNotFound) {
 			resp.State.RemoveResource(ctx)
 
 			return
 		}
 
-		if circleci.HasStatus(err, http.StatusNotFound) {
+		if circleci.HasStatus(err, http.StatusNotFound) || circleci.IsUnauthorized(err) {
+			status, _ := circleci.StatusCode(err)
 			resp.Diagnostics.AddError(
 				"Unable to read the CircleCI project group grant for group "+groupID,
 				fmt.Sprintf(
-					"CircleCI answered 404 while listing project %s's groups in organization %s. "+
+					"CircleCI answered HTTP %d while listing project %s's groups in organization %s. "+
 						"The grant is read by listing the project's groups, so this is about the "+
 						"organization or project, not the grant: either one no longer exists, or the "+
 						"API token can no longer manage it.\n\n"+
-						"The grant has been left in Terraform state rather than removed.",
-					projectID, organizationID,
+						"The grant has been left in Terraform state rather than removed.\n\n%s",
+					status, projectID, organizationID, circleci.Detail(err),
 				),
 			)
 

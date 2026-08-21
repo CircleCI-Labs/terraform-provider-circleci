@@ -190,6 +190,20 @@ installation, not provider users — nothing there changes provider behaviour.
 This entry (aside from the two bug fixes above) affects contributors running the
 acceptance test suite against a real CircleCI installation, not provider users.
 
+* **`circleci_project_group`'s Read now recognises the status the API actually sends for a
+  missing organization or project.** Live requests against a real organization with a bogus
+  project id, and separately with both a bogus organization and project id, answered
+  `403 Permission denied.` on the list route this resource depends on for every read — not the
+  `404` the code assumed. Before this fix, that 403 fell through to a generic diagnostic instead
+  of the specific one meant to distinguish "the grant was revoked" from "the organization,
+  project, or token access is gone"; the resource still left state alone either way, so this is
+  a diagnostic-quality fix, not a state-safety one. The fake and the comment describing this case
+  claimed 404 too, and are corrected alongside the code.
+
+
+The rest of this release affects contributors running the acceptance test suite against a real
+CircleCI installation, not provider users — nothing else here changes provider behaviour.
+
 * **Acceptance-test environment variables are now named per integration**, and a placeholder
   value skips cleanly instead of failing. Every fixture variable is `CIRCLECI_TEST_<KEY>_<SUFFIX>`,
   where `KEY` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or `BB_CLOUD` and the

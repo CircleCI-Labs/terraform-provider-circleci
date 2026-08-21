@@ -21,9 +21,18 @@ internally, so the result covers every group rather than a single page. Use
 | **Organization type** | `circleci` (standalone) only. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud. |
 | **Token** | A personal API token with read access to the organization. |
 
--> **Members cannot be read through this provider** This data source reports
-the groups themselves, not their members: the membership routes exist but answer
-404 outside a separate internal ingress the public API does not expose.
+-> **An empty result does not mean groups are supported here.** The list route
+answers `200` with an empty `items` array for a `github`/`bitbucket`
+organization exactly as it does for a standalone organization that simply has
+no groups yet — it is *creating* a group that is refused (403) on the former.
+Do not treat an empty list from this data source as confirmation that groups
+work for the configured organization.
+
+-> **Members are a separate data source** This data source reports the groups
+themselves, not their members. Their own-looking public routes answer 404
+outside a separate internal ingress; use
+[`circleci_group_membership`](group_membership) instead, which reads
+membership through a different, private route family.
 
 ## Example Usage
 

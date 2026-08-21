@@ -76,6 +76,68 @@ family entirely: CircleCI's private origin (`/private/ciam/orgs/{org_id}/groups/
 above changes — the public `.../groups/:group_id/users` family is still
 unreachable, and still not what the resource uses.
 
+**All three private-origin member operations were re-verified live against a real
+standalone organization: list, add and remove all work with a plain personal token.**
+`GET .../users` returns only `{"items": [...]}` — no `count`, and no
+`next_page_token`, confirming that this route does not paginate at all (as opposed
+to the org-level `/groups` route, which advertises pagination it does not
+implement). Every member the response carries came back with `created_at` as the
+Go zero time (`0001-01-01T00:00:00Z`) rather than a real timestamp, even for a
+member added moments earlier — `updated_at`, not decoded by this provider, held
+the real one. Treat `GroupMember.CreatedAt` as decorative.
+
+**Groups and project-group grants behave differently on a `circleci` (standalone)
+organization than on a `github`/`bitbucket` one, confirmed live on all four fixture
+organizations (`gh-app-cci-1`, `gitlab-test` standalone; `gh-oauth-cci-1`,
+`gh-oauth-cci-2` classic):**
+
+* `GET .../groups` answers `200` with an empty `items` array on *every* organization
+  type, including both classic fixtures — an empty list does not mean groups are
+  unsupported there.
+* `POST .../groups` (create) answers `403 Permission denied.` on both classic
+  fixtures, confirmed with a token that demonstrably held full admin access to
+  those organizations (it created and deleted a context there in the same
+  session). `circleci_group` is therefore standalone-only in practice, not merely
+  by documentation.
+* `GET .../projects/{project_id}/groups` (project-group list, the read path behind
+  `circleci_project_group` and `circleci_project_groups`) answers
+  `400 Endpoint is not supported for this organization.` on a classic
+  organization's project — a third status, distinct from both the `200` above and
+  the `403` below.
+
+**Absence is not 404 for these routes.** A single group, fetched by id, answers
+`403 Permission denied.` for a group just deleted through the same token, for a
+group id that never existed, and for a group requested under a bogus organization
+id — all indistinguishable from a genuine permission problem, and confirmed
+live and repeatably (create → 200, delete → 200, immediate re-`GET` → 403, never
+404). `DELETE` on an already-deleted group answers the same 403. The project-group
+list route answers the same way for a bogus organization or project id under an
+otherwise-valid (standalone) organization: `403`, not the `404` an earlier version
+of this file and of `project_group_resource.go`'s comments assumed. The provider's
+handling was already safe either way — it never drops a resource from state on an
+ambiguous signal — but the diagnostic wording and the fakes have been corrected to
+stop asserting a status code that was never observed.
+
+**Assigning a group to a project, and changing its role, both survive a real
+`terraform apply` cleanly**: `circleci_group`, `circleci_group_membership` and
+`circleci_project_group` were run end-to-end against `gh-app-cci-1` (create,
+`terraform plan` after apply, a role change applied *in place* — confirmed
+`update in-place`, not a replace — `terraform state rm` + `terraform import` for
+both `circleci_group_membership` and `circleci_project_group`, and destroy).
+Every plan after apply or import was empty. Destroying `circleci_group_membership`
+actually removed the member from the group on the server; destroying
+`circleci_project_group` left the grant live on the server exactly as its warning
+says, confirmed by re-listing the project's groups afterward.
+
+**The revoke route project-group grants are documented as needing genuinely does
+not exist, confirmed live two ways**: `DELETE .../projects/{project_id}/groups/{group_id}`
+(the documented per-group form) answers `404 {"message": "Not Found"}`, and
+`DELETE .../projects/{project_id}/groups` with a `{"group_ids": [...]}` body (the
+shape a previous investigation believed was implemented further in) answers
+`404 {"message": "Route Not Found."}`. The grant was still present in the list
+after both attempts. Neither shape works; `circleci_project_group`'s Delete
+dropping state with a warning rather than erroring is the only honest option.
+
 ### Projects
 
 | Route | Provider |

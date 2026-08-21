@@ -30,6 +30,12 @@ this data source on CircleCI Cloud only.
 ~> **This API is not part of the published CircleCI OpenAPI specification** and
 may change without notice.
 
+-> **On a `github` or `bitbucket` organization, this route answers `400
+Endpoint is not supported for this organization.`**, not an empty list — unlike
+`circleci_groups`, which answers `200` with an empty list for those
+organizations. An empty `groups` result here means the project genuinely has no
+group grants, not that the organization type is unsupported.
+
 Pagination is followed internally, so the result covers every group rather than
 one page.
 

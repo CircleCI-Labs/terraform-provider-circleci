@@ -20,9 +20,12 @@ Manages a CircleCI group. A group is a named collection of organization members 
 | **Token** | A personal API token belonging to an organization admin. |
 
 -> **Managing who is in a group** This resource manages the group itself, not
-its membership. Populating a group is not possible through the public API — the
-routes exist but answer 404 outside a separate internal ingress — so adding
-members remains a web-application step. Use
+its membership. The public API's own-looking membership routes
+(`.../groups/{group_id}/users`, `.../remove_users`) answer 404 outside a
+separate internal ingress and are not usable here — but membership is not
+therefore a web-application-only step: use
+[`circleci_group_membership`](./group_membership), which manages it through a
+different, private route family. Use
 [`circleci_project_group`](./project_group) to grant a group a role on a project.
 
 ~> **Groups cannot be updated in place** The API has no update endpoint, so

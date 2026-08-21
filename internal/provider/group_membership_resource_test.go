@@ -184,10 +184,12 @@ func (m *mockMembershipAPI) list(w http.ResponseWriter, groupID string) {
 		})
 	}
 
+	// No "count" field: [NET] confirms the real route answers only
+	// {"items": [...]}, for both an empty and a populated group. See
+	// groupMembersResponse in internal/circleci/group_membership.go.
 	m.write(w, http.StatusOK, struct {
 		Items []member `json:"items"`
-		Count int      `json:"count"`
-	}{Items: items, Count: len(items)})
+	}{Items: items})
 }
 
 func (m *mockMembershipAPI) mutate(w http.ResponseWriter, r *http.Request, groupID, action string) {
