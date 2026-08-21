@@ -21,7 +21,7 @@ This exists alongside the `circleci_runner_token` managed resource rather than r
 | **Organization type** | Any. |
 | **Token** | A personal API token with admin permission on the resource class's namespace. |
 
-> **Best-effort deletion.** The underlying runner admin API client returns untyped errors, so a delete failure because the token was already gone cannot be told apart from a genuine failure. `Close` still calls delete and, if it errors, raises a warning naming the token id rather than silently leaving a possibly-live credential unaccounted for — check that id and delete it by hand if the warning appears.
+> **Best-effort deletion.** A delete that fails because the token is already gone is treated as success, not a warning. Any other failure raises a warning naming the token id rather than failing the apply that opened it — that failure is not retried, so check whether the token still exists and delete it by hand if the warning appears.
 
 ## Example Usage
 
