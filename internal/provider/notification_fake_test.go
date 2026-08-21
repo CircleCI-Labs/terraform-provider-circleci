@@ -210,7 +210,8 @@ func (a *notificationFakeAPI) channelConfigEntity(cc *notificationFakeChannelCon
 	// belief -- it let TestAccNotificationChannelConfigResource_ProjectSlack
 	// and the user-scope tests pass while hiding the one combination that
 	// actually drops it.
-	if !(cc.Scope == "project" && cc.ChannelType == "email") {
+	targetIsNeverEchoed := cc.Scope == "project" && cc.ChannelType == "email"
+	if !targetIsNeverEchoed {
 		attrs["target"] = cc.Target
 	}
 	if cc.ChannelName != "" {
