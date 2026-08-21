@@ -6,6 +6,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"testing"
 
@@ -13,12 +14,14 @@ import (
 )
 
 // TestAccRunnerResourceClassResource_SendsOrganizationID is a regression test.
-// organization_id is Required on circleci_runner_resource_class, but the resource
-// used to drop it on the floor: Create built a CreateResourceClassRequest without
-// OrganizationID (so the org_id field went out empty) and Read passed "" as the
-// org filter to ListResourceClasses. Practitioners therefore had to supply a value
-// that never reached the API. Assert on the requests the API actually receives,
-// not on resulting state, since state looked correct either way.
+// circleci_runner_resource_class requires exactly one of organization_id/org_id
+// in configuration (see orgIDConfigValidator), but the resource used to drop
+// the value on the floor once it had it: Create built a ResourceClassInput
+// without OrganizationID (so the org_id field went out empty) and Read passed
+// "" as the org filter to ListResourceClasses. Practitioners therefore had to
+// supply a value that never reached the API. Assert on the requests the API
+// actually receives, not on resulting state, since state looked correct either
+// way.
 func TestAccRunnerResourceClassResource_SendsOrganizationID(t *testing.T) {
 	const (
 		organizationID  = "00000000-1111-2222-3333-444444444444"
@@ -105,4 +108,43 @@ resource "circleci_runner_resource_class" "test" {
 	if requests := api.allRequests(); len(requests) != 0 {
 		t.Errorf("expected no requests to reach the runner API, got %v", requests)
 	}
+}
+
+// TestAccRunnerResourceClassResource_MissingNamespaceSurfacesDiagnostic pins
+// the wire shape confirmed live against the real runner API [NET]: a
+// resource_class whose namespace half was never claimed (or is owned by
+// someone else) answers HTTP 404 with a bare `{"message": "..."}` body —
+// not the v3 `{"error": {...}}` envelope, and not the HTTP 400 "resource
+// class not valid" a malformed name gets. See CreateResourceClass's doc
+// comment in internal/circleci/runner.go for the exact response captured
+// against the service.
+//
+// This asserts the provider surfaces that message to the practitioner rather
+// than swallowing it or reporting a generic failure: circleci.Detail has no
+// namespace-specific branch, so this is really a test of the v1/v2
+// bare-message fallback in Detail, exercised through this resource's Create.
+func TestAccRunnerResourceClassResource_MissingNamespaceSurfacesDiagnostic(t *testing.T) {
+	api := newRunnerFakeAPI(t)
+	api.respondStatus("POST", "/api/v3/runner/resource", http.StatusNotFound,
+		`{"message":"not found with provided token: check permissions to view or admin self-hosted runners"}`)
+
+	config := runnerProviderConfig(api.URL()) + `
+resource "circleci_runner_resource_class" "test" {
+  org_id         = "00000000-1111-2222-3333-444444444444"
+  resource_class = "unclaimed-ns/acc-rc"
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: config,
+			// (?s) and \s+ in place of literal spaces: Terraform's diagnostic
+			// renderer word-wraps the message, so the exact whitespace between
+			// words is not stable to match on.
+			ExpectError: regexp.MustCompile(
+				`(?s)not found with provided token:\s+check permissions to view or admin\s+self-hosted\s+runners`,
+			),
+		}},
+	})
 }
