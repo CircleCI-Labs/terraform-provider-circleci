@@ -43,7 +43,10 @@ request did not use the JSON keys the webhook API's request side reads. Those ke
 are `signing-secret` and `verify-tls`, hyphenated; responses report the same two
 fields as `signing_secret` and `verify_tls`, snake_case. The API silently ignores
 keys it does not recognise, so `terraform apply` reported success while sending
-neither field, and TLS verification quietly took the server-side default.
+neither field, and TLS verification quietly took the server-side default — which is
+`false`. Measured: a create whose request omits the hyphenated `verify-tls` comes back
+reporting `"verify_tls": false`, so on affected webhooks TLS verification was not
+merely unset, it was off.
 
 Note this was fixed properly only after v0.6.0: v0.5.0 and v0.6.0 sent the
 snake_case spellings, which the request side ignores just as thoroughly, so the
