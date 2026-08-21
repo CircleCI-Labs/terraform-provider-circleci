@@ -6,7 +6,9 @@ package provider
 import (
 	"crypto/rand"
 	"fmt"
+	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -17,7 +19,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 func TestAccOrganizationCircleCiResource(t *testing.T) {
@@ -140,6 +145,64 @@ func TestOrganizationResourceVCSTypeIsGatedAtPlanTime(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAccOrganizationGithubOAuthAdoptDoesNotDeleteRealOrg is the real-network
+// sibling of the fake-backed TestAccOrganizationDestroyDoesNotDeleteAdoptedOrg
+// in organization_destroy_test.go, run against an actual GitHub OAuth-backed
+// organization rather than a stand-in server.
+//
+// It proves two things end to end, against the real API: Create against an
+// already-existing classic organization is a genuine adopt (POST
+// /api/v2/organization is find-or-create, so this never creates anything new
+// on the VCS side), and `terraform destroy` on that adopted resource releases
+// it from state without ever issuing DELETE — verified below by re-fetching
+// the organization straight from the API after the test's own destroy step
+// and confirming it still answers 200, not 404.
+func TestAccOrganizationGithubOAuthAdoptDoesNotDeleteRealOrg(t *testing.T) {
+	organizationID := testGithubOrgID(t)
+	organizationSlug := testGithubOrgSlug(t)
+	organizationName := strings.TrimPrefix(organizationSlug, "gh/")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccOrganizationResourceConfig(organizationName, "github"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_organization.test_organization",
+						tfjsonpath.New("id"),
+						knownvalue.StringExact(organizationID),
+					),
+					statecheck.ExpectKnownValue(
+						"circleci_organization.test_organization",
+						tfjsonpath.New("slug"),
+						knownvalue.StringExact(organizationSlug),
+					),
+				},
+			},
+			// An empty config destroys the resource. Because this organization is
+			// adopted rather than created, that destroy must release it from state
+			// rather than call DELETE — verified in the check below, after
+			// resource.Test's own destroy step has already run.
+			{Config: `provider "circleci" {}`},
+		},
+		CheckDestroy: func(*terraform.State) error {
+			client := circleci.New(circleci.Config{Token: os.Getenv("CIRCLE_TOKEN")})
+
+			if _, err := client.GetOrganization(t.Context(), organizationID); err != nil {
+				return fmt.Errorf(
+					"the adopted organization %s could no longer be read after destroy (%v); "+
+						"destroy must release an adopted organization from state, never delete it",
+					organizationID, err,
+				)
+			}
+
+			return nil
+		},
+	})
 }
 
 func testAccOrganizationResourceConfig(name, vcs_type string) string {

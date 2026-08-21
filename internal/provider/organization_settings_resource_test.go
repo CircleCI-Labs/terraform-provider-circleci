@@ -13,8 +13,14 @@ import (
 	"sync"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	sdkresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // orgSettingsToggleNames is every toggle the API serves, used to build a
@@ -46,6 +52,7 @@ type fakeOrgSettingsAPI struct {
 	values  map[string]bool
 	updates []map[string]any
 	paths   []string
+	missing bool
 }
 
 func newFakeOrgSettingsAPI(t *testing.T) (*httptest.Server, *fakeOrgSettingsAPI) {
@@ -61,6 +68,22 @@ func newFakeOrgSettingsAPI(t *testing.T) (*httptest.Server, *fakeOrgSettingsAPI)
 		defer api.mu.Unlock()
 
 		api.paths = append(api.paths, r.Method+" "+r.URL.Path)
+
+		if api.missing {
+			// [NET, reproduced against the live API on 2026-08-21] GET
+			// .../settings for an organization id the service cannot resolve
+			// answers 404 with exactly this v3 envelope — the same "Org not
+			// found." wording GetOrganization documents as anti-enumeration
+			// (organization.go), answered identically whether the organization
+			// was actually deleted or the caller simply cannot view it.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{"type": "404", "title": "Org not found."},
+			})
+
+			return
+		}
 
 		if strings.HasSuffix(r.URL.Path, "/update-settings") {
 			var body map[string]any
@@ -117,6 +140,16 @@ func (a *fakeOrgSettingsAPI) recordedPaths() []string {
 	defer a.mu.Unlock()
 
 	return append([]string(nil), a.paths...)
+}
+
+// setMissing switches the fake to answer every request with the organization
+// route's "Org not found." 404, the same response the real service gives
+// whether the organization was deleted or the caller can no longer view it.
+func (a *fakeOrgSettingsAPI) setMissing(missing bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.missing = missing
 }
 
 // testOrgSettingsOrgID is the organization the fake API answers for. The fake
@@ -399,5 +432,92 @@ data "circleci_organization_settings" "t" {
 		if got != want {
 			t.Errorf("request = %q, want %q: a data source must never write", got, want)
 		}
+	}
+}
+
+// organizationSettingsSchema builds the resource's schema for direct-method
+// tests, the same technique storage_retention_resource_test.go uses.
+func organizationSettingsSchema(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	NewOrganizationSettingsResource().Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Schema method diagnostics: %+v", resp.Diagnostics)
+	}
+
+	return resp.Schema
+}
+
+func organizationSettingsState(
+	t *testing.T, schema rschema.Schema, model organizationSettingsResourceModel,
+) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// TestOrganizationSettingsResourceUnit_ReadNotFoundWarnsBeforeDroppingState is
+// the regression test for a gap found while auditing the organization family:
+// GetOrganization's own 404 ("Org not found.") is documented as
+// anti-enumeration — the API answers it identically whether the organization
+// was actually deleted or the caller can simply no longer view it (see
+// internal/circleci/organization.go). circleci_organization's own Read
+// already surfaces a warning before calling RemoveResource so a practitioner
+// has a chance to notice a permission problem rather than a real deletion.
+//
+// circleci_organization_settings's Read used to call RemoveResource on that
+// same 404 with no diagnostic at all: the resource would vanish from state
+// with total silence. For circleci_organization (a real create/destroy
+// resource, vcs_type "circleci") that silent drop is dangerous beyond a
+// missed notice — the next apply issues a genuine POST /api/v2/organization
+// and creates a *second*, distinct standalone organization with the same
+// name, since standalone create is not idempotent on name. This resource
+// cannot itself create a duplicate organization, but the missing diagnostic
+// is the same class of gap, and every other Read in this family already
+// warns, so a token that merely lost view access on the organization now
+// gets exactly the silent, no-explanation vanish this project has already
+// paid for once (see group_resource.go's 403-vs-404 handling for the general
+// pattern, and organization_resource.go's Read for the sibling that already
+// does this right).
+func TestOrganizationSettingsResourceUnit_ReadNotFoundWarnsBeforeDroppingState(t *testing.T) {
+	srv, api := newFakeOrgSettingsAPI(t)
+	api.setMissing(true)
+
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "fake"})
+	schema := organizationSettingsSchema(t)
+	r := &organizationSettingsResource{client: client}
+
+	prior := organizationSettingsResourceModel{
+		OrganizationID:    types.StringValue(testOrgSettingsOrgID),
+		OrgID:             types.StringValue(testOrgSettingsOrgID),
+		EnablePrivateOrbs: types.BoolValue(true),
+		EnableAIAgents:    types.BoolNull(),
+	}
+
+	resp := &fwresource.ReadResponse{State: organizationSettingsState(t, schema, prior)}
+	r.Read(t.Context(), fwresource.ReadRequest{
+		State: organizationSettingsState(t, schema, prior),
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read diagnostics: %+v", resp.Diagnostics)
+	}
+
+	if !resp.State.Raw.IsNull() {
+		t.Fatalf("Read did not remove the resource from state on a 404")
+	}
+
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Errorf("Read dropped circleci_organization_settings from state on a 404 with no warning at all. " +
+			"The same 404 covers both \"deleted\" and \"caller can no longer view the organization\" " +
+			"(see GetOrganization's doc comment): a practitioner deserves a warning naming that " +
+			"ambiguity, the same as circleci_organization's own Read already gives, not a silent vanish.")
 	}
 }

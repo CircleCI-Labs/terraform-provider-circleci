@@ -14,12 +14,18 @@ import (
 	"sync"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	sdkresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // fakeOrgContactsAPI is a stateful stand-in for GET/PUT
@@ -40,6 +46,7 @@ type fakeOrgContactsAPI struct {
 	security []string
 	paths    []string
 	puts     []map[string]any
+	missing  bool
 }
 
 func newFakeOrgContactsAPI(t *testing.T) (*httptest.Server, *fakeOrgContactsAPI) {
@@ -52,6 +59,21 @@ func newFakeOrgContactsAPI(t *testing.T) (*httptest.Server, *fakeOrgContactsAPI)
 		defer api.mu.Unlock()
 
 		api.paths = append(api.paths, r.Method+" "+r.URL.Path)
+
+		if api.missing {
+			// [NET, reproduced against the live API on 2026-08-21] GET
+			// .../contacts for an organization the caller cannot see (or that
+			// does not exist) answers 404 with exactly this message — its own
+			// wording already names the ambiguity that GetOrganization's "Org
+			// not found." (organization.go) only documents.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"message": "Organization not found, or user does not have access.",
+			})
+
+			return
+		}
 
 		if r.Method == http.MethodPut {
 			var body struct {
@@ -123,6 +145,16 @@ func (a *fakeOrgContactsAPI) recordedPaths() []string {
 	defer a.mu.Unlock()
 
 	return append([]string(nil), a.paths...)
+}
+
+// setMissing switches the fake to answer every request with the 404 the real
+// contacts route gives whether the organization was deleted or the caller can
+// no longer view it.
+func (a *fakeOrgContactsAPI) setMissing(missing bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.missing = missing
 }
 
 // testOrgContactsOrgID is the organization the fake API answers for. The fake
@@ -463,4 +495,92 @@ func equalStrings(a, b []string) bool {
 	}
 
 	return true
+}
+
+// organizationContactsSchema builds the resource's schema for direct-method
+// tests, the same technique storage_retention_resource_test.go uses.
+func organizationContactsSchema(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	NewOrganizationContactsResource().Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Schema method diagnostics: %+v", resp.Diagnostics)
+	}
+
+	return resp.Schema
+}
+
+func organizationContactsState(
+	t *testing.T, schema rschema.Schema, orgID string, primary, security []string,
+) tfsdk.State {
+	t.Helper()
+
+	ctx := t.Context()
+
+	primarySet, diags := types.SetValueFrom(ctx, types.StringType, primary)
+	if diags.HasError() {
+		t.Fatalf("building primary set: %+v", diags)
+	}
+	securitySet, diags := types.SetValueFrom(ctx, types.StringType, security)
+	if diags.HasError() {
+		t.Fatalf("building security set: %+v", diags)
+	}
+
+	model := organizationContactsResourceModel{
+		OrgID:    types.StringValue(orgID),
+		Primary:  primarySet,
+		Security: securitySet,
+	}
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(ctx, model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// TestOrganizationContactsResourceUnit_ReadNotFoundWarnsBeforeDroppingState is
+// the sibling regression test to
+// TestOrganizationSettingsResourceUnit_ReadNotFoundWarnsBeforeDroppingState:
+// GetOrganization's 404 ("Org not found.") is the API's documented
+// anti-enumeration response, answered identically whether the organization
+// was deleted or the caller can simply no longer view it (see
+// internal/circleci/organization.go). circleci_organization_contacts's Read
+// used to call RemoveResource on that 404 with no diagnostic at all, so a
+// token that merely lost view access on the organization would see this
+// resource vanish from state with no explanation — exactly the silent drop
+// circleci_organization's own Read (and group_resource.go's 403/404
+// handling) already knows to warn about instead.
+func TestOrganizationContactsResourceUnit_ReadNotFoundWarnsBeforeDroppingState(t *testing.T) {
+	srv, api := newFakeOrgContactsAPI(t)
+	api.setMissing(true)
+
+	client := circleci.New(circleci.Config{Host: srv.URL, Token: "fake"})
+	schema := organizationContactsSchema(t)
+	r := &organizationContactsResource{client: client}
+
+	resp := &fwresource.ReadResponse{
+		State: organizationContactsState(t, schema, testOrgContactsOrgID, []string{"a@example.com"}, nil),
+	}
+	r.Read(t.Context(), fwresource.ReadRequest{
+		State: organizationContactsState(t, schema, testOrgContactsOrgID, []string{"a@example.com"}, nil),
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read diagnostics: %+v", resp.Diagnostics)
+	}
+
+	if !resp.State.Raw.IsNull() {
+		t.Fatalf("Read did not remove the resource from state on a 404")
+	}
+
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Errorf("Read dropped circleci_organization_contacts from state on a 404 with no warning at all. " +
+			"The same 404 covers both \"deleted\" and \"caller can no longer view the organization\" " +
+			"(see GetOrganization's doc comment): a practitioner deserves a warning naming that " +
+			"ambiguity, the same as circleci_organization's own Read already gives, not a silent vanish.")
+	}
 }
