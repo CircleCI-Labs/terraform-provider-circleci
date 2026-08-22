@@ -117,7 +117,7 @@ Note this is two segments, unlike a project slug's three. The `circleci_user_col
 
 - `all_projects` (List of String) Names of every project in the organization the configured token can see. This is what to read to discover the values to pass in `project_names`.
 - `metrics` (Attributes) Aggregated metrics for the whole organization over the window. (see [below for nested schema](#nestedatt--metrics))
-- `projects` (Attributes List) Per-project metrics, one entry per name in `project_names` that the API recognised. Empty when `project_names` is not set. (see [below for nested schema](#nestedatt--projects))
+- `projects` (Attributes List) Per-project metrics, one entry per name in `project_names` that the API recognised. Empty when `project_names` is not set. A name the API does recognise but that has no runs in the window is also absent here (confirmed against the live API), not present with zero-valued metrics — so a missing entry does not by itself mean the name was misspelled; check `all_projects` to tell a typo apart from a project that simply has not run anything yet. (see [below for nested schema](#nestedatt--projects))
 - `trends` (Attributes) Change in each organization-wide metric against the preceding window of the same length. (see [below for nested schema](#nestedatt--trends))
 
 <a id="nestedatt--metrics"></a>

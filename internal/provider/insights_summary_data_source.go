@@ -173,7 +173,11 @@ func (d *insightsSummaryDataSource) Schema(_ context.Context, _ datasource.Schem
 			),
 			"projects": schema.ListNestedAttribute{
 				MarkdownDescription: "Per-project metrics, one entry per name in `project_names` that the API " +
-					"recognised. Empty when `project_names` is not set.",
+					"recognised. Empty when `project_names` is not set. A name the API does recognise but that " +
+					"has no runs in the window is also absent here (confirmed against the live API), not " +
+					"present with zero-valued metrics — so a missing entry does not by itself mean the name " +
+					"was misspelled; check `all_projects` to tell a typo apart from a project that simply has " +
+					"not run anything yet.",
 				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{

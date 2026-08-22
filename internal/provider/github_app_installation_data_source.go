@@ -56,10 +56,12 @@ func (d *githubAppInstallationDataSource) Schema(_ context.Context, _ datasource
 		MarkdownDescription: "Reports the CircleCI GitHub App installation for an organization: whether it is " +
 			"installed at all, and if so, which GitHub account it is attached to and how much of it the " +
 			"installation can reach.\n\n" +
-			"This is the precondition for `circleci_github_app_repository` and " +
-			"`circleci_github_app_repositories`: both of those answer with an empty result whether the app " +
-			"is not installed at all, or is installed but was not granted the repository asked for, and this " +
-			"data source is the only way to tell those two situations apart.\n\n" +
+			"Both `circleci_github_app_repository` and `circleci_github_app_repositories` already error " +
+			"distinctly when no installation exists at all (their error names \"no GitHub App " +
+			"installation\" rather than \"repository not found\"), so this data source is not required to " +
+			"tell that case apart from an installation that was simply not granted the repository asked " +
+			"for — but it is the more direct way to check, and the only way to see the installation's own " +
+			"attributes (`login`, `repository_selection`) at all.\n\n" +
 			"There is deliberately no matching resource. A GitHub App installation is created through a " +
 			"browser consent flow on GitHub's side of the integration, not through this API — CircleCI's own " +
 			"install route only hands back a redirect URL for a human to open.\n\n" +

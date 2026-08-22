@@ -83,6 +83,12 @@ type mockDiscoveryAPI struct {
 	// exercised.
 	repositories       []string
 	repositoryPageSize int
+	// repositoriesNotInstalled makes the repositories route answer 404
+	// "Organization not found." instead of a page — [NET, reproduced against
+	// the live API on 2026-08-21] what an organization with no GitHub App
+	// installation at all actually gets back from this route, as opposed to
+	// repositories == nil below, which is an installation granted nothing.
+	repositoriesNotInstalled bool
 
 	// userForbidden makes /me answer 403, as it does for a non-user token.
 	userForbidden bool
@@ -161,7 +167,15 @@ func (m *mockDiscoveryAPI) serveRepositories(w http.ResponseWriter, r *http.Requ
 	m.mu.Lock()
 	all := append([]string(nil), m.repositories...)
 	pageSize := m.repositoryPageSize
+	notInstalled := m.repositoriesNotInstalled
 	m.mu.Unlock()
+
+	if notInstalled {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Organization not found."}`))
+
+		return
+	}
 
 	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
 	if err != nil || limit <= 0 {

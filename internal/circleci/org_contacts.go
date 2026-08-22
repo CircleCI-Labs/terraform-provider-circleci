@@ -35,7 +35,13 @@ const organizationContactsRoute = "/api/private/organization/%s/contacts"
 // circleci_webhook's `events` for the same lesson learned the hard way.
 //
 // Each list may hold at most 5 addresses; the service rejects a write that
-// would exceed that with an error (observed as HTTP 422, "too many contacts").
+// would exceed that with an error. [NET, reproduced against the live API on
+// 2026-08-21]: that error is HTTP 400 with {"message": "Invalid parameter."} —
+// not the HTTP 422 "too many contacts" earlier revisions of this comment
+// claimed (a belief inherited from the org-migration CLI's own test coverage,
+// never checked against this service directly). The limit itself is per list:
+// 5 in primary and 5 in security (10 total) round-trips fine; 6 in either list
+// alone is what triggers the 400.
 type OrganizationContacts struct {
 	Primary  []string `json:"primary"`
 	Security []string `json:"security"`
@@ -65,6 +71,17 @@ func (c *Client) GetOrganizationContacts(ctx context.Context, orgID string) (*Or
 // nil slice as JSON null and an empty slice as [], and only the latter is known
 // to be what the service expects for "no contacts of this kind" — see
 // how the org-migration CLI gets and sets contacts.
+//
+// The returned value is the request echoed back, not decoded from the
+// response. [NET, reproduced against the live API on 2026-08-21]: a
+// successful PUT answers 200 with an empty JSON object, `{}` — not the updated
+// lists an earlier revision of this method assumed. Decoding that body into an
+// OrganizationContacts silently produced two empty lists on every write,
+// which the provider resource then wrote back into Terraform state in place
+// of what was just applied, guaranteeing a non-empty plan on the very next
+// run. A follow-up GET against the same organization confirmed the write
+// itself lands exactly as sent, so echoing the (normalized) input is both
+// correct and one request cheaper than re-reading to confirm it.
 func (c *Client) SetOrganizationContacts(ctx context.Context, orgID string, contacts OrganizationContacts) (*OrganizationContacts, error) {
 	if contacts.Primary == nil {
 		contacts.Primary = []string{}
@@ -74,14 +91,13 @@ func (c *Client) SetOrganizationContacts(ctx context.Context, orgID string, cont
 		contacts.Security = []string{}
 	}
 
-	var updated OrganizationContacts
-
-	err := c.call(
-		ctx, http.MethodPut, organizationContactsRoute, contacts, &updated, []RequestOption{RouteParams(orgID)},
-	)
+	// dst is nil: the response body carries nothing worth decoding (see above),
+	// so there is no destination to decode it into. c.call still validates the
+	// status code and surfaces an error body when the write is rejected.
+	err := c.call(ctx, http.MethodPut, organizationContactsRoute, contacts, nil, []RequestOption{RouteParams(orgID)})
 	if err != nil {
 		return nil, err
 	}
 
-	return &updated, nil
+	return &contacts, nil
 }

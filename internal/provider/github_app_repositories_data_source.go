@@ -142,6 +142,24 @@ func (d *githubAppRepositoriesDataSource) Read(ctx context.Context, req datasour
 
 	repositories, err := d.client.GitHubApp().ListRepositories(ctx, organizationID)
 	if err != nil {
+		// [NET, reproduced against the live API on 2026-08-21] an organization with
+		// no GitHub App installation at all — as opposed to one installed but
+		// granted nothing — does not answer 200 with an empty list here; the route
+		// answers 404 "Organization not found.", which reads exactly like a wrong
+		// organization id unless it is called out. See circleci.GitHubAppService.ListRepositories.
+		if circleci.IsNotFound(err) {
+			resp.Diagnostics.AddError(
+				"No GitHub App installation for organization "+organizationID,
+				"Listing GitHub App repositories answered \"not found\" for this organization, which "+
+					"means either the CircleCI GitHub App is not installed here, or the organization id "+
+					"is wrong. Check circleci_github_app_installation to tell those apart, or install the "+
+					"app from the organization's VCS integration settings in the CircleCI web app.\n\n"+
+					"Underlying error: "+circleci.Detail(err),
+			)
+
+			return
+		}
+
 		resp.Diagnostics.AddError(
 			"Unable to list GitHub App repositories for organization "+organizationID,
 			circleci.Detail(err),
@@ -151,9 +169,9 @@ func (d *githubAppRepositoriesDataSource) Read(ctx context.Context, req datasour
 	}
 
 	// An empty, non-null list keeps `for_each` and `length()` working against an
-	// organization with no GitHub App installation. Note that no installation and
-	// an installation granted nothing are indistinguishable here: the API answers
-	// 200 with an empty items array for both.
+	// installation that was granted no repositories. An organization with no
+	// installation at all does not reach this line: see the IsNotFound branch
+	// above.
 	state.Repositories = make([]githubAppRepositoryItemModel, 0, len(repositories))
 	for _, repository := range repositories {
 		state.Repositories = append(state.Repositories, githubAppRepositoryItemModel{

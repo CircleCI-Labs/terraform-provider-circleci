@@ -60,6 +60,16 @@ organization, and any standalone organization connected to GitLab rather than Gi
 provider additionally requires a `circleci` type organization, which is why CircleCI
 Server is a definite **no**.
 
+"Nothing to report" means an **error**, not an empty result — worth being precise about,
+because an earlier revision of this project believed the opposite. [NET, confirmed
+2026-08-21 against gh-app-cci-1 and gh-oauth-cci-2 (installed) and gh-oauth-cci-1 and
+gitlab-test (not installed)]: `GET .../github-app/organization/{id}/installation` and
+`GET .../github-app/organization/{id}/repositories` both answer 404 "Organization not
+found." for an organization with no installation, not 200 with an empty result. All three
+data sources report a named error ("No GitHub App installation for organization ...")
+rather than a confusing empty list or a bare "Organization not found" that reads like the
+configured id is wrong.
+
 ### Whether GitHub Enterprise Server reports as a GitHub App installation is unchecked
 
 A GitHub Enterprise Server connection is also a GitHub App connection under the covers,
@@ -98,10 +108,16 @@ adopted organization is released from state, and only a genuinely created one is
 Checkout keys are not available to projects that use the GitHub App, GitHub Enterprise
 Server, GitLab.com or GitLab self-managed — those integrations check out over HTTPS and
 need no keys. GitHub OAuth and Bitbucket Cloud projects can use them. There is a
-read/write asymmetry worth knowing: only `POST` carries the restriction, so a `GET` on
-GitLab succeeds and returns the auto-provisioned key — a `circleci_checkout_key` resource
-reads fine on an unsupported integration and fails only on create. `user-key` additionally
-requires a *user* API token rather than a project token.
+read/write asymmetry worth knowing: only `POST` carries the restriction, so a `GET` on a
+GitHub App or GitLab project succeeds too — a `circleci_checkout_key` resource reads fine
+on an unsupported integration and fails only on create. [NET, confirmed 2026-08-21 against
+a GitHub App project and a GitLab project, one of which had already run pipelines]: that
+successful `GET` returns an *empty* list, not an auto-provisioned key as an earlier
+revision of this note claimed — that claim was reasoned, not measured, and was wrong.
+`user-key` additionally requires a *user* API token rather than a project token — this
+half is still UNVALIDATED: a real project-scoped token could be minted for a test, but it
+could not authenticate against any v2 project route at all on this installation, not just
+checkout-key, so the 403 this claim describes was never actually reached.
 
 ### Bitbucket cannot restrict a context by group
 
