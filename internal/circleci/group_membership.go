@@ -40,10 +40,18 @@ const (
 // add-users and delete-users payloads take a "user_ids" array of UUIDs.
 // Username, Email, AvatarURL and CreatedAt are returned for display only and
 // cannot be used to address a member. CreatedAt is kept as the string the API
-// sends (an RFC 3339 timestamp with microsecond precision, e.g.
-// "2023-12-13T10:10:37.951356Z") rather than parsed, the same choice
-// checkout_key.go makes and for the same reason: nothing here needs to do
-// arithmetic on it, so parsing would only add a failure mode.
+// sends rather than parsed, the same choice checkout_key.go makes and for the
+// same reason: nothing here needs to do arithmetic on it, so parsing would
+// only add a failure mode.
+//
+// [NET, 2026-08-21] CreatedAt is not trustworthy as "when this user joined
+// the group": a member added moments earlier came back with
+// created_at "0001-01-01T00:00:00Z" (Go's zero time) alongside a real,
+// current updated_at. The response also carries creator_id and updater_id,
+// neither decoded here because nothing consumes them; updater_id was the
+// caller's own user id and creator_id was the all-zeros UUID. Whatever the
+// server populates *_at from, it is not "when this GroupMember row was
+// created" — treat CreatedAt as decorative, not as data.
 type GroupMember struct {
 	UserID    string `json:"user_id"`
 	Username  string `json:"username"`
@@ -55,12 +63,17 @@ type GroupMember struct {
 
 // groupMembersResponse mirrors GET .../groups/{groupID}/users. Unlike the
 // public route this replaced, there is no next_page_token in this response at
-// all — it carries only items and count — so there is no pagination trap to
-// guard against here: a single request is not a shortcut, it is the entire
-// contract.
+// all, so there is no pagination trap to guard against here: a single
+// request is not a shortcut, it is the entire contract.
+//
+// [NET, 2026-08-21] The response carries only "items". An earlier version of
+// this comment additionally claimed a "count" field; live requests against
+// both an empty group and a one-member group returned only {"items": [...]},
+// with no count key at all. There was no field here to decode it into anyway
+// (json.Unmarshal ignores unknown keys either direction), but the belief
+// itself was wrong and is corrected rather than repeated.
 type groupMembersResponse struct {
 	Items []GroupMember `json:"items"`
-	Count int           `json:"count"`
 }
 
 // groupMembersRequest is the body of both the add-users and the delete-users

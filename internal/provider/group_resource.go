@@ -212,17 +212,19 @@ func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 			return
 		}
 
-		// 403 "Permission denied." is a *different* condition from the 404 above,
-		// and both have to be handled.
-		//
-		// Re-checked against source: absence really is 404. The service behind this
-		// route resolves the group and maps "no such group" — including a group
-		// belonging to a different organization — to a not-found error, which the
-		// public API relays as 404. The 403 comes from earlier: the route sits
-		// behind an organization-level permission check that runs before the
-		// handler, so a token that cannot view the organization's access
-		// configuration, or an organization it cannot see at all, is refused
-		// without the group ever being looked up.
+		// [NET, 2026-08-21] The single-group GET route does not appear to use 404
+		// for absence at all: a group just deleted through this same token, a
+		// group id that never existed, and a wholly bogus organization id all came
+		// back 403 "Permission denied.", indistinguishable from one another and
+		// from a genuine permission problem, even though the token demonstrably
+		// had full access to the organization (it had just created and deleted a
+		// group there). An earlier version of this comment claimed the opposite —
+		// that absence was "re-checked against source" and confirmed to be 404,
+		// with 403 reserved for an organization-level check that runs before the
+		// group is looked up. That claim did not survive a live retest and is
+		// removed rather than repeated; the 404 branch above is kept only in case
+		// some other path or deployment answers it, not because absence is known
+		// to produce it here.
 		//
 		// So a 403 says nothing about whether the group still exists, which is
 		// exactly why it must not drop state: a token that loses permission would
@@ -300,14 +302,14 @@ func (r *groupResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if err != nil {
 		// Already gone is the desired end state, so a 404 is a success.
 		//
-		// 403 is tolerated too, but for a weaker reason than Read's comment used to
-		// claim: a deleted group answers 404, and the 403 comes from the
-		// organization-level permission check in front of the route. Treating it as
-		// success here is still right — the alternative is a destroy that can never
-		// complete, stranding the resource in state — and unlike Read this direction
-		// is safe, because failing to delete something that may still exist is
-		// visible the next time anything reads it, whereas silently dropping state
-		// on Read would quietly recreate a live group.
+		// 403 is tolerated too. [NET, 2026-08-21]: deleting an already-deleted group
+		// answers 403 "Permission denied.", the same as GET on a missing group (see
+		// Read's comment above) — not 404. Treating it as success here is still
+		// right regardless of which code shows up — the alternative is a destroy
+		// that can never complete, stranding the resource in state — and unlike
+		// Read this direction is safe, because failing to delete something that may
+		// still exist is visible the next time anything reads it, whereas silently
+		// dropping state on Read would quietly recreate a live group.
 		if circleci.IsNotFound(err) || circleci.IsUnauthorized(err) {
 			return
 		}

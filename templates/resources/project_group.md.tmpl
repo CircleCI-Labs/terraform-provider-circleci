@@ -35,6 +35,13 @@ CircleCI Cloud only.
 may change without notice. It is not documented publicly, so treat it as less
 stable than the rest of the provider.
 
+-> **On a `github` or `bitbucket` organization, this is a clean 400, not a
+routing failure.** Unlike the Server case above, a `github`/`bitbucket`
+organization on CircleCI Cloud *does* reach this route; it answers
+`400 Endpoint is not supported for this organization.` on the list call this
+resource depends on for every read. The error surfaces as a normal Terraform
+diagnostic rather than a transport error.
+
 ## Destroy does not revoke access
 
 !> **A group cannot be removed from a project by Terraform.** The API routes a

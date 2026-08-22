@@ -67,6 +67,8 @@ func TestGroupMembershipServiceList(t *testing.T) {
 
 	client, seen := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// No "count" field: a real GET here answers only {"items": [...]}, see
+		// group_membership.go.
 		_, _ = w.Write([]byte(`{"items":[{
 			"user_id":"` + testMemberUserID + `",
 			"username":"api-infra",
@@ -74,7 +76,7 @@ func TestGroupMembershipServiceList(t *testing.T) {
 			"email":"api@example.com",
 			"group_id":"` + testMembershipGroupID + `",
 			"created_at":"2023-12-13T10:10:37.951356Z"
-		}],"count":1}`))
+		}]}`))
 	})
 
 	members, err := client.GroupMembership().List(context.Background(), testMembershipOrgID, testMembershipGroupID)
@@ -119,7 +121,7 @@ func TestGroupMembershipServiceListEmpty(t *testing.T) {
 
 	client, _ := newMembershipServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"items":[],"count":0}`))
+		_, _ = w.Write([]byte(`{"items":[]}`))
 	})
 
 	members, err := client.GroupMembership().List(context.Background(), testMembershipOrgID, testMembershipGroupID)

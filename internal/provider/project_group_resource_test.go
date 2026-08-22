@@ -89,10 +89,17 @@ func (m *mockProjectGroupAPI) revoke(projectID, groupID string) {
 	delete(m.grants[projectID], groupID)
 }
 
-// setMissingProject makes every request answer 404 "Project not found",
+// setMissingProject makes every request answer 403 "Permission denied.",
 // standing in for an organization or project the token has lost access to --
 // as distinct from revoke, which removes one grant from an otherwise healthy
 // list.
+//
+// [NET, 2026-08-21] This is 403, not 404: a live request against a real
+// standalone organization with a bogus project id, and separately with both a
+// bogus organization and project id, both answered 403 "Permission denied."
+// on the list route, never 404. An earlier version of this fake answered 404
+// here, matching an equally-wrong belief in project_group_resource.go's Read
+// method; both are corrected together.
 func (m *mockProjectGroupAPI) setMissingProject(missing bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -152,7 +159,7 @@ func (m *mockProjectGroupAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	projectID := parts[5]
 
 	if m.missingProject {
-		m.write(w, http.StatusNotFound, map[string]string{"message": "Project not found"})
+		m.write(w, http.StatusForbidden, map[string]string{"message": "Permission denied."})
 
 		return
 	}
@@ -633,7 +640,7 @@ func TestAccProjectGroupResource_revokedGrantLeavesState(t *testing.T) {
 // TestAccProjectGroupResource_revokedGrantLeavesState: a grant genuinely
 // revoked in the web UI is read back as an empty list, but a token that has
 // lost access to the organization or project fails the list call itself, with
-// the same 404 the real API returns for a missing organization or project (see
+// the same 403 the real API returns for a missing organization or project (see
 // mockProjectGroupAPI.missingProject). Read must tell the two apart --
 // otherwise a permissions problem looks like a deletion, and the next apply
 // calls Assign again instead of reporting the actual problem.
@@ -650,8 +657,9 @@ func TestAccProjectGroupResource_lostAccessKeepsState(t *testing.T) {
 				PreConfig:    func() { api.setMissingProject(true) },
 				RefreshState: true,
 				// The diagnostic is line-wrapped by Terraform, so match a short phrase:
-				// this is the branch that reports the 404 rather than dropping state.
-				ExpectError: regexp.MustCompile(`(?s)404 while listing`),
+				// this is the branch that reports the error rather than dropping state.
+				// [NET] the real status here is 403, not 404 -- see setMissingProject.
+				ExpectError: regexp.MustCompile(`(?s)HTTP 403 while listing`),
 			},
 			// Undo the failure so the framework's own destroy step can run.
 			{

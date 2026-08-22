@@ -20,9 +20,11 @@ Fetches information about a single CircleCI group by id. Use
 | **Organization type** | `circleci` (standalone) only. `github` and `bitbucket` organizations cannot use groups even on CircleCI Cloud. |
 | **Token** | A personal API token with read access to the organization. |
 
--> **Members cannot be read through this provider** This data source reports
-the group itself, not its members: the membership routes exist but answer 404
-outside a separate internal ingress the public API does not expose.
+-> **Members are a separate data source** This data source reports the group
+itself, not its members. The equivalent public-looking route
+(`.../groups/{group_id}/users`) answers 404 outside a separate internal
+ingress; use [`circleci_group_membership`](group_membership) instead, which
+reads membership through a different, private route family.
 
 ## Example Usage
 
