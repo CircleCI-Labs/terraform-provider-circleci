@@ -85,6 +85,56 @@ func TestContextResourceUnit_CRUD(t *testing.T) {
 	}
 }
 
+// TestContextResourceUnit_CreateSeedsDefaultGroupRestriction guards against the
+// inverted belief that a freshly created context has an empty restrictions
+// list. [NET, measured on 2026-08-21]: creating a context always creates a
+// `group` restriction named "All members" whose value is the organization's
+// own id — the permissive default, meaning every organization member may use
+// the context. An empty list is reachable only by deleting that default, and
+// per CircleCI's documentation it then means the context is usable by
+// organization administrators only, not by everyone. If this test starts
+// failing because the fake (or the real API) again reports zero restrictions
+// right after creation, that is the wrong belief coming back, not a fake bug
+// to paper over.
+func TestContextResourceUnit_CreateSeedsDefaultGroupRestriction(t *testing.T) {
+	_, host := newContextFakeAPI(t)
+
+	config := contextResourceUnitConfig(host, contextUnitOrgID) + `
+data "circleci_context" "readback" {
+  id = circleci_context.test.id
+}
+`
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"data.circleci_context.readback", tfjsonpath.New("restrictions"), knownvalue.ListSizeExact(1),
+					),
+					statecheck.ExpectKnownValue(
+						"data.circleci_context.readback",
+						tfjsonpath.New("restrictions").AtSliceIndex(0).AtMapKey("type"),
+						knownvalue.StringExact("group"),
+					),
+					statecheck.ExpectKnownValue(
+						"data.circleci_context.readback",
+						tfjsonpath.New("restrictions").AtSliceIndex(0).AtMapKey("name"),
+						knownvalue.StringExact("All members"),
+					),
+					statecheck.ExpectKnownValue(
+						"data.circleci_context.readback",
+						tfjsonpath.New("restrictions").AtSliceIndex(0).AtMapKey("value"),
+						knownvalue.StringExact(contextUnitOrgID),
+					),
+				},
+			},
+		},
+	})
+}
+
 func TestContextResourceUnit_Import(t *testing.T) {
 	_, host := newContextFakeAPI(t)
 

@@ -214,7 +214,7 @@ func (r *organizationSettingsResource) Schema(_ context.Context, _ resource.Sche
 				"Treat every member of the linked Bitbucket workspace as a member of this CircleCI organization.",
 			),
 			"is_context_group_restriction_required": toggle(
-				"Require every context in this organization to carry at least one group restriction. Enabling this makes unrestricted contexts unusable, so contexts managed with `circleci_context_restriction` must have their restrictions in place first.",
+				"Require every context in this organization to carry at least one group restriction. A context starts with a permissive default `group` restriction (\"All members\"), so this mainly forecloses removing every `group` restriction — which, per CircleCI's documentation, otherwise locks the context down to organization administrators only.",
 			),
 			"is_runner_terms_of_service_accepted": toggle(
 				"Record acceptance of the CircleCI self-hosted runner terms of service. Runner onboarding is gated on this: `circleci_runner_resource_class` and `circleci_runner_token` cannot be used for this organization until it is `true`.",

@@ -22,16 +22,31 @@ conditions may use a context. Manage one with
 | **Organization type** | Any. |
 | **Token** | Any valid API token with read access to the context's organization. |
 
--> **An empty list is a meaningful answer** An unrestricted context is usable by
-every project in the organization. `restrictions` is empty in that case rather
-than null, so `length(...) == 0` is the check for "unrestricted".
+-> **An empty list is the most restricted answer, not the least.** [NET,
+measured on 2026-08-21] a context created through the API or the UI starts
+with exactly one restriction, a `group` restriction named "All members" whose
+`value` equals the organization's own UUID — the permissive default meaning
+every organization member may use the context. `restrictions` reads back
+empty only once every group grant has been removed, which per CircleCI's
+documentation leaves the context usable by organization administrators only.
+Do not use `length(...) == 0` as a check for "unrestricted"; see the notes
+below for the check to use instead.
 
 ## Example Usage
 
 ```terraform
-# Lists every restriction on a context. An empty list means the context is
-# unrestricted, so every project in the organization can use it.
-# Available on both CircleCI Cloud and CircleCI Server.
+# Lists every restriction on a context. An empty list is the MOST restricted
+# state, not the least: it means every group grant has been removed, which
+# per CircleCI's documentation leaves the context usable by organization
+# administrators only. A freshly created context instead carries one `group`
+# restriction named "All members" on every context as part of
+# creating it (see the circleci_context_restriction resource description) —
+# the permissive default meaning every organization member may use the
+# context. That is a members restriction ("which org members may use this
+# context"), not a projects restriction — check for a `project` entry
+# specifically (see the check block below) when the goal is confirming which
+# projects may use the context. Available on both CircleCI Cloud and CircleCI
+# Server.
 data "circleci_context_restrictions" "deploy" {
   context_id = "00000000-0000-0000-0000-000000000000"
 }
@@ -45,11 +60,35 @@ output "circleci_permitted_project_ids" {
   ]
 }
 
-# Fail the plan if a context that should be locked down is not.
+# Fail the plan if the context has been accidentally locked down to
+# organization administrators only (every group grant removed), or if it is
+# not actually locked down to specific projects. Checking only
+# length(...) > 0 does not confirm a project lockdown: CircleCI creates a
+# `group` restriction named "All members" on every context as part of
+# creating it (see the circleci_context_restriction resource description), so
+# a context can carry exactly one restriction and still be usable by every
+# member of the organization — because "All members" governs which members
+# may use the context, not which projects. What actually confirms a project
+# lockdown is the presence of a `project` restriction.
+#
+# Do NOT delete "All members" to try to make a project restriction "take
+# effect": per CircleCI's documentation and support the two combine as an AND
+# already (any member, but only from the listed projects), and removing every
+# `group` restriction instead narrows the context to organization
+# administrators only, breaking scheduled workflows and bot-triggered
+# pipelines (e.g. Renovate), which hold no group membership.
 check "deploy_context_is_restricted" {
   assert {
     condition     = length(data.circleci_context_restrictions.deploy.restrictions) > 0
-    error_message = "The deploy context is unrestricted, so every project in the organization can use it."
+    error_message = "The deploy context's restrictions list is empty, meaning every group grant has been removed; per CircleCI's documentation the context is now usable by organization administrators only."
+  }
+
+  assert {
+    condition = length([
+      for restriction in data.circleci_context_restrictions.deploy.restrictions :
+      restriction if restriction.type == "project"
+    ]) > 0
+    error_message = "The deploy context has no `project` restriction, so it is not locked down to specific projects (the default \"All members\" `group` restriction governs membership, not projects, and does not provide this)."
   }
 }
 ```
@@ -63,7 +102,7 @@ check "deploy_context_is_restricted" {
 
 ### Read-Only
 
-- `restrictions` (Attributes List) The restrictions on the context, in the order the API returns them. Empty when the context is unrestricted. (see [below for nested schema](#nestedatt--restrictions))
+- `restrictions` (Attributes List) The restrictions on the context, in the order the API returns them. A context freshly created through the API or the UI carries one `group` restriction naming "All members"; an empty list means every group grant has been removed, restricting the context to organization administrators. (see [below for nested schema](#nestedatt--restrictions))
 
 <a id="nestedatt--restrictions"></a>
 ### Nested Schema for `restrictions`
@@ -84,9 +123,25 @@ Read-Only:
   there; use `value` for those.
 * `name` is the human-readable name of whatever the restriction points at, such
   as a project slug or a group name. It is empty for `expression` restrictions.
-* `group` is ambiguous and not fully documented by the API — CircleCI has two
-  unrelated concepts called "group". See
+* **A context's restrictions list is never actually empty right after it is
+  created.** CircleCI adds a `group` restriction named "All members" (value
+  equal to the context's own organization UUID) to every context as part of
+  creating it. Per CircleCI's documentation this is a security-group
+  restriction — it governs which organization *members* may use the context,
+  not which *projects* may — so `length(...) > 0` alone does not mean
+  projects are limited; check for a `project` entry specifically, as the
+  example above does, if the goal is confirming which projects may use the
+  context. Do not delete "All members" to make a `project` restriction "take
+  effect": the two combine as an AND already, and removing every `group`
+  restriction instead narrows the context to organization administrators
+  only.
+* To tell a genuine `group` restriction apart from the "All members" default,
+  compare its `value` to the context's organization UUID: equal means the
+  permissive default, different means a real restriction.
+* `group` does not reach either of CircleCI's two actual "group" concepts (a
+  VCS security group, or a `circleci_group` RBAC group) in the sense of
+  letting you name one from Terraform — see
   [`circleci_context_restriction`](../resources/context_restriction) for the
-  detail.
+  measured detail.
 * The endpoint returns every restriction in one response, so there is no
   pagination to follow.

@@ -402,9 +402,13 @@ sent.
 
 ## Step 8 — restrict the context
 
-A context with no restrictions can be used by **every project in the
-organization**, including one added tomorrow by someone else. Restricting it is
-how a shared secret stops being an organization-wide secret.
+A context with no `project` restriction can be used from **every project in
+the organization**, including one added tomorrow by someone else, by any
+member with access to it. (The context does not start out with an empty
+restrictions list: CircleCI adds a permissive default `group` restriction,
+"All members", as part of creating it — see the object model guide.)
+Restricting it is how a shared secret stops being an organization-wide
+secret.
 
 ```terraform
 resource "circleci_context_restriction" "build_api_only" {
@@ -429,8 +433,10 @@ unavailable on Bitbucket Cloud, which has no API for them; `project` and
 
 -> If your organization has `is_context_group_restriction_required` set in
 `circleci_organization_settings`, every context must carry at least one group
-restriction, and an unrestricted context is unusable. Get the restrictions in
-place first.
+restriction. A context starts with one (the "All members" default), so this
+mainly forecloses removing it entirely — which, per CircleCI's documentation,
+otherwise locks the context down to organization administrators only. Get a
+deliberate group restriction in place before removing the default.
 
 ## Putting it together
 
@@ -566,8 +572,11 @@ Collected, because every one of these has caught somebody.
    create the repository nor widen the connection.
 5. **Renaming a pipeline definition replaces it.** So does changing its
    `project_id` or `config_source_repo_external_id`. Its triggers go with it.
-6. **An unrestricted context is available to every project in the
-   organization**, including projects created after it.
+6. **A context with no `project` restriction is available to every project in
+   the organization**, including projects created after it. An *empty*
+   restrictions list is not that state — it means every `group` grant has
+   been removed, which per CircleCI's documentation locks the context down to
+   organization administrators only.
 7. **Cloud and Server differ in what exists at all.** `circleci_pipeline_definition`
    and `circleci_trigger` are unavailable on CircleCI Server — the
    `pipeline-definitions` and `triggers` routes are not forwarded by a Server

@@ -112,24 +112,76 @@ func TestContextRestrictionResourceUnit_ExpressionType(t *testing.T) {
 	})
 }
 
+// TestContextRestrictionResourceUnit_GroupType covers the one value/context
+// combination a "group" restriction ever succeeds against: an OAuth-backed
+// organization, with value equal to that organization's own UUID. [NET,
+// measured against a GitHub App, a GitLab and two GitHub OAuth organizations on
+// 2026-08-21] — see circleci.ContextRestrictionTypeGroup's doc comment.
 func TestContextRestrictionResourceUnit_GroupType(t *testing.T) {
 	api, host := newContextFakeAPI(t)
 	seedFixedContext(api)
-
-	groupID := "44444444-4444-4444-4444-444444444444"
+	api.setOAuthBacked(contextRestrictionUnitContextID, true)
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: contextRestrictionResourceUnitConfig(host, "group", groupID),
+				Config: contextRestrictionResourceUnitConfig(host, "group", contextUnitOrgID),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("type"), knownvalue.StringExact("group")),
-					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("value"), knownvalue.StringExact(groupID)),
+					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("value"), knownvalue.StringExact(contextUnitOrgID)),
 					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("project_id"), knownvalue.StringExact("")),
+					// The restriction's id is the organization's own UUID, not a
+					// freshly minted one — it is idempotent with the "All members"
+					// default, not a distinct restriction.
+					statecheck.ExpectKnownValue("circleci_context_restriction.test", tfjsonpath.New("id"), knownvalue.StringExact(contextUnitOrgID)),
 				},
 			},
 		},
+	})
+}
+
+// TestContextRestrictionResourceUnit_GroupType_RequiresOAuthOrg proves the
+// provider explains the API's real constraint on restriction_type = "group"
+// rather than forwarding its bare, easy-to-miss message: on a standalone
+// organization the API 400s no matter the value ([NET, measured against a
+// GitHub App and a GitLab organization on 2026-08-21]), and the diagnostic
+// must say so. Without contextRestrictionCreateErrorDetail's fix, the diagnostic is
+// only circleci.Detail(err) — "This is only supported for OAuth orgs. (HTTP
+// 400)" — which does not mention "OAuth-backed" or "standalone" together, so
+// this regexp fails against the unpatched provider.
+func TestContextRestrictionResourceUnit_GroupType_RequiresOAuthOrg(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+	// oauthBacked defaults to false: this context stands in for a standalone org.
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      contextRestrictionResourceUnitConfig(host, "group", contextUnitOrgID),
+			ExpectError: regexp.MustCompile(`(?s)Error creating CircleCI context restriction.*OAuth-backed.*standalone`),
+		}},
+	})
+}
+
+// TestContextRestrictionResourceUnit_GroupType_RequiresOwnOrgUUID proves the
+// same explanation appears for the other half of the constraint: on an
+// OAuth-backed organization, a value other than the organization's own UUID
+// still 400s ([NET, measured on 2026-08-21]), and the diagnostic must say
+// what value would have worked. The unpatched provider's diagnostic is only
+// "Invalid restriction. (HTTP 400)", which says nothing about a UUID, so this
+// regexp fails without the fix.
+func TestContextRestrictionResourceUnit_GroupType_RequiresOwnOrgUUID(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+	api.setOAuthBacked(contextRestrictionUnitContextID, true)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      contextRestrictionResourceUnitConfig(host, "group", "22222222-2222-2222-2222-222222222222"),
+			ExpectError: regexp.MustCompile(`(?s)Error creating CircleCI context restriction.*organization's own UUID`),
+		}},
 	})
 }
 
@@ -193,6 +245,68 @@ func TestContextRestrictionResourceUnit_Import(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: contextRestrictionResourceUnitConfig(host, "project", projectID),
+			},
+			{
+				ResourceName:            "circleci_context_restriction.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"name"},
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					rs := s.RootModule().Resources["circleci_context_restriction.test"]
+
+					return fmt.Sprintf("%s/%s", rs.Primary.Attributes["context_id"], rs.Primary.Attributes["id"]), nil
+				},
+			},
+		},
+	})
+}
+
+// TestContextRestrictionResourceUnit_Import_ExpressionType proves the same
+// import round-trip holds for restriction_type = "expression", not only
+// "project" (TestContextRestrictionResourceUnit_Import above). "name" is
+// ignored for the same reason as there: it is always "" on create and only
+// gains a value ("" here too, since expression restrictions have no name at
+// all) on the read import triggers.
+func TestContextRestrictionResourceUnit_Import_ExpressionType(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextRestrictionResourceUnitConfig(host, "expression", `pipeline.git.branch == "main"`),
+			},
+			{
+				ResourceName:            "circleci_context_restriction.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"name"},
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					rs := s.RootModule().Resources["circleci_context_restriction.test"]
+
+					return fmt.Sprintf("%s/%s", rs.Primary.Attributes["context_id"], rs.Primary.Attributes["id"]), nil
+				},
+			},
+		},
+	})
+}
+
+// TestContextRestrictionResourceUnit_Import_GroupType proves the same import
+// round-trip holds for restriction_type = "group", the one restriction type
+// whose id is not a freshly minted sequence number but the organization's own
+// UUID (see TestContextRestrictionResourceUnit_GroupType) — import must still
+// resolve it correctly.
+func TestContextRestrictionResourceUnit_Import_GroupType(t *testing.T) {
+	api, host := newContextFakeAPI(t)
+	seedFixedContext(api)
+	api.setOAuthBacked(contextRestrictionUnitContextID, true)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: contextRestrictionResourceUnitConfig(host, "group", contextUnitOrgID),
 			},
 			{
 				ResourceName:            "circleci_context_restriction.test",

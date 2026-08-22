@@ -16,9 +16,12 @@ resource "circleci_context" "example" {
 # set replaces the context, because no API route moves a context between
 # organizations — and so does changing `name`.
 
-# A context is empty and unrestricted when created. Add circleci_context_restriction
-# to limit which projects may use it; until the first restriction exists, *every*
-# project in the organization can.
+# A context is NOT empty when created: CircleCI adds a `group` restriction
+# named "All members" (permissive default) as part of creating it, so every
+# member of the organization may use the context from the start. Add
+# circleci_context_restriction with type = "project" to limit which projects
+# may use it; deleting "All members" instead of adding a project restriction
+# locks the context down to organization administrators only.
 output "circleci_context_id" {
   value = circleci_context.example.id
 }

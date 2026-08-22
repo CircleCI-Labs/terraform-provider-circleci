@@ -153,8 +153,10 @@ func TestAccContextRestrictionsDataSource_serverDeployment(t *testing.T) {
 func TestAccContextRestrictionsDataSource_empty(t *testing.T) {
 	_, host := newPluralAPI(t)
 
-	// An unrestricted context is usable by every project, so an empty list is a
-	// meaningful answer and must not be null.
+	// An empty list means every group grant has been removed (locking the
+	// context down to organization administrators, per CircleCI's
+	// documentation) rather than an absent answer, so it must not read back
+	// as null.
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{

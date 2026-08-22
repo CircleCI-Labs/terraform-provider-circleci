@@ -114,7 +114,7 @@ Leave this unset to let CircleCI manage it; the provider only writes toggles tha
 - `is_bitbucket_workspace_member_org_member` (Boolean) Treat every member of the linked Bitbucket workspace as a member of this CircleCI organization.
 
 Leave this unset to let CircleCI manage it; the provider only writes toggles that appear in the configuration.
-- `is_context_group_restriction_required` (Boolean) Require every context in this organization to carry at least one group restriction. Enabling this makes unrestricted contexts unusable, so contexts managed with `circleci_context_restriction` must have their restrictions in place first.
+- `is_context_group_restriction_required` (Boolean) Require every context in this organization to carry at least one group restriction. A context starts with a permissive default `group` restriction ("All members"), so this mainly forecloses removing every `group` restriction — which, per CircleCI's documentation, otherwise locks the context down to organization administrators only.
 
 Leave this unset to let CircleCI manage it; the provider only writes toggles that appear in the configuration.
 - `is_runner_terms_of_service_accepted` (Boolean) Record acceptance of the CircleCI self-hosted runner terms of service. Runner onboarding is gated on this: `circleci_runner_resource_class` and `circleci_runner_token` cannot be used for this organization until it is `true`.
