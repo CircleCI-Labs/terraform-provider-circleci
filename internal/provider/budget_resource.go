@@ -86,17 +86,36 @@ func (r *budgetResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"read-only so drift on it is visible, but it can only be changed in the CircleCI web UI.\n\n" +
 			"Set `project_id` to manage a per-project budget; omit it to manage the organization-level " +
 			"budget. An organization may have at most one budget per scope: applying this resource a " +
-			"second time for the same `org_id` and `project_id` updates the existing budget's `credits` " +
-			"in place rather than creating a duplicate.",
+			"second time for the same `org_id` and `project_id` still leaves exactly one budget for " +
+			"that scope, not two. Measured against a live organization, that write is not an update to " +
+			"the existing budget record: CircleCI deletes it and creates a new one with a new `id`, " +
+			"every time, even when `credits` is unchanged. `id` is therefore not a stable handle across " +
+			"applies — see its own description below.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the budget, assigned by CircleCI. " +
 					"There is no route to read a budget by this id — it exists so `terraform destroy` " +
-					"has something to send to the delete route, which addresses a budget only by id.",
+					"has something to send to the delete route, which addresses a budget only by id.\n\n" +
+					"**This id is not stable across writes.** Measured against a live organization: " +
+					"every `PUT` to an existing scope — including one that resends the same `credits` " +
+					"unchanged — deletes the underlying budget and creates a new one with a freshly " +
+					"minted id. Do not rely on this value outside Terraform, and expect it to show " +
+					"`(known after apply)` on every `terraform plan` that updates `credits`, not only on " +
+					"create.",
 				Computed: true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
-				},
+				// Deliberately no UseStateForUnknown: that plan modifier tells Terraform
+				// "this Computed value will not change unless the resource is replaced,"
+				// which was true of nothing here. It shipped as if the migration CLI's
+				// upsert preserved the underlying budget's id across an update, and it
+				// does not — see the schema note above. Keeping the modifier would tell
+				// Terraform to expect the old id back after an Update that actually
+				// produces a new one, which is exactly the shape of a "Provider produced
+				// inconsistent result after apply" error. Leaving `id` planned as unknown
+				// on every update (the default for a bare Computed attribute) is what
+				// this resource must do given the id churns; UseStateForUnknown would
+				// still be correct on Create, where there is no prior value to carry
+				// forward regardless of the modifier's presence, so removing it here
+				// costs nothing there.
 			},
 			// See org_id_deprecation.go for why these are Optional+Computed. CircleCI
 			// has no route that moves a budget between organizations, so changing
@@ -115,10 +134,12 @@ func (r *budgetResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				},
 			},
 			"credits": schema.Int64Attribute{
-				MarkdownDescription: "The credit limit for this scope. Updatable in place.",
-				Required:            true,
+				MarkdownDescription: "The credit limit for this scope. Updatable in place. Measured " +
+					"against a live organization: CircleCI rejects `0` (`400 \"Invalid budget " +
+					"settings\"`), so the minimum accepted value is `1`, not `0`.",
+				Required: true,
 				Validators: []validator.Int64{
-					int64validator.AtLeast(0),
+					int64validator.AtLeast(1),
 				},
 			},
 			"enforcement_type": schema.StringAttribute{
@@ -308,6 +329,19 @@ func (r *budgetResource) Update(ctx context.Context, req resource.UpdateRequest,
 // therefore does not strand anything new: it reports the same clear error
 // here as everywhere else, and `terraform state rm` remains available exactly
 // as it always was.
+//
+// On a DeleteBudget error, this does not trust circleci.IsNotFound the way an
+// earlier version did. [NET] measurement (gh-app-cci-1, 2026-08-21) shows
+// deleting an id that no longer exists — including the id of a budget this
+// same sequence just deleted — answers 500 with a generic
+// {"error":"There was an error deleting the budget"}, never 404. IsNotFound
+// would therefore be false for exactly the "already gone" case Delete must
+// treat as success, and true for nothing this route was ever observed to
+// return. Corroborating by scope with FindBudget — the same lookup Read uses,
+// since there is no single-budget GET either — is the only way available to
+// tell "already gone" apart from a genuine failure: if nothing exists for this
+// resource's scope any more, the delete has, by any definition that matters to
+// Terraform, already happened.
 func (r *budgetResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	if r.client == nil || !requireCloud(r.client, budgetTypeName, &resp.Diagnostics) {
 		return
@@ -320,17 +354,34 @@ func (r *budgetResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	orgID := effectiveOrgID(state.OrganizationID, state.OrgID)
+	projectID := budgetProjectIDPointer(state.ProjectID)
 
 	err := r.client.DeleteBudget(ctx, orgID, state.ID.ValueString())
-	if err != nil && !circleci.IsNotFound(err) {
-		resp.Diagnostics.AddError(
-			"Error deleting CircleCI budget",
-			fmt.Sprintf(
-				"Could not delete budget %s for organization %s: %s",
-				state.ID.ValueString(), orgID, circleci.Detail(err),
-			),
-		)
+	if err == nil {
+		return
 	}
+
+	if circleci.IsNotFound(err) {
+		// Never actually observed for this route (see the doc comment above), but
+		// if a future response ever does answer 404, honour it the same way as
+		// the corroborated case below.
+		return
+	}
+
+	if _, ok, findErr := r.client.FindBudget(ctx, orgID, projectID); findErr == nil && !ok {
+		// Nothing exists for this scope any more: the delete already succeeded in
+		// every sense Terraform cares about, whatever status DeleteBudget itself
+		// answered with.
+		return
+	}
+
+	resp.Diagnostics.AddError(
+		"Error deleting CircleCI budget",
+		fmt.Sprintf(
+			"Could not delete budget %s for organization %s: %s",
+			state.ID.ValueString(), orgID, circleci.Detail(err),
+		),
+	)
 }
 
 // Configure adds the provider configured client to the resource.

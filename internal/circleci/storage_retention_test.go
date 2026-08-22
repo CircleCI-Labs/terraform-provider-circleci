@@ -20,19 +20,14 @@ const testStorageRetentionOrgID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 // fakeStorageRetentionAPI is a stateful stand-in for the private
 // storage-retention-controls route.
 //
-// It clamps a PUT to the configured bounds instead of rejecting it, and answers
-// with 204 No Content and an empty body, exactly as the real endpoint does per
-// the org-migration CLI this route was reverse-engineered from
-// (github.com/AwesomeCICD/circleci-org-migration-cli).
-// A fake that rejected an out-of-bounds PUT with a 4xx, or that echoed the
-// request back as the response body, would exercise client and provider code
-// paths that can never run against the real API.
-//
-// It also does not reject unrecognised request fields. There is no evidence
-// either way for this specific BFF route, so — following the reasoning in
-// runner_fake_test.go for the same situation — this fake defaults to the
-// lenient, not-yet-proven-strict behaviour rather than assuming the stricter
-// one and risking a fake that is stricter than production.
+// It rejects a PUT carrying any value outside the configured bounds with 400
+// and leaves the stored record untouched, and answers an accepted PUT with 204
+// No Content and an empty body — both measured [NET] against gitlab-test on
+// 2026-08-21 (see storage_retention.go's SetStorageRetention doc comment for
+// the detail). An earlier version of this fake clamped instead of rejecting; it
+// was wrong, not merely unconfirmed — the real endpoint answers 400 and applies
+// nothing, so a fake that clamped could pass a test asserting behaviour the
+// real API cannot produce.
 type fakeStorageRetentionAPI struct {
 	server *httptest.Server
 
@@ -97,18 +92,24 @@ func (a *fakeStorageRetentionAPI) handle(w http.ResponseWriter, r *http.Request)
 		}
 
 		a.mu.Lock()
-		a.puts = append(a.puts, raw)
-		a.current = circleci.StorageRetentionControls{
-			CacheDays:     clampToBound(requested.CacheDays, a.limits.Cache),
-			WorkspaceDays: clampToBound(requested.WorkspaceDays, a.limits.Workspace),
-			ArtifactDays:  clampToBound(requested.ArtifactDays, a.limits.Artifact),
+		if !inBound(requested.CacheDays, a.limits.Cache) ||
+			!inBound(requested.WorkspaceDays, a.limits.Workspace) ||
+			!inBound(requested.ArtifactDays, a.limits.Artifact) {
+			a.mu.Unlock()
+			// Matches the measured [NET] shape: reject, apply nothing.
+			http.Error(w, `{"error":"Invalid value given"}`, http.StatusBadRequest)
+
+			return
 		}
+
+		a.puts = append(a.puts, raw)
+		a.current = requested
 		a.mu.Unlock()
 
 		// 204 No Content, no body — the real route answers this way. A fake that
-		// echoed the stored (possibly clamped) record back here would let
-		// SetStorageRetention appear to work without ever issuing the read-back GET
-		// it depends on to report the truth.
+		// echoed the stored record back here would let SetStorageRetention appear
+		// to work without ever issuing the read-back GET it depends on to report
+		// the truth.
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -116,16 +117,10 @@ func (a *fakeStorageRetentionAPI) handle(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-func clampToBound(v int64, bound circleci.StorageRetentionBound) int64 {
-	if v < bound.Min {
-		return bound.Min
-	}
-
-	if v > bound.Max {
-		return bound.Max
-	}
-
-	return v
+// inBound reports whether v falls within [bound.Min, bound.Max], inclusive —
+// the real route's measured acceptance range; anything else is a 400.
+func inBound(v int64, bound circleci.StorageRetentionBound) bool {
+	return v >= bound.Min && v <= bound.Max
 }
 
 func (a *fakeStorageRetentionAPI) getCount() int {
@@ -263,35 +258,41 @@ func TestSetStorageRetention_ReadsBackAfterWriting(t *testing.T) {
 	}
 }
 
-// TestSetStorageRetention_ReportsClampedValues is the scenario the whole
-// Get-after-Put design exists for: a value outside the plan's bounds is not
-// rejected, it is silently clamped, and the only way a caller finds out is by
-// reading the record back.
-func TestSetStorageRetention_ReportsClampedValues(t *testing.T) {
+// TestSetStorageRetention_RejectsOutOfBoundsValue replaces a test that used to
+// assert the opposite of measured behaviour (that an out-of-bounds value gets
+// silently clamped to the nearest bound). [NET] measurement against
+// gitlab-test (2026-08-21) shows CircleCI rejects the whole write with 400
+// instead, and applies none of the three fields — not even the two that were
+// within bounds. See SetStorageRetention's doc comment for the full
+// measurement.
+func TestSetStorageRetention_RejectsOutOfBoundsValue(t *testing.T) {
 	t.Parallel()
 
-	api := newFakeStorageRetentionAPI(t, defaultStorageRetentionLimits(), circleci.StorageRetentionControls{})
+	initial := circleci.StorageRetentionControls{CacheDays: 5, WorkspaceDays: 5, ArtifactDays: 5}
+	api := newFakeStorageRetentionAPI(t, defaultStorageRetentionLimits(), initial)
 	client := testStorageRetentionClient(api.server.URL)
 
-	got, err := client.SetStorageRetention(context.Background(), testStorageRetentionOrgID, circleci.StorageRetentionControls{
+	_, err := client.SetStorageRetention(context.Background(), testStorageRetentionOrgID, circleci.StorageRetentionControls{
 		CacheDays:     1000, // plan max is 15
-		WorkspaceDays: 0,    // plan min is 1
-		ArtifactDays:  30,   // within bounds
+		WorkspaceDays: 7,    // within bounds
+		ArtifactDays:  20,   // within bounds
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected an error for a cache value above the plan max, got nil")
+	}
+	if circleci.IsNotFound(err) {
+		t.Errorf("IsNotFound(err) = true, want false: this is a validation rejection, not a missing resource")
 	}
 
-	if got.Controls.CacheDays != 15 {
-		t.Errorf("CacheDays: got %d, want clamped to plan max 15", got.Controls.CacheDays)
+	// The whole write must have been rejected, not partially applied: the two
+	// in-bounds fields must be exactly what they were before, not the new
+	// values that accompanied the rejected one.
+	got, getErr := client.GetStorageRetention(context.Background(), testStorageRetentionOrgID)
+	if getErr != nil {
+		t.Fatalf("GetStorageRetention after the rejected write: %v", getErr)
 	}
-
-	if got.Controls.WorkspaceDays != 1 {
-		t.Errorf("WorkspaceDays: got %d, want clamped to plan min 1", got.Controls.WorkspaceDays)
-	}
-
-	if got.Controls.ArtifactDays != 30 {
-		t.Errorf("ArtifactDays: got %d, want unchanged at 30", got.Controls.ArtifactDays)
+	if got.Controls != initial {
+		t.Errorf("Controls after a rejected write = %+v, want unchanged at %+v", got.Controls, initial)
 	}
 }
 

@@ -191,18 +191,31 @@ func (a *fakeBudgetAPI) list(w http.ResponseWriter, orgID string) {
 	}{Budgets: items})
 }
 
-// set implements the upsert PUT: a request whose project_id (nil or a value)
-// matches an existing entry updates its credits in place; otherwise a new
-// entry is appended with a freshly minted budget_id and CircleCI's apparent
-// defaults for a brand-new budget (enforcement_type "warn", zeroed
-// statistics) — the same shape the migration CLI's own happy-path fixture
-// uses for a budget it did not otherwise describe.
+// set implements the write PUT. [NET] measurement against gh-app-cci-1
+// (2026-08-21) found this is not an upsert of the underlying record the way an
+// earlier version of this fake modelled it: a request whose project_id
+// matches an existing entry does not update that entry's credits in place —
+// it deletes it and appends a brand-new entry with a freshly minted
+// budget_id, even when credits is unchanged from what was already stored.
+// Three consecutive real writes of 2000, 2000 then 3000 credits to the same
+// scope came back with three different budget_ids in a row. So this fake
+// removes any existing entry for the scope before appending the replacement,
+// on every write, matching that churn — a fake that updated in place could
+// pass a provider-level test asserting an id stays stable across an update,
+// which the real API cannot do.
 //
-// Deliberately lenient about the request body: any field beyond credits and
-// project_id is simply ignored rather than rejected, matching the "unknown
-// keys ignored" behaviour DESIGN.md documents for the (equally undocumented)
-// contexts route, and matching that this fake must not be stricter than the
-// real service without evidence that the real service is strict.
+// The response body is not an empty object either, contrary to an earlier
+// version of this fake (and of budgetSetRequest's own doc comment, now
+// corrected): [NET] measurement shows 200 with
+// {"credits":...,"budget_id":"...","enforcement_type":"warn","project_id":...}.
+// It does not carry consumption, percentage or threshold_exceeded.
+//
+// credits < 1 is measured to answer 400 {"error":"Invalid budget settings"} —
+// this fake validates that; everything else about the request body remains
+// deliberately lenient (unknown fields ignored), matching the "unknown keys
+// ignored" behaviour DESIGN.md documents for the equally undocumented
+// contexts route, since there is no evidence this route is any stricter than
+// that for fields this fake does not otherwise model.
 func (a *fakeBudgetAPI) set(w http.ResponseWriter, r *http.Request, orgID string) {
 	var body struct {
 		Credits   int     `json:"credits"`
@@ -214,26 +227,43 @@ func (a *fakeBudgetAPI) set(w http.ResponseWriter, r *http.Request, orgID string
 		return
 	}
 
-	for _, e := range a.budgets[orgID] {
-		if budgetScopeMatchesForTest(e.projectID, body.ProjectID) {
-			e.credits = body.Credits
-			a.write(w, http.StatusOK, map[string]any{})
+	if body.Credits < 1 {
+		a.write(w, http.StatusBadRequest, map[string]string{"error": "Invalid budget settings"})
 
-			return
+		return
+	}
+
+	kept := make([]*fakeBudgetEntry, 0, len(a.budgets[orgID]))
+	for _, e := range a.budgets[orgID] {
+		if !budgetScopeMatchesForTest(e.projectID, body.ProjectID) {
+			kept = append(kept, e)
 		}
 	}
 
 	a.nextSeq++
-	a.budgets[orgID] = append(a.budgets[orgID], &fakeBudgetEntry{
+	entry := &fakeBudgetEntry{
 		budgetID:        "fake-budget-" + strconv.Itoa(a.nextSeq),
 		credits:         body.Credits,
 		enforcementType: circleci.BudgetEnforcementWarn,
 		projectID:       body.ProjectID,
-	})
+	}
+	a.budgets[orgID] = append(kept, entry)
 
-	a.write(w, http.StatusOK, map[string]any{})
+	a.write(w, http.StatusOK, map[string]any{
+		"credits":          entry.credits,
+		"budget_id":        entry.budgetID,
+		"enforcement_type": entry.enforcementType,
+		"project_id":       entry.projectID,
+	})
 }
 
+// delete answers 500, not 404, for a budget_id that does not currently exist
+// in this org's collection — [NET] measurement (gh-app-cci-1, 2026-08-21)
+// against both a syntactically valid but unknown id and the id of a budget
+// this same client had just deleted, every time. An earlier version of this
+// fake answered 404, which budgetResource.Delete's own prior version relied
+// on circleci.IsNotFound to catch; that combination could never have worked
+// against the real API.
 func (a *fakeBudgetAPI) delete(w http.ResponseWriter, orgID, budgetID string) {
 	entries := a.budgets[orgID]
 	for i, e := range entries {
@@ -245,7 +275,7 @@ func (a *fakeBudgetAPI) delete(w http.ResponseWriter, orgID, budgetID string) {
 		}
 	}
 
-	a.write(w, http.StatusNotFound, map[string]string{"message": "budget not found"})
+	a.write(w, http.StatusInternalServerError, map[string]string{"error": "There was an error deleting the budget"})
 }
 
 func (a *fakeBudgetAPI) write(w http.ResponseWriter, status int, body any) {

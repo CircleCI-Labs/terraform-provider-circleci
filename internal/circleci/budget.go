@@ -131,19 +131,36 @@ type budgetSetRequest struct {
 // SetBudget creates or updates a budget via PUT: pass projectID nil for the
 // organization-level budget, or a project UUID for a per-project budget.
 //
-// This is an upsert. A second call for the same (orgID, projectID) scope
-// updates the existing budget's credits in place rather than creating a
-// duplicate — matching the migration CLI's own doc comment on the identical
-// method ("SetBudget creates or updates a budget via PUT") and its sync
-// path, which calls it unconditionally on every run without first checking
-// whether a budget already exists for that scope.
+// This is an upsert in the sense that matters to a caller — a second call for
+// the same (orgID, projectID) scope still leaves exactly one entry in that
+// scope, not two — but [NET] measurement against gh-app-cci-1
+// (2026-08-21) shows it is not an upsert of the underlying record: every PUT
+// for an existing scope, including one that resends the same credits with no
+// change at all, deletes the old budget and creates a new one with a freshly
+// minted budget_id. Three consecutive PUTs with credits 2000, 2000, 3000
+// against the same scope came back as three different budget_ids in a row —
+// e.g. 11111111-…, 22222222-…, 33333333-… (illustrative shape; the actual
+// values were ordinary random UUIDs) — a different id every time, even when
+// nothing changed. Nothing
+// about the request distinguishes "first write for this scope" from
+// "overwrite" from the caller's side; the server decides it downstream of
+// project_id-based matching. Callers must never treat a budget's id as stable
+// across a second write to its own scope — see budget_resource.go's Create/
+// Update, which re-reads the id after every write rather than assuming it, and
+// the schema's own note not to rely on `id` as a durable handle.
 //
-// The response carries nothing usable: the migration CLI decodes it into a
-// discarded map[string]any, and its own tests model the response as an empty
-// JSON object. In particular, the assigned or existing budget_id is never
-// returned here — call FindBudget afterward to learn it, the same pattern
-// SetStorageRetention uses for the sibling private route that also answers
-// with nothing on write.
+// The response is not empty the way an earlier version of this comment
+// claimed (and the migration CLI's own tests, which model it as `{}`, agreed
+// with): [NET] measurement shows a 200 with a JSON body carrying
+// credits, budget_id, enforcement_type and project_id — e.g.
+// `{"credits":1000,"budget_id":"<uuid>","enforcement_type":"warn","project_id":null}`.
+// What it does not carry is consumption, percentage or threshold_exceeded — so
+// FindBudget is still called afterward, not because the write response is
+// useless, but because those three runtime statistics have no other source.
+// This client does not currently decode the write response at all, matching
+// the migration CLI's own map[string]any-and-discard behaviour; a future
+// change could use it to learn the id one write sooner, at the cost of a
+// second, differently-shaped success type to maintain.
 func (c *Client) SetBudget(ctx context.Context, orgID string, projectID *string, credits int) error {
 	body := budgetSetRequest{Credits: credits, ProjectID: projectID}
 
@@ -152,6 +169,18 @@ func (c *Client) SetBudget(ctx context.Context, orgID string, projectID *string,
 
 // DeleteBudget removes one budget by its server-assigned id. This is the only
 // route that addresses a single budget directly; there is no equivalent GET.
+//
+// [NET] measurement (gh-app-cci-1, 2026-08-21): deleting an id that does not
+// currently exist — either never created, or already deleted — answers 500
+// with `{"error":"There was an error deleting the budget"}`, not 404. This is
+// true both for a syntactically valid but unknown UUID and for the id of a
+// budget this same client just deleted. IsNotFound(err) is therefore false for
+// that case: there is no status-code way to tell "already gone" apart from a
+// genuine server error on this route. Combined with the id churn documented on
+// SetBudget above, a caller cannot even assume "the id I have is the current
+// one for this scope" going into the delete. budgetResource.Delete corroborates
+// by re-listing the scope (FindBudget) rather than trusting this error's status
+// code — see its doc comment.
 func (c *Client) DeleteBudget(ctx context.Context, orgID, budgetID string) error {
 	return c.DeletePrivate(ctx, budgetRoute, RouteParams(orgID, budgetID))
 }

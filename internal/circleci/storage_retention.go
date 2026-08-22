@@ -47,6 +47,13 @@ type StorageRetentionLimits struct {
 // StorageRetention is the full response from GET
 // .../storage-retention-controls: the organization's current controls, and the
 // plan's enforced bounds on them.
+//
+// [NET] measurement shows the real response also carries a third top-level
+// key, storage_retention_defaults, shaped like Controls, holding what the
+// organization's plan defaults to. Nothing here currently needs it — this
+// resource always sends all three fields explicitly rather than relying on a
+// default — so it is not modelled; Go's decoder drops the unrecognised key
+// silently rather than erroring, which is the behaviour this type relies on.
 type StorageRetention struct {
 	Controls StorageRetentionControls `json:"storage_retention_controls"`
 	Limits   StorageRetentionLimits   `json:"storage_retention_limits"`
@@ -71,12 +78,32 @@ func (c *Client) GetStorageRetention(ctx context.Context, orgID string) (*Storag
 // SetStorageRetention writes an organization's storage-retention controls and
 // returns what CircleCI actually stored.
 //
-// The PUT route answers 204 No Content on success, and — this is the part that
-// matters to callers — it clamps any value outside the organization's plan
-// bounds rather than rejecting it. So a 2xx response does not mean the values
-// requested are the values now in effect. Rather than let every caller
-// rediscover that, this always reads the record back after writing it, and
-// returns the read-back value. Compare it against controls to detect clamping.
+// The PUT route answers 204 No Content on success. An earlier version of this
+// comment claimed it clamps an out-of-bounds value to the nearest plan limit
+// rather than rejecting it; [NET] measurement against gitlab-test
+// (2026-08-21) shows that is false. Every value outside the reported [min,
+// max] range — one field over its max, one field under its min, a negative
+// number, even an in-range request missing one of the three required fields —
+// answered 400 {"error":"Invalid value given"} instead, and the write did not
+// apply any of the three fields: a follow-up GET showed the record completely
+// unchanged. A value exactly at a reported bound (e.g. artifact_days at its
+// max) is accepted normally. So this route's write is, on this evidence,
+// atomic and rejecting rather than partial and clamping.
+//
+// The read-back GET performed here is kept anyway, for two reasons unrelated
+// to clamping: it is the only way to learn each control's current value at
+// all (the PUT response carries none of them), and it is a cheap defence if
+// this route's behaviour ever changes back — see
+// warnClampedStorageRetention in the provider package, which compares
+// requested against applied and would start firing again if it did.
+//
+// One more thing [NET] measurement found and this client does not need to
+// react to: a request body containing a key the schema does not recognise
+// (tested: a bogus extra field alongside all three valid ones) answers 500,
+// not the silent-drop behaviour this codebase generally assumes for unknown
+// keys elsewhere. This client never sends an extra key, so it is not acted on
+// here, but it means "unknown keys are dropped" is not a safe assumption to
+// port to this specific route without checking again.
 func (c *Client) SetStorageRetention(
 	ctx context.Context, orgID string, controls StorageRetentionControls,
 ) (*StorageRetention, error) {

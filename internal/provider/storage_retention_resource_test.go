@@ -55,8 +55,12 @@ const testStorageRetentionOrgID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 // fakeStorageRetentionAPI is a stateful stand-in for the private
 // storage-retention-controls route, deliberately shaped like the one in
-// internal/circleci/storage_retention_test.go: it clamps instead of rejecting,
-// and answers a PUT with 204 and no body.
+// internal/circleci/storage_retention_test.go: it rejects a PUT with any
+// field outside the configured bounds (400, nothing applied) and answers an
+// accepted PUT with 204 and no body — see that file's fake for the [NET]
+// measurement (gitlab-test, 2026-08-21) both fakes are shaped from. An earlier
+// version of this fake clamped instead of rejecting, which the measurement
+// disproved.
 type fakeStorageRetentionAPI struct {
 	server *httptest.Server
 
@@ -120,12 +124,17 @@ func (a *fakeStorageRetentionAPI) handle(w http.ResponseWriter, r *http.Request)
 		}
 
 		a.mu.Lock()
-		a.puts = append(a.puts, raw)
-		a.current = circleci.StorageRetentionControls{
-			CacheDays:     clampToStorageRetentionBound(requested.CacheDays, a.limits.Cache),
-			WorkspaceDays: clampToStorageRetentionBound(requested.WorkspaceDays, a.limits.Workspace),
-			ArtifactDays:  clampToStorageRetentionBound(requested.ArtifactDays, a.limits.Artifact),
+		if !storageRetentionInBoundForTest(requested.CacheDays, a.limits.Cache) ||
+			!storageRetentionInBoundForTest(requested.WorkspaceDays, a.limits.Workspace) ||
+			!storageRetentionInBoundForTest(requested.ArtifactDays, a.limits.Artifact) {
+			a.mu.Unlock()
+			http.Error(w, `{"error":"Invalid value given"}`, http.StatusBadRequest)
+
+			return
 		}
+
+		a.puts = append(a.puts, raw)
+		a.current = requested
 		a.mu.Unlock()
 
 		w.WriteHeader(http.StatusNoContent)
@@ -135,16 +144,11 @@ func (a *fakeStorageRetentionAPI) handle(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-func clampToStorageRetentionBound(v int64, bound circleci.StorageRetentionBound) int64 {
-	if v < bound.Min {
-		return bound.Min
-	}
-
-	if v > bound.Max {
-		return bound.Max
-	}
-
-	return v
+// storageRetentionInBoundForTest mirrors inBound in
+// internal/circleci/storage_retention_test.go: the measured [min, max]
+// acceptance range, inclusive.
+func storageRetentionInBoundForTest(v int64, bound circleci.StorageRetentionBound) bool {
+	return v >= bound.Min && v <= bound.Max
 }
 
 func (a *fakeStorageRetentionAPI) getCount() int {
@@ -342,44 +346,48 @@ func TestStorageRetentionResourceUnit_CreateSendsConfiguredValuesAndRefreshesBou
 	}
 }
 
-// TestStorageRetentionResourceUnit_CreateWarnsWhenClamped is the scenario
-// warnClampedStorageRetention exists for: a value outside the plan's bounds is
-// accepted, not rejected, so the only way to learn the value actually in
-// effect differs from the one configured is to read it back and compare.
-func TestStorageRetentionResourceUnit_CreateWarnsWhenClamped(t *testing.T) {
+// TestStorageRetentionResourceUnit_CreateErrorsWhenOutOfBounds replaces a test
+// that used to assert the opposite of measured behaviour: that a value beyond
+// the plan's bounds is silently accepted and clamped. [NET] measurement
+// (gitlab-test, 2026-08-21) shows CircleCI rejects the write outright
+// (400 "Invalid value given") and applies none of the three fields — so this
+// resource must surface it as an ordinary apply-time error, not a warning, and
+// must not leave a resource behind in state for a create that never actually
+// happened at CircleCI.
+func TestStorageRetentionResourceUnit_CreateErrorsWhenOutOfBounds(t *testing.T) {
 	t.Parallel()
 
-	api := newFakeStorageRetentionAPI(t, defaultStorageRetentionTestLimits(), circleci.StorageRetentionControls{})
+	limits := defaultStorageRetentionTestLimits()
+	api := newFakeStorageRetentionAPI(t, limits, circleci.StorageRetentionControls{})
 	client := circleci.New(circleci.Config{PrivateHost: api.server.URL, Token: "fake"})
 
 	// Cache's plan max is 15; ask for far more.
 	plan := storageRetentionPlanModel(1000, 7, 20)
-	state, resp := createStorageRetention(t, client, plan)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Create diagnostics: %+v", resp.Diagnostics)
-	}
+	_, resp := createStorageRetention(t, client, plan)
 
-	if resp.Diagnostics.WarningsCount() == 0 {
-		t.Fatal("expected a warning about a clamped value, got none")
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected Create to error for a cache value above the plan max, got none")
+	}
+	if resp.Diagnostics.WarningsCount() != 0 {
+		t.Errorf("expected no warnings (this is a rejection, not a clamp), got: %+v", resp.Diagnostics.Warnings())
 	}
 
 	found := false
 
-	for _, d := range resp.Diagnostics.Warnings() {
-		if regexp.MustCompile(`cache_retention_days.*requested 1000.*stored 15`).MatchString(d.Detail()) {
+	for _, d := range resp.Diagnostics.Errors() {
+		if regexp.MustCompile(`Invalid value given`).MatchString(d.Detail()) {
 			found = true
 		}
 	}
 
 	if !found {
-		t.Errorf("no warning mentioned the clamped cache value; got: %+v", resp.Diagnostics.Warnings())
+		t.Errorf("no error surfaced CircleCI's own message; got: %+v", resp.Diagnostics.Errors())
 	}
 
-	// State must hold what CircleCI actually stored, not what was requested —
-	// otherwise the next plan would show no difference from a configuration
-	// that can never actually be satisfied.
-	if state.CacheRetentionDays.ValueInt64() != 15 {
-		t.Errorf("cache_retention_days in state = %d, want 15 (the clamped value)", state.CacheRetentionDays.ValueInt64())
+	// The rejected write must not have applied anything: confirm nothing was
+	// stored for the two otherwise-valid fields either.
+	if api.getCount() != 0 {
+		t.Errorf("expected no read-back GET after a rejected write, got %d", api.getCount())
 	}
 }
 

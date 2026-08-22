@@ -117,27 +117,27 @@ func NewStorageRetentionResource() resource.Resource {
 // The read side of the route reports a plan-enforced [min, max] range for each
 // of the three values, which is why this schema carries six Computed bound
 // attributes. It is tempting to validate the three Required values against
-// them at plan time. Two things make that impossible, not just undesirable:
+// them at plan time. One thing makes that impossible, not just undesirable:
+// the bounds are per-organization and come only from a GET against this same
+// private route. There is no other way to learn them, and a resource cannot
+// call the API from within schema validation (ValidateConfig runs before
+// Configure, so no client exists yet) or even reliably from ModifyPlan on
+// first apply, when there is no prior state to read bounds from at all. So an
+// out-of-bounds value cannot be caught before apply time on a brand-new
+// resource, however the service enforces it.
 //
-//   - The bounds are per-organization and come only from a GET against this
-//     same private route. There is no other way to learn them, and a resource
-//     cannot call the API from within schema validation (ValidateConfig runs
-//     before Configure, so no client exists yet) or even reliably from
-//     ModifyPlan on first apply, when there is no prior state to read bounds
-//     from at all.
-//   - Even if the bounds were known, the write side of this same route does not
-//     enforce them by rejecting the request — see SetStorageRetention. It
-//     clamps. A client-side validator that rejected an out-of-bounds value
-//     would therefore be *stricter than the service itself ever is*, which is
-//     exactly the mismatch the house rules for this codebase warn about ("match
-//     what the service enforces, not what its error message says" — here there
-//     is not even an error message, just silent clamping).
-//
-// So this resource validates nothing about the three values beyond being
-// present integers, sends whatever the configuration says, and instead detects
-// clamping after the fact by comparing what was requested against what
-// SetStorageRetention reads back, surfacing a warning when they differ. See
-// warnClampedStorageRetention.
+// [NET] measurement against gitlab-test (2026-08-21) settles what an
+// earlier version of this comment only assumed: this route rejects an
+// out-of-bounds value with 400 {"error":"Invalid value given"} and applies
+// none of the three fields, rather than silently storing the nearest bound.
+// See SetStorageRetention's doc comment for the measurement. That makes the
+// resource's job simpler than the old clamp-and-detect design implied: a bad
+// value surfaces as an ordinary apply-time error from CircleCI (Create/
+// Update's own AddError below), and warnClampedStorageRetention is kept only
+// as a defensive check for a value that is accepted but not stored
+// byte-for-byte — a case this measurement never produced, but one this
+// resource cannot rule out for every possible input without re-measuring
+// every release.
 type storageRetentionResource struct {
 	client *circleci.Client
 }
@@ -173,14 +173,17 @@ func (r *storageRetentionResource) Schema(_ context.Context, _ resource.SchemaRe
 			"organization's storage-retention record always exists and always holds a value for all " +
 			"three fields. `terraform destroy` only drops it from Terraform state; see the note on " +
 			"`Delete` below.\n\n" +
-			"~> **CircleCI clamps out-of-range values instead of rejecting them.** Each retention " +
-			"value has a plan-enforced minimum and maximum, reported here as the matching " +
-			"`..._min`/`..._max` attributes. Configuring a value outside that range does not fail the " +
-			"apply: CircleCI silently stores the nearest bound instead. This provider reads the value " +
-			"back after every write and warns when what is now stored differs from what was " +
-			"configured. If you see that warning, either widen the organization's plan or change your " +
-			"configuration to match — Terraform will otherwise show a diff on every subsequent plan, " +
-			"because the configured value can never actually be reached.",
+			"~> **CircleCI rejects a value outside the reported bounds; it does not clamp it.** Each " +
+			"retention value has a plan-enforced minimum and maximum, reported here as the matching " +
+			"`..._min`/`..._max` attributes, which are only known once this resource has been read at " +
+			"least once (after the first successful apply, or after import). Configuring a value " +
+			"outside that range fails the apply, with an error CircleCI itself does not attribute to " +
+			"any one field (`\"Invalid value given\"`) — this provider cannot improve on that message " +
+			"because it cannot learn the bounds before the first read either. This provider also reads " +
+			"the value back after every successful write and warns if what is now stored ever differs " +
+			"from what was configured, as a defensive check; as of this provider's most recent " +
+			"measurement that never happens — a write either applies exactly as configured or is " +
+			"rejected outright, never partially.",
 		Attributes: map[string]schema.Attribute{
 			"org_id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the organization these storage-retention " +
@@ -409,14 +412,22 @@ type storageRetentionCheck struct {
 }
 
 // warnClampedStorageRetention compares what was requested against what
-// SetStorageRetention actually read back, and warns when CircleCI silently
-// clamped one or more values to the organization's plan bounds instead of
-// storing them as configured.
+// SetStorageRetention actually read back, and warns if they differ for one or
+// more fields.
 //
-// This is the only feedback a practitioner gets that their configuration is
-// unreachable: the write itself never errors (see SetStorageRetention), so
-// without this a clamped value would look like a fully successful apply right
-// up until the next `terraform plan` shows an unexplained diff.
+// This function exists for a scenario [NET] measurement (2026-08-21,
+// gitlab-test) did not observe: it once documented "CircleCI clamps an
+// out-of-bounds value instead of rejecting it" as settled fact, but measured
+// behaviour is the opposite — a write outside the reported [min, max] bounds
+// is rejected with 400 and applies nothing (see SetStorageRetention's own
+// comment), so a call reaching this function has already, by definition,
+// succeeded, and on every case actually measured requested and applied were
+// therefore always equal. It is kept anyway as a defensive backstop: if
+// CircleCI ever does start accepting-but-adjusting a value on this route, the
+// alternative to this check is a silent, permanent diff on every subsequent
+// `terraform plan` with no clue why. A warning firing here after this comment
+// was written should be treated as news — it means the measured behaviour
+// above has changed, not that this function was wrong to add.
 func warnClampedStorageRetention(
 	requested storageRetentionResourceModel, applied *circleci.StorageRetention, orgID string, diags *diag.Diagnostics,
 ) {

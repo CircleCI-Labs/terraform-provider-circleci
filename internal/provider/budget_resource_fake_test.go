@@ -9,6 +9,7 @@ import (
 
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -114,6 +115,26 @@ func TestBudgetResourceSchema(t *testing.T) {
 		}
 	}
 
+	// id must NOT carry a "keep the prior state value" plan modifier such as
+	// UseStateForUnknown. [NET] measurement (gh-app-cci-1, 2026-08-21) found
+	// CircleCI mints a new budget_id on every write to an existing scope, even
+	// one that changes nothing — so a modifier promising Terraform this value
+	// survives an update, when Update then writes a different one into state
+	// anyway, is exactly the shape of a "Provider produced inconsistent result
+	// after apply" error. This cannot be reproduced through this package's
+	// fake-backed harness (calling Update directly, as every other test here
+	// does, never exercises Terraform's own planning phase, so the modifier's
+	// absence or presence changes nothing about what those tests observe) —
+	// this schema-level check is the only regression coverage available for
+	// this specific fix.
+	idAttribute, ok := resp.Schema.Attributes["id"].(rschema.StringAttribute)
+	if !ok {
+		t.Fatalf(`attribute "id" is %T, want rschema.StringAttribute`, resp.Schema.Attributes["id"])
+	}
+	if n := len(idAttribute.PlanModifiers); n != 0 {
+		t.Errorf(`attribute "id" has %d plan modifier(s), want none: %v`, n, idAttribute.PlanModifiers)
+	}
+
 	// credits must be settable: it is the one attribute an update can actually
 	// change.
 	credits, ok := resp.Schema.Attributes["credits"]
@@ -122,6 +143,34 @@ func TestBudgetResourceSchema(t *testing.T) {
 	}
 	if !credits.IsRequired() {
 		t.Error(`attribute "credits" is not required`)
+	}
+
+	// credits must reject 0. [NET] measurement (gh-app-cci-1, 2026-08-21)
+	// found CircleCI answers 400 "Invalid budget settings" for credits=0 (and
+	// accepts credits=1), so a validator that still allowed 0 through at plan
+	// time would let a configuration pass `terraform plan` only to fail at
+	// apply with an error naming no field.
+	creditsInt64, ok := credits.(rschema.Int64Attribute)
+	if !ok {
+		t.Fatalf(`attribute "credits" is %T, want rschema.Int64Attribute`, credits)
+	}
+	if len(creditsInt64.Validators) == 0 {
+		t.Fatal(`attribute "credits" has no validators, want one rejecting 0`)
+	}
+	for _, v := range creditsInt64.Validators {
+		req := validator.Int64Request{ConfigValue: types.Int64Value(0)}
+
+		var respZero validator.Int64Response
+		v.ValidateInt64(ctx, req, &respZero)
+		if !respZero.Diagnostics.HasError() {
+			t.Errorf("credits validator %T accepted 0, want it rejected (measured minimum is 1)", v)
+		}
+
+		var respOne validator.Int64Response
+		v.ValidateInt64(ctx, validator.Int64Request{ConfigValue: types.Int64Value(1)}, &respOne)
+		if respOne.Diagnostics.HasError() {
+			t.Errorf("credits validator %T rejected 1, want it accepted (measured minimum is 1): %v", v, respOne.Diagnostics)
+		}
 	}
 
 	// enforcement_type must be Computed-only: the write route has no field for
@@ -295,13 +344,19 @@ func TestBudgetResourceRead_ListErrorIsNotSilentlyDropped(t *testing.T) {
 	}
 }
 
-// TestBudgetResourceUpdate_ReusesSameBudgetIDAndSendsNoEnforcementType covers
-// two design decisions at once: a second write for the same scope is an
-// upsert (same budget_id, no duplicate entry) rather than a second budget, and
-// the write body never carries enforcement_type — there is nowhere for it to
-// go, and sending it would be evidence this resource pretends to manage a
-// field it cannot.
-func TestBudgetResourceUpdate_ReusesSameBudgetIDAndSendsNoEnforcementType(t *testing.T) {
+// TestBudgetResourceUpdate_MintsNewBudgetIDAndSendsNoEnforcementType replaces
+// a test that used to assert the opposite of measured behaviour for the id: it
+// expected an update to reuse the original budget_id, on the theory that the
+// write is an upsert of the underlying record. [NET] measurement against
+// gh-app-cci-1 (2026-08-21) shows every write for an existing scope —
+// whether or not credits actually changes — deletes the old budget and mints
+// a new budget_id; three consecutive writes produced three different ids.
+// What *is* upsert-like, and what this test still asserts, is the count: the
+// scope still holds exactly one entry after the update, never two. It also
+// still asserts the write body never carries enforcement_type — there is
+// nowhere for it to go, and sending it would be evidence this resource
+// pretends to manage a field it cannot.
+func TestBudgetResourceUpdate_MintsNewBudgetIDAndSendsNoEnforcementType(t *testing.T) {
 	t.Parallel()
 
 	api, host := newFakeBudgetAPI(t)
@@ -326,11 +381,12 @@ func TestBudgetResourceUpdate_ReusesSameBudgetIDAndSendsNoEnforcementType(t *tes
 
 	entries := api.entries(testBudgetOrgID)
 	if len(entries) != 1 {
-		t.Fatalf("fake has %d budget(s) for the org after update, want exactly 1 (upsert, not duplicate): %+v",
-			len(entries), entries)
+		t.Fatalf("fake has %d budget(s) for the org after update, want exactly 1 (still one entry per scope, "+
+			"even though the id underneath changed): %+v", len(entries), entries)
 	}
-	if entries[0].budgetID != firstID {
-		t.Errorf("budget_id changed across update: got %q, want %q (same entry)", entries[0].budgetID, firstID)
+	if entries[0].budgetID == firstID {
+		t.Errorf("budget_id stayed %q across update, want it to have changed: CircleCI mints a new id on "+
+			"every write to an existing scope, per measurement", firstID)
 	}
 	if entries[0].credits != 2000 {
 		t.Errorf("stored credits = %d, want 2000", entries[0].credits)
@@ -340,8 +396,15 @@ func TestBudgetResourceUpdate_ReusesSameBudgetIDAndSendsNoEnforcementType(t *tes
 	if diags := updateResp.State.Get(t.Context(), &out); diags.HasError() {
 		t.Fatalf("reading back state: %v", diags)
 	}
-	if out.ID.ValueString() != firstID {
-		t.Errorf("state id = %q, want %q", out.ID.ValueString(), firstID)
+	// State must hold the id CircleCI actually assigned on this write, not the
+	// one from Create — otherwise a later Delete would send an id the API no
+	// longer recognises.
+	if out.ID.ValueString() != entries[0].budgetID {
+		t.Errorf("state id = %q, want %q (the id from this write)", out.ID.ValueString(), entries[0].budgetID)
+	}
+	if out.ID.ValueString() == firstID {
+		t.Errorf("state id = %q, unchanged from Create's %q; want the new id Update actually produced",
+			out.ID.ValueString(), firstID)
 	}
 }
 
@@ -472,13 +535,21 @@ func TestBudgetResourceDelete(t *testing.T) {
 	}
 }
 
-// TestBudgetResourceDelete_ToleratesAlreadyDeleted covers that a 404 from the
-// delete route is treated as success, not an error.
+// TestBudgetResourceDelete_ToleratesAlreadyDeleted covers that deleting a
+// budget id which no longer exists is treated as success, not an error —
+// replacing a test that modelled the fake's failure as a 404. [NET]
+// measurement (gh-app-cci-1, 2026-08-21) shows the real route answers 500
+// for this case, never 404, so Delete cannot rely on circleci.IsNotFound; it
+// must corroborate via FindBudget that nothing exists for this resource's
+// scope any more before treating the error as tolerable. This test's fake
+// therefore answers 500 too (see fakeBudgetAPI.delete), and nothing is seeded
+// for the scope, so FindBudget's corroboration is what must make this pass.
 func TestBudgetResourceDelete_ToleratesAlreadyDeleted(t *testing.T) {
 	t.Parallel()
 
 	api, host := newFakeBudgetAPI(t)
-	// Nothing seeded: the delete route will 404.
+	// Nothing seeded: the delete route will answer 500, and FindBudget's
+	// corroborating list call will come back empty for this scope.
 	schema := budgetResourceSchemaForTest(t)
 	r := &budgetResource{client: api.client(host)}
 
@@ -499,6 +570,45 @@ func TestBudgetResourceDelete_ToleratesAlreadyDeleted(t *testing.T) {
 
 	if resp.Diagnostics.HasError() {
 		t.Errorf("Delete of an already-deleted budget returned diagnostics, want none: %v", resp.Diagnostics)
+	}
+}
+
+// TestBudgetResourceDelete_ErrorsWhenScopeStillHasABudget covers the other
+// side of the corroboration Delete now does: a DeleteBudget failure must
+// still surface as an error when FindBudget shows the scope is not actually
+// empty, rather than treating every failure as "already gone".
+func TestBudgetResourceDelete_ErrorsWhenScopeStillHasABudget(t *testing.T) {
+	t.Parallel()
+
+	api, host := newFakeBudgetAPI(t)
+	// A real entry exists for this scope, but under a different id than the one
+	// Delete is asked to remove — DeleteBudget will 500 (id not found), and
+	// FindBudget must show the scope is still occupied so the error is not
+	// swallowed.
+	api.seed(testBudgetOrgID, fakeBudgetEntry{budgetID: "the-current-one", credits: 1000})
+	schema := budgetResourceSchemaForTest(t)
+	r := &budgetResource{client: api.client(host)}
+
+	state := budgetStateForTest(t, schema, budgetResourceModel{
+		ID:                types.StringValue("a-stale-id-not-in-the-fake"),
+		OrganizationID:    types.StringValue(testBudgetOrgID),
+		OrgID:             types.StringValue(testBudgetOrgID),
+		ProjectID:         types.StringNull(),
+		Credits:           types.Int64Value(1000),
+		EnforcementType:   types.StringValue(circleci.BudgetEnforcementWarn),
+		Consumption:       types.Int64Value(0),
+		Percentage:        types.Float64Value(0),
+		ThresholdExceeded: types.BoolValue(false),
+	})
+
+	resp := &fwresource.DeleteResponse{State: state}
+	r.Delete(t.Context(), fwresource.DeleteRequest{State: state}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Delete returned no diagnostics for a scope that still has a budget, want an error")
+	}
+	if entries := api.entries(testBudgetOrgID); len(entries) != 1 || entries[0].budgetID != "the-current-one" {
+		t.Errorf("fake budgets = %+v, want the seeded entry untouched", entries)
 	}
 }
 
