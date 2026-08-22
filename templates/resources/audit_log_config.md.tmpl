@@ -9,6 +9,8 @@ description: |-
 
 Manages a CircleCI audit log streaming config: where an organization's audit log events are delivered, as JSON objects written to a customer-owned S3 (or S3-compatible) bucket.
 
+!> **Unvalidated.** This resource's routes have not been confirmed against a real CircleCI installation. A direct probe of every route this family calls (create, get, update, delete, list, and the entitlement check), against four real Cloud organizations with an org-admin token, got back a routing-layer 404 on all of them — the same shape a deliberately made-up path gets, not a resource-level answer. It may not work at all; treat every other claim on this page, including the API row below, as unverified.
+
 !> **Creating a config verifies connectivity to the bucket, even when `is_disabled = true`.** CircleCI assumes `arn` via OIDC and writes a probe object; a role that cannot be assumed, or a bucket that cannot be written to, fails the create. Updating an existing config to `is_disabled = true` does **not** re-verify connectivity, so a config can be disabled even once its destination has become unreachable.
 
 An organization may have at most one config per `target_type`: a second `S3` (or `S3_COMPATIBLE`) config for the same organization is rejected.

@@ -11,6 +11,8 @@ Reports whether a CircleCI organization is entitled to audit log streaming at al
 
 Check this before creating a `circleci_audit_log_config`: creating one against an ineligible organization fails with a 403 at apply time, and this data source lets a configuration produce a clearer, earlier diagnostic instead.
 
+!> **Unvalidated.** This data source's route has not been confirmed against a real CircleCI installation. A direct probe of it, and of the rest of this family's routes, against four real Cloud organizations with an org-admin token, got back a routing-layer 404 — the same shape a deliberately made-up path gets, not a resource-level answer. It may not work at all; treat every other claim on this page, including the API row below, as unverified.
+
 ## Availability
 
 | | |

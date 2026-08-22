@@ -373,6 +373,41 @@ configuration: the five above, plus `GET .../organizations/{org_id}/audit-log/ac
 `POST /api/v2/audit-log/configs/connection/check` (a stateless validate-only
 call, deliberately not wired up — see "Deliberate omissions").
 
+**Addendum, later audit — every claim above was [FAKE]-only until now, and
+[NET] probing could not reach any of these routes at all.** All seven paths in
+this section, and the "thin proxy" framing above it, came from an internal
+route table, never from an executed request — nothing in the test suite talks
+to a real installation. Direct probing with a valid Cloud org-admin token
+against all four `labs` fixture organizations (`gh-app-cci-1`, `gitlab-test`,
+`gh-oauth-cci-1`, `gh-oauth-cci-2`, one of them mid-Scale-trial) got HTTP 404
+`{"message" : "Not Found"}` from `/api/v2/organizations/{org_id}/audit-log/configs`,
+`/api/v2/audit-log/configs`, and `/api/v2/organizations/{org_id}/audit-log/access`,
+and HTTP 404 `{"message":"Route Not Found."}` from the same path under `/api/v3`.
+Both bodies are indistinguishable from a deliberately-made-up path
+(`/api/v2/this-route-does-not-exist-at-all` answers the identical
+pretty-printed `{"message" : "Not Found"}`), and neither matches the
+resource-level 404/403 shapes this API gives elsewhere — compare `circleci_otel_exporter`'s
+own compact `{"message":"Org not found."}` for a bad org id on a route
+(`/api/v2/otel/exporters`) that otherwise works, or the identically-shaped
+`/api/v2/organizations/{org_id}/groups`, which 200s on the same token and same
+orgs. That contrast is the basis for treating this as a routing-layer "no such
+path", not an authorization or entitlement answer from the audit-log service
+itself.
+
+This does not prove the feature has no API anywhere — only that it is not
+reachable at any spelling tried, under either `/api/v2` or `/api/v3`, on
+`circleci.com`, with an org-admin token, on four real Cloud organizations. The
+current CircleCI docs for audit log streaming
+(`circleci.com/docs/guides/security/audit-logs/`) describe only a web-UI setup
+flow and name no API endpoint at all, which is consistent with — though does
+not by itself confirm — this being genuinely unexposed to `/api/v2`. Until
+someone can either reach one of these routes or get an authoritative "this is
+UI-only" from CircleCI, `circleci_audit_log_config`, `circleci_audit_log_configs`
+and `circleci_audit_log_access` should be treated as **unvalidated and
+possibly nonfunctional against production**, not merely "gated behind a plan
+tier this repo's fixtures happen not to have" — the failure observed is a
+routing 404, which precedes any plan-tier check.
+
 ### A `Required` attribute the server ignores is still worth sending
 
 `circleci_runner_resource_class.organization_id` is `Required`, and the provider sends

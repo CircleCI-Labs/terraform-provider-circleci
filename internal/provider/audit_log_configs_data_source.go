@@ -64,6 +64,7 @@ func (d *auditLogConfigsDataSource) Schema(_ context.Context, _ datasource.Schem
 		MarkdownDescription: "Fetches every audit log streaming config configured for a CircleCI " +
 			"organization, including configs created outside Terraform. An organization has at most one " +
 			"config per `target_type`, so this never needs paginating.\n\n" +
+			auditLogUnvalidatedNote + "\n\n" +
 			"~> **CircleCI Cloud only, and only on a Scale plan.** See `circleci_audit_log_config` for why.",
 		Attributes: map[string]schema.Attribute{
 			// See org_id_deprecation.go for why the organization is accepted under

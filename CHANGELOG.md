@@ -47,6 +47,26 @@
   is now documented as a defensive check for a scenario measurement did not observe
   rather than the primary safety net it was described as.
 
+* **`circleci_audit_log_config` accepted `target_type = "S3"` with no `region`, or with an
+  `endpoint` set, and only the resource's own documentation said either was wrong.**
+  Nothing enforced it: `region` is `Optional`+`Computed` (it also serves the
+  `S3_COMPATIBLE` path, where the server defaults it) and `endpoint` is plain `Optional`,
+  so a config violating either rule reached the API — with `region` omitted from the
+  request entirely, since `AuditLogS3Config.Region` carries `json:",omitempty"` — and
+  would have failed with a 400 at apply instead of at plan. Added `ValidateConfig`,
+  mirroring the one `circleci_otel_exporter` already has for its own cross-attribute
+  rule.
+
+  **`circleci_audit_log_config`, `circleci_audit_log_configs` and `circleci_audit_log_access`
+  are unvalidated against a real CircleCI installation, and may not work at all.** Every
+  route this family calls was taken from an internal route table and had never been
+  exercised. Probing all seven of those routes against four real Cloud organizations (an
+  org-admin token, one org mid-Scale-trial) got a routing-layer 404 on every one — the
+  same shape a deliberately made-up path gets, not a resource-level answer — under both
+  `/api/v2` and `/api/v3`. See DESIGN.md's "A pass-through route's wire shape belongs to
+  whatever is behind it" addendum. The resource, both data sources and their generated
+  docs now say so.
+
 * **`circleci_trigger` left `created_at` empty in state after every create, so every
   refresh after an apply showed a permanent diff on it** and `ImportStateVerify` failed.
   The create route does not return the field: `POST

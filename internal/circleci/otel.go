@@ -29,6 +29,13 @@ const (
 
 // OTelExporterLimit is the maximum number of exporter configurations CircleCI
 // allows per organization. Creating a sixth is rejected.
+//
+// [NET] Confirmed against a real Cloud organization (five bare-endpoint
+// creates, then a sixth): the sixth answers HTTP 422, and the response body is
+// the unhelpful `{"message":"Internal server error."}` — not a message that
+// names the limit. This package's own diagnostic (see CreateOTelExporter's
+// caller in the resource) supplies the explanation instead of trusting the
+// API's text.
 const OTelExporterLimit = 5
 
 // OTelRedactedHeaderValue is what the API substitutes for a header value it will
@@ -43,12 +50,19 @@ const OTelExporterLimit = 5
 const OTelRedactedHeaderValue = "xxxx"
 
 // OTelExporterHeaderLimit is the maximum number of headers one exporter may
-// carry. The API also caps a header name at 64 characters and a value
-// at 1024, rejects names beginning with ":" or "grpc-", and rejects the HTTP and
-// gRPC names it manages itself (content-type, content-length, connection,
-// keep-alive, te, trailers, transfer-encoding, upgrade). None of that is
-// enforced here: the API's message is clearer than anything this package could
-// synthesize.
+// carry. [NET] Confirmed against a real Cloud organization: a create with six
+// headers is rejected 400 `{"message":"Too many headers provided."}`, and a
+// create with one header named "grpc-foo" is rejected 400
+// `{"message":"Header name is reserved."}`.
+//
+// The API also caps a header name at 64 characters and a value at 1024,
+// rejects names beginning with ":", and rejects the HTTP and gRPC names it
+// manages itself (content-type, content-length, connection, keep-alive, te,
+// trailers, transfer-encoding, upgrade) — those specifics are carried over
+// from the internal route table this client was built from and have NOT been
+// exercised against the real API; only the header count and the "grpc-"
+// prefix above have. None of it is enforced here regardless: the API's
+// message is clearer than anything this package could synthesize.
 const OTelExporterHeaderLimit = 5
 
 // OTelExporter is an OTLP exporter configuration, as returned by
@@ -99,7 +113,11 @@ type OTelExporter struct {
 // No other scheme is accepted: "grpc://host:4317" parses as neither form and is
 // rejected as malformed. The host must also resolve, and must not resolve to a
 // private, loopback, multicast or link-local address — the service refuses to be
-// pointed at anything inside a network it can reach.
+// pointed at anything inside a network it can reach. [NET] The loopback case is
+// confirmed: "127.0.0.1:4317" against a real organization is rejected 400
+// `{"message":"Invalid endpoint hostname."}`. Private, multicast and
+// link-local are carried over from the internal route table and have not
+// been separately exercised.
 type CreateOTelExporterRequest struct {
 	OrgID    string            `json:"org_id"`
 	Endpoint string            `json:"endpoint"`

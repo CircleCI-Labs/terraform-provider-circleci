@@ -28,11 +28,28 @@ var (
 	_ resource.ResourceWithImportState      = &auditLogConfigResource{}
 	_ resource.ResourceWithModifyPlan       = &auditLogConfigResource{}
 	_ resource.ResourceWithConfigValidators = &auditLogConfigResource{}
+	_ resource.ResourceWithValidateConfig   = &auditLogConfigResource{}
 )
 
 // auditLogConfigTypeName is the Terraform type name, used both for Metadata
 // and for the Cloud-only error.
 const auditLogConfigTypeName = "circleci_audit_log_config"
+
+// auditLogUnvalidatedNote is shared by circleci_audit_log_config,
+// circleci_audit_log_configs and circleci_audit_log_access: none of the three
+// has been exercised against a real CircleCI installation. Every route these
+// resources call was taken from an internal route table and has not been
+// confirmed by an executed request; a direct probe of all seven of that
+// table's paths, against four real Cloud organizations with an org-admin
+// token, got back a routing-layer 404 on every one — the same shape a
+// deliberately made-up path gets — rather than any resource-level answer.
+// See DESIGN.md's "A pass-through route's wire shape belongs to whatever is
+// behind it" addendum for the full comparison.
+const auditLogUnvalidatedNote = "!> **Unvalidated.** This resource's routes have not been confirmed " +
+	"against a real CircleCI installation. A direct probe of every route this family calls, against real " +
+	"Cloud organizations, found none of them reachable — every one answered a routing-layer 404 rather " +
+	"than a resource-level response. It may not work at all. Treat every other claim in this " +
+	"documentation as unverified until someone can confirm it against a live account."
 
 // auditLogARNPattern mirrors the validation the API applies (an AWS or
 // MinIO IAM role ARN), turning what would otherwise be an opaque 400 at apply
@@ -92,6 +109,7 @@ func (r *auditLogConfigResource) Schema(_ context.Context, _ resource.SchemaRequ
 		MarkdownDescription: "Manages a CircleCI audit log streaming config: where an organization's audit " +
 			"log events are delivered, as JSON objects written to a customer-owned S3 (or S3-compatible) " +
 			"bucket.\n\n" +
+			auditLogUnvalidatedNote + "\n\n" +
 			"~> **CircleCI Cloud only, and only on a Scale plan.** Audit log streaming is gated on a " +
 			"Cloud billing plan tier that CircleCI Server installations do not have; CircleCI's own " +
 			"docs describe it as a Scale-plan feature " +
@@ -224,6 +242,80 @@ func (r *auditLogConfigResource) Schema(_ context.Context, _ resource.SchemaRequ
 func (r *auditLogConfigResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		orgIDConfigValidator(),
+	}
+}
+
+// ValidateConfig enforces the region/endpoint rules the schema's own
+// attribute descriptions promise but cannot express on their own:
+// `region` required and `endpoint` forbidden for target_type = S3;
+// `endpoint` required for target_type = S3_COMPATIBLE (region is optional
+// there, and left to the server's own default).
+//
+// Both attributes are Optional (region is also Computed, to receive the
+// server-side default for S3_COMPATIBLE), so nothing on the attributes
+// themselves rejects the wrong combination — without this, an S3 config with
+// no region reaches the API with the field omitted (AuditLogS3Config.Region
+// has `json:",omitempty"`) and fails with a 400 at apply instead of at plan,
+// which is exactly the class of error otelExporterResource.ValidateConfig
+// exists to avoid for its own resource.
+func (r *auditLogConfigResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config auditLogConfigResourceModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// An unknown or null target_type cannot be checked yet; the API rejects it
+	// if it turns out wrong.
+	if config.TargetType.IsNull() || config.TargetType.IsUnknown() {
+		return
+	}
+
+	// unknown is deliberately treated as "not empty": an interpolated value not
+	// yet known at plan time cannot be proven missing, and the API rejects it if
+	// it turns out to be.
+	isEmpty := func(v types.String) bool {
+		return !v.IsUnknown() && (v.IsNull() || v.ValueString() == "")
+	}
+
+	regionEmpty := isEmpty(config.Region)
+	endpointEmpty := isEmpty(config.Endpoint)
+
+	switch config.TargetType.ValueString() {
+	case circleci.AuditLogTargetTypeS3:
+		if regionEmpty {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("region"),
+				"Missing required attribute",
+				fmt.Sprintf(
+					"region is required when target_type = %q.",
+					circleci.AuditLogTargetTypeS3,
+				),
+			)
+		}
+
+		if !endpointEmpty {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("endpoint"),
+				"Invalid attribute combination",
+				fmt.Sprintf(
+					"endpoint must not be set when target_type = %q; it is only valid for target_type = %q.",
+					circleci.AuditLogTargetTypeS3, circleci.AuditLogTargetTypeS3Compatible,
+				),
+			)
+		}
+	case circleci.AuditLogTargetTypeS3Compatible:
+		if endpointEmpty {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("endpoint"),
+				"Missing required attribute",
+				fmt.Sprintf(
+					"endpoint is required when target_type = %q.",
+					circleci.AuditLogTargetTypeS3Compatible,
+				),
+			)
+		}
 	}
 }
 

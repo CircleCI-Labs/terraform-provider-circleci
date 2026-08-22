@@ -10,17 +10,28 @@ import "context"
 // customer-owned S3 (or S3-compatible) bucket.
 //
 // These are "/api/v2/organizations/{org_id}/audit-log/configs" and
-// "/api/v2/audit-log/configs[/{id}]". The public API only rewrites the URL
-// path before forwarding to the backend that actually owns them — the
-// request and response bodies below are exactly what that backend sends and
-// expects. See DESIGN.md for why that distinction matters: the public API's
-// own tests use fabricated placeholder bodies ("s3"/"bucket"/"name") that do
-// not reflect the real wire shape.
+// "/api/v2/audit-log/configs[/{id}]", per an internal route table — NOT
+// confirmed by an executed request. See DESIGN.md for why that distinction
+// matters: the public API's own tests use fabricated placeholder bodies
+// ("s3"/"bucket"/"name") that do not reflect the real wire shape, if this
+// route table is even still current.
+//
+// [NET] It is not current, or not reachable this way: probing all seven
+// routes in this file against four real Cloud organizations (org-admin
+// token, one mid-Scale-trial) got back a routing-layer 404
+// (`{"message" : "Not Found"}` under /api/v2, `{"message":"Route Not
+// Found."}` under /api/v3) — the same shape a deliberately nonexistent path
+// gets, and unlike this API's actual resource-level 404/403 bodies
+// elsewhere. See DESIGN.md's "A pass-through route's wire shape belongs to
+// whatever is behind it" addendum for the full comparison. Treat every claim
+// in this file as UNVALIDATED against production, not merely
+// plan-gated — the failure precedes any plan-tier check.
 //
 // Unlike the collection routes, the single-config routes (get, update,
 // delete) are NOT nested under /organizations/{org_id}/...: they address a
 // config by its bare id. Update is a PUT to the bare collection path with the
-// id carried in the body, not a per-id PUT.
+// id carried in the body, not a per-id PUT. (Also per the route table, also
+// unconfirmed.)
 const (
 	auditLogConfigsRoute      = "/organizations/%s/audit-log/configs"
 	auditLogConfigRoute       = "/audit-log/configs/%s"

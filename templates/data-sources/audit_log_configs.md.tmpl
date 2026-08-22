@@ -9,6 +9,8 @@ description: |-
 
 Fetches every audit log streaming config configured for a CircleCI organization, including configs created outside Terraform. An organization has at most one config per `target_type`, so this never needs paginating.
 
+!> **Unvalidated.** This data source's route has not been confirmed against a real CircleCI installation. A direct probe of it, and of the rest of this family's routes, against four real Cloud organizations with an org-admin token, got back a routing-layer 404 — the same shape a deliberately made-up path gets, not a resource-level answer. It may not work at all; treat every other claim on this page, including the API row below, as unverified.
+
 ## Availability
 
 | | |
