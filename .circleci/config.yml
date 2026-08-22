@@ -125,106 +125,18 @@ commands:
       - run:
           name: What this run actually exercised
           when: always
+          # The logic lives in .circleci/scripts/summarize-acceptance-run.sh,
+          # not here, so it can be unit-tested against fixture logs/XML
+          # outside a CircleCI job — see summarize-acceptance-run_test.sh next
+          # to it. This step is just: run it, and fail the job if it does.
+          #
+          # It reads two things this job's earlier steps produced
+          # (test-reports/acceptance.log, test-reports/tests.xml) and writes
+          # test-reports/vcs-coverage.txt, which store_results below persists
+          # as this job's artifact.
           command: |
-            set -euo pipefail
-
-            log=test-reports/acceptance.log
-            xml=test-reports/tests.xml
-            out=test-reports/vcs-coverage.txt
-
-            if [ ! -s "$log" ]; then
-              echo "No $log, so the test step did not get far enough to produce one." >&2
-              echo "Read that step's failure instead; there is nothing to summarize here." >&2
-              exit 0
-            fi
-
-            # The block TestMain prints once every test has finished. It ends
-            # where `go test` prints the package's own ok/FAIL line.
-            block="$(awk '/^=== VCS integration coverage/ { inside = 1 }
-                          inside && /^(ok|FAIL|---)/       { inside = 0 }
-                          inside                           { print }' "$log")"
-
-            # gotestsum's JUnit report puts one <testcase> per line and marks a
-            # skipped one with a <skipped> child on the next line, so the two
-            # counts need nothing but grep.
-            total=0
-            skipped=0
-            if [ -s "$xml" ]; then
-              total="$(grep -c 'name="TestAcc' "$xml" || true)"
-              skipped="$(grep -A 1 'name="TestAcc' "$xml" | grep -c '<skipped' || true)"
-            fi
-
-            # Why each test skipped, counted by the message the helper printed.
-            # These three are the whole vocabulary: acctest_test.go's testAccEnv
-            # has one message for unset and one for a placeholder, and
-            # provider_test.go's testAccPreCheck has one for a missing token.
-            no_token="$(grep -c 'no API token for acceptance tests' "$log" || true)"
-            no_fixture="$(grep -c 'must be set for this acceptance test' "$log" || true)"
-            placeholder="$(grep -c 'is set to a placeholder value' "$log" || true)"
-
-            {
-              if [ -n "$block" ]; then
-                printf '%s\n' "$block"
-              else
-                echo "=== VCS integration coverage ==="
-                echo "  (never printed: no VCS-gated test reached testRequireVCSType)"
-              fi
-
-              echo
-              echo "=== Acceptance tests (TestAcc*) in internal/provider ==="
-              printf '  not skipped: %s\n' "$((total - skipped))"
-              printf '  skipped:     %s\n' "$skipped"
-              printf '  total:       %s\n' "$total"
-              echo
-              echo "=== Skips by cause ==="
-              printf '  no API token:            %s\n' "$no_token"
-              printf '  fixture variable unset:  %s\n' "$no_fixture"
-              printf '  fixture is placeholder:  %s\n' "$placeholder"
-              echo
-              echo "=== Every skip, with its reason ==="
-              echo "(each reason names the CIRCLECI_TEST_* variable that was missing)"
-              grep -E -A 1 '^=== SKIP: .*TestAcc' "$log" || echo "  (none)"
-            } | tee "$out"
-
-            # The checks below are the reason this step is not decoration. A job
-            # that talks to no organization at all still passes every assertion
-            # it makes, so without them "green" and "did nothing" look identical
-            # from the outside — which is the failure mode this whole
-            # arrangement exists to rule out.
-            #
-            # Note which check is doing the work. "Every TestAcc test skipped"
-            # is nearly useless on its own: most TestAcc tests in this package
-            # are mock-backed and run without any credential at all — a
-            # credential-less run of ./internal/provider/... reports 391 tests
-            # with 38 skipped, and would sail past a count-based guard.
-            if [ -z "$block" ]; then
-              echo >&2
-              echo "FAIL: no VCS integration coverage block was printed, so no VCS-gated test ever" >&2
-              echo "resolved CIRCLECI_TEST_VCS_TYPE. Either it is unset for this job or the suite" >&2
-              echo "did not reach the gate; either way this job proved nothing about the" >&2
-              echo "integration it claims to cover." >&2
-              exit 1
-            fi
-
-            # This is the one that catches a detached context. Every fixture
-            # variable is set in this job's own environment, so a test can only
-            # get as far as the token check by having found its fixtures — and
-            # then skip because CIRCLE_TOKEN is absent. Without this check that
-            # is a green job that created nothing.
-            if [ "$no_token" -gt 0 ]; then
-              echo >&2
-              echo "FAIL: tests skipped for a missing API token ($no_token of them), so CIRCLE_TOKEN" >&2
-              echo "never reached this job. The terraform-provider-acc-token context is not" >&2
-              echo "attached, or its restriction excludes this branch." >&2
-              exit 1
-            fi
-
-            if [ "$total" -gt 0 ] && [ "$((total - skipped))" -eq 0 ]; then
-              echo >&2
-              echo "FAIL: every one of the $total acceptance tests skipped. Even the mock-backed" >&2
-              echo "ones did not run, so this is not a fixture problem — read the test step." >&2
-              exit 1
-            fi
+            bash .circleci/scripts/summarize-acceptance-run.sh \
+              test-reports/acceptance.log test-reports/tests.xml test-reports/vcs-coverage.txt
       - store_results
 
 jobs:
@@ -376,8 +288,20 @@ jobs:
   # gh-oauth-cci-2: OAuth-connected and *also* carrying a GitHub App
   # installation. github_hybrid is its own integration key rather than an alias
   # for github_oauth — see TESTING.md, which records the API evidence for the
-  # distinction and why none of the four VCS-gated tests names it yet. Expect
-  # "Exercised by this run (0)" here for that reason, as in the GitLab job.
+  # distinction and why no testRequireVCSType-gated test names it yet.
+  #
+  # gh-oauth-cci-2 is also a CLASSIC (VCS-backed) organization, so
+  # testRequireStandaloneOrg's tests skip here too (project_resource_test.go)
+  # — every route into a real API call in this package is gated to an
+  # integration or an organization class this job's fixtures are neither, so
+  # "Exercised by this run (0)" is not a possibility to expect and shrug off,
+  # it is the honest count, and .circleci/scripts/summarize-acceptance-run.sh
+  # fails this job on it (the check that catches a job proving nothing — see
+  # that script). Leave it failing rather than gating anything to
+  # github_hybrid just to make it pass: this integration genuinely has zero
+  # real-API coverage today. It stops failing the day a real acceptance test
+  # is written that this organization's class or integration actually
+  # supports and is gated to include github_hybrid.
   #
   # No ALT_ORG pair. testAltOrgID resolves CIRCLECI_TEST_GH_HYBRID_ALT_ORG_ID
   # under this integration, and a second *hybrid* organization is not something
@@ -399,11 +323,15 @@ jobs:
     executor: go
     environment:
       CIRCLECI_TEST_VCS_TYPE: gitlab
-      # gitlab-test. Expect "Exercised by this run (0)" in this job's summary
-      # and do not read it as a misconfiguration: all four VCS-gated tests
-      # require a GitHub or Bitbucket integration (see TESTING.md's table), so
-      # zero of them can run against GitLab. The ungated majority of the suite
-      # still does, which is what the ran/skipped counts underneath are for.
+      # gitlab-test. Every testRequireVCSType-gated test skips here: those
+      # tests require a GitHub or Bitbucket integration (see TESTING.md's
+      # table), and none names gitlab. That is NOT the same as "Exercised by
+      # this run (0)", though — gitlab-test's slug below is a STANDALONE
+      # ("circleci/…") organization, so testRequireStandaloneOrg's tests
+      # (project_resource_test.go) run against it same as they would against
+      # any other standalone org, regardless of VCS type. So this job's real
+      # coverage is whatever those tests are, not zero, and
+      # summarize-acceptance-run.sh fails the job if that ever drops to zero.
       CIRCLECI_TEST_GL_CLOUD_ORG_ID: eea3a305-6eb2-4a6b-b011-9bd71b88c8d2
       CIRCLECI_TEST_GL_CLOUD_ORG_SLUG: circleci/WU9ypMiQgrZYrbiHJUGT13
       CIRCLECI_TEST_GL_CLOUD_ORG_NAME: gitlab-test
