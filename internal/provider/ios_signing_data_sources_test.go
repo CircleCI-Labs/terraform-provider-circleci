@@ -140,6 +140,10 @@ data "circleci_ios_signing_configs" "test" {
 				resource.TestCheckResourceAttr("data.circleci_ios_signing_configs.test", "configs.#", "1"),
 				resource.TestCheckResourceAttr("data.circleci_ios_signing_configs.test", "configs.0.name", "release-config"),
 				resource.TestCheckResourceAttr("data.circleci_ios_signing_configs.test", "configs.0.provisioning_profiles.0.file_name", "release.mobileprovision"),
+				// The profile's own id, reported alongside file_name in production and
+				// distinct from the signing configuration's id -- see the [NET] note on
+				// circleci.SigningProvisioningProfile.ID.
+				resource.TestCheckResourceAttrSet("data.circleci_ios_signing_configs.test", "configs.0.provisioning_profiles.0.id"),
 				resource.TestCheckNoResourceAttr("data.circleci_ios_signing_configs.test", "configs.0.provisioning_profiles.0.blob"),
 				iosSigningCheckNoSecretEcho("data.circleci_ios_signing_configs.test", "cGxpc3Q...profile..."),
 			),

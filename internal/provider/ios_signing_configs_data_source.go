@@ -38,9 +38,10 @@ type iosSigningConfigItemModel struct {
 }
 
 // iosSigningConfigItemProfileModel maps one provisioning profile in the list.
-// Only file_name is reported: the profile's content is write-only, exactly
+// id and file_name are reported; the profile's content is write-only, exactly
 // like a certificate's cert_blob, and is never echoed back by the API.
 type iosSigningConfigItemProfileModel struct {
+	Id       types.String `tfsdk:"id"`
 	FileName types.String `tfsdk:"file_name"`
 }
 
@@ -118,6 +119,14 @@ func (d *iosSigningConfigsDataSource) Schema(_ context.Context, _ datasource.Sch
 							Computed: true,
 							NestedObject: schema.NestedAttributeObject{
 								Attributes: map[string]schema.Attribute{
+									"id": schema.StringAttribute{
+										MarkdownDescription: "Unique identifier (UUID) of the provisioning " +
+											"profile itself, distinct from the signing configuration's `id`. " +
+											"There is no route that takes this id -- a provisioning profile is " +
+											"only ever read or written as part of the whole list on its signing " +
+											"configuration -- so it is reported for reference only.",
+										Computed: true,
+									},
 									"file_name": schema.StringAttribute{
 										MarkdownDescription: "The profile's display name.",
 										Computed:            true,
@@ -180,6 +189,7 @@ func (d *iosSigningConfigsDataSource) Read(ctx context.Context, req datasource.R
 		profiles := make([]iosSigningConfigItemProfileModel, 0, len(cfg.ProvisioningProfiles))
 		for _, p := range cfg.ProvisioningProfiles {
 			profiles = append(profiles, iosSigningConfigItemProfileModel{
+				Id:       types.StringValue(p.ID),
 				FileName: types.StringValue(p.FileName),
 			})
 		}
