@@ -196,9 +196,17 @@ func (a *otelAPI) handleCreate(t *testing.T, w http.ResponseWriter, r *http.Requ
 	defer a.mu.Unlock()
 
 	if len(a.exporters) >= a.limit {
-		// The service answers 422, not 400, when an org is at its exporter limit.
+		// The service answers 422, not 400, when an org is at its exporter
+		// limit — but [NET], against a real organization already at the limit,
+		// its message is the unhelpful generic "Internal server error.", not a
+		// message that names the limit. This fake used to invent a friendlier
+		// one ("Org has reached the maximum number of exporters."); that was a
+		// belief nobody had checked, and the real answer is worse than it
+		// assumed. The provider's own diagnostic (see otelExporterResource.Create)
+		// supplies the explanation instead of relying on the API's text, which is
+		// exactly why that gap did not surface as a test failure.
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = w.Write([]byte(`{"message":"Org has reached the maximum number of exporters."}`))
+		_, _ = w.Write([]byte(`{"message":"Internal server error."}`))
 
 		return
 	}

@@ -48,6 +48,7 @@ func (d *auditLogAccessDataSource) Schema(_ context.Context, _ datasource.Schema
 		MarkdownDescription: "Reports whether a CircleCI organization is entitled to audit log streaming " +
 			"at all — i.e. whether it is on the required billing plan tier — as distinct from whether it " +
 			"has actually configured a destination with `circleci_audit_log_config`.\n\n" +
+			auditLogUnvalidatedNote + "\n\n" +
 			"Check this before creating a `circleci_audit_log_config`: creating one against an ineligible " +
 			"organization fails with a 403 at apply time, and this data source lets a configuration " +
 			"produce a clearer, earlier diagnostic instead.\n\n" +

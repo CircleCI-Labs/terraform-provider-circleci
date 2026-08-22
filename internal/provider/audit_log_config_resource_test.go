@@ -451,6 +451,74 @@ func TestAccAuditLogConfigResource_ConnectionCheckFailure(t *testing.T) {
 	})
 }
 
+// TestAccAuditLogConfigResource_RequiresRegionForS3 covers a cross-attribute
+// rule the schema alone cannot express: `region` is documented as required
+// when `target_type = "S3"`, but the attribute itself is Optional+Computed
+// (it also serves the S3_COMPATIBLE path, where the server defaults it). With
+// no ValidateConfig, an S3 config with no region reached the fake with the
+// field omitted entirely (Region has `json:",omitempty"`) and only the fake's
+// own bookkeeping would have caught it; the real API would 400 at apply,
+// which is exactly the "opaque error mid-apply" this provider otherwise
+// avoids by construction (see otelExporterResource.ValidateConfig).
+func TestAccAuditLogConfigResource_RequiresRegionForS3(t *testing.T) {
+	api := &auditLogConfigAPI{}
+	srv := newAuditLogConfigServer(t, api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      auditLogConfigResourceConfig(srv.URL, "S3", "", "", false),
+			ExpectError: regexp.MustCompile(`(?s)region.*is required when target_type`),
+		}},
+	})
+
+	if len(api.recorded()) != 0 {
+		t.Errorf("request(s) reached the fake API: %v; the rejection must happen at plan time", api.recorded())
+	}
+}
+
+// TestAccAuditLogConfigResource_RejectsEndpointForS3 is the converse: `endpoint`
+// is documented as forbidden for `target_type = "S3"`, but nothing enforced
+// that before apply.
+func TestAccAuditLogConfigResource_RejectsEndpointForS3(t *testing.T) {
+	api := &auditLogConfigAPI{}
+	srv := newAuditLogConfigServer(t, api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: auditLogConfigResourceConfig(
+				srv.URL, "S3", "us-east-1", "https://s3.example.com", false,
+			),
+			ExpectError: regexp.MustCompile(`(?s)endpoint.*must not be set when target_type`),
+		}},
+	})
+
+	if len(api.recorded()) != 0 {
+		t.Errorf("request(s) reached the fake API: %v; the rejection must happen at plan time", api.recorded())
+	}
+}
+
+// TestAccAuditLogConfigResource_RequiresEndpointForS3Compatible mirrors the
+// two tests above for the other target type: `endpoint` is documented as
+// required when `target_type = "S3_COMPATIBLE"`.
+func TestAccAuditLogConfigResource_RequiresEndpointForS3Compatible(t *testing.T) {
+	api := &auditLogConfigAPI{}
+	srv := newAuditLogConfigServer(t, api)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      auditLogConfigResourceConfig(srv.URL, "S3_COMPATIBLE", "", "", false),
+			ExpectError: regexp.MustCompile(`(?s)endpoint.*is required when target_type`),
+		}},
+	})
+
+	if len(api.recorded()) != 0 {
+		t.Errorf("request(s) reached the fake API: %v; the rejection must happen at plan time", api.recorded())
+	}
+}
+
 func TestAccAuditLogConfigResource_RejectsInvalidTargetType(t *testing.T) {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
