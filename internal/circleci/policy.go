@@ -40,12 +40,12 @@ const PolicyContextConfig = "config"
 
 // PolicyContextCustom is documented by CircleCI but NOT accepted by the API.
 //
-// Confirmed against every route that takes a {context} path segment: create
-// bundle, get bundle and get document each validate it against the single
-// value "config", and both decision-settings routes validate it the same way
-// and then re-check it a second time. A request naming "custom" is rejected
-// with HTTP 400 on all five. There is no route anywhere in the API for which
-// "custom" is valid.
+// [NET, measured 2026-08-21] Confirmed against every route that takes a
+// {context} path segment: get bundle, create/replace bundle, get document, get
+// decision settings and set decision settings. A request naming "custom" is
+// rejected with HTTP 400 on all five, every time with the identical body
+// `{"error":"Context: must be a valid value."}`. There is no route anywhere in
+// the API for which "custom" is valid.
 //
 // It is retained as a named constant so the rejection is discoverable rather than
 // mysterious, and it is deliberately not offered in the resource validators.
@@ -59,8 +59,16 @@ const PolicyContextCustom = "custom"
 // Note that the API caps a whole bundle upload at roughly 2.5 MiB and answers
 // HTTP 413 beyond that; there is no per-policy limit.
 type Policy struct {
-	// Name is the policy's name within the bundle, conventionally a filename
-	// ending in .rego.
+	// Name is the policy's name.
+	//
+	// [NET, measured 2026-08-21] This is NOT a filename, despite the ".rego"
+	// convention suggested elsewhere: it is the value the Rego itself declares
+	// in its required first rule, `policy_name["some_name"]`. Content whose
+	// first rule is not that declaration is rejected by the upload route with
+	// HTTP 400, so every Policy that exists has one. It always equals the key
+	// the same policy is filed under in a PolicyBundle map — CircleCI derives
+	// that map's keys from this field, not from whatever key an upload
+	// submitted for the policy (see PolicyBundle and SetPolicyBundle).
 	Name string `json:"name"`
 	// Content is the Rego source.
 	Content string `json:"content"`
@@ -76,6 +84,15 @@ type Policy struct {
 // replaces every policy in the context at once. A bundle is therefore the
 // smallest unit that can be managed, which is why the Terraform resource is
 // modelled on the bundle rather than on the individual policy.
+//
+// [NET, measured 2026-08-21] The key is the Rego-declared policy_name (see
+// Policy.Name), and CircleCI derives it that way unconditionally: uploading
+// {"probe.rego": "package org\n\npolicy_name[\"probe_policy\"]\n"} is followed
+// by a GET returning {"probe_policy": {...}} — "probe.rego" is discarded and
+// appears nowhere in any response. A bundle's key set therefore only equals
+// an upload's key set when every uploaded key was already spelled identically
+// to its own policy's declared name. configPolicyBundleResource.warnOnKeyMismatch
+// is the Terraform-side guard for a configuration that gets this wrong.
 type PolicyBundle map[string]Policy
 
 // UnmarshalJSON decodes a bundle response.
@@ -87,10 +104,12 @@ type PolicyBundle map[string]Policy
 // plausible shapes: a bare Rego string, a Policy object, and a one-element array
 // of Policy objects.
 //
-// This has since been confirmed against the API directly: **every entry is
-// in practice a flat object**, and the other two branches below are
-// unreachable in production. The tolerance is kept deliberately rather than
-// tightened — the branches are cheap, they are covered by tests, and an
+// [NET, measured 2026-08-21] This has now actually been confirmed against
+// production, on all four fixture organizations (two standalone, two classic)
+// and against both an empty context and one holding a real policy: **every
+// entry is in practice a flat object**, and the other two branches below were
+// never observed. The tolerance is kept deliberately rather than tightened —
+// the branches are cheap, they are covered by tests, and an
 // experimental-adjacent endpoint whose own schema is malformed is not one to
 // hard-code an assumption against. What must not happen is code elsewhere
 // *relying* on a shape this decoder merely tolerates, so:
@@ -195,9 +214,9 @@ type policyBundlePayload struct {
 //
 // Enabled is a pointer, and omitempty, so that an unset value can never reach the
 // wire as false and switch enforcement off by accident. That is the only reason:
-// despite the route being a PATCH, it does **not** support a partial update. The
-// handler validates the decoded body with a NotNil rule on enabled, so a request
-// body of {} is rejected with HTTP 400 rather than leaving the current value
+// despite the route being a PATCH, it does **not** support a partial update. [NET,
+// measured 2026-08-21] A request body of {} is rejected with HTTP 400 and body
+// `{"error":"enabled: is required."}` rather than leaving the current value
 // alone. Every caller must set Enabled.
 type PolicyDecisionSettings struct {
 	Enabled *bool `json:"enabled,omitempty"`
@@ -256,15 +275,30 @@ func (c *Client) GetPolicyDocument(ctx context.Context, ownerID, policyContext, 
 // only write the API offers, and it is why nothing smaller than a bundle can be
 // managed independently.
 //
-// When dryRun is true the API reports the diff the upload would produce without
-// applying it. A real upload answers 201 and a dry run answers 200; both carry
-// the same body, whose three arrays are each omitted when empty, so an upload
-// that changed nothing decodes as a zero-valued PolicyBundleDiff.
+// [NET, measured 2026-08-21] When dryRun is true the API validates and reports
+// the diff the upload would produce without applying it — confirmed by
+// dry-running an empty upload against a bundle that already held a policy: the
+// response reported deleted:["<name>"], and a follow-up GET showed the policy
+// still present. A real upload answers 201 and a dry run answers 200; both
+// carry the same body, whose three arrays are each omitted when empty, so an
+// upload that changed nothing decodes as a zero-valued PolicyBundleDiff.
 //
-// Rego that does not parse is a 400 ("invalid rego content: ..."), and a bundle
-// over the service's size budget is a 413 — the size limit is enforced by a
-// max-body-size middleware ahead of the handler, so it applies to the encoded
-// request rather than to the sum of the policy strings.
+// [NET] The names in Created/Modified/Deleted are each policy's declared
+// policy_name (see PolicyBundle), not the map key that named it in policies —
+// uploading {"probe.rego": policy_name["probe_policy"]} reported
+// created:["probe_policy"].
+//
+// Rego that does not parse is a 400. [NET] Confirmed messages: content with no
+// rule at all is `{"error":"invalid rego content: failed to parse policy
+// file(s): failed to parse file: \"<key>\": must declare rule \"policy_name\"
+// but module contains no rules"}`; a first rule that is not named policy_name
+// names that rule instead ("first rule declaration must be \"policy_name\" but
+// found \"<rule>\""); and a policy_name declared with `=` rather than as a
+// set/object key is `"invalid policy_name declaration: must declare as key"`.
+// A bundle over the service's size budget is a 413 — the size limit is
+// enforced by a max-body-size middleware ahead of the handler, so it applies to
+// the encoded request rather than to the sum of the policy strings (not
+// independently confirmed here; unchanged from the prior read of the code).
 func (c *Client) SetPolicyBundle(
 	ctx context.Context, ownerID, policyContext string, policies map[string]string, dryRun bool,
 ) (*PolicyBundleDiff, error) {

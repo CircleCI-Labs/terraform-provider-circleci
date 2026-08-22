@@ -23,6 +23,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
@@ -76,6 +77,10 @@ type oidcClaimsAPI struct {
 	mu       sync.Mutex
 	scopes   map[string]*oidcScopeState
 	requests []string
+	// clock is a deterministic stand-in for wall-clock time, advanced on every
+	// delete so each reset gets a distinct *_updated_at tombstone rather than
+	// all resets within one test sharing a timestamp.
+	clock int
 }
 
 type oidcScopeState struct {
@@ -172,10 +177,11 @@ func (a *oidcClaimsAPI) handleDelete(t *testing.T, w http.ResponseWriter, r *htt
 
 	claims := r.URL.Query().Get("claims")
 	if claims == "" {
-		// The parameter is required; the real API answers 400 without it.
+		// [NET, measured 2026-08-21] The parameter is required; the real API
+		// answers 400 without it, with exactly this body (capital C).
 		t.Error("delete request carried no claims query parameter")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"claims: cannot be blank."}`))
+		_, _ = w.Write([]byte(`{"error":"Claims: cannot be blank."}`))
 
 		return
 	}
@@ -185,14 +191,24 @@ func (a *oidcClaimsAPI) handleDelete(t *testing.T, w http.ResponseWriter, r *htt
 
 	state := a.scope(r.URL.Path)
 
+	// [NET, measured 2026-08-21] A delete resets the claim's value, but its
+	// *_updated_at timestamp is a tombstone that is never cleared: it is
+	// stamped with a fresh time on every reset, the same as on a write, and
+	// stays populated forever once a scope has any history — even in a
+	// response where the corresponding claim value is fully absent (see
+	// OIDCCustomClaims.AudienceUpdatedAt). A fake that cleared it to "" here
+	// previously encoded the opposite, untested belief.
+	a.clock++
+	touchedAt := fmt.Sprintf("2024-01-02T03:%02d:00Z", a.clock%60)
+
 	for _, claim := range strings.Split(claims, ",") {
 		switch claim {
 		case "audience":
 			state.audience = nil
-			state.audienceUpdatedAt = ""
+			state.audienceUpdatedAt = touchedAt
 		case "ttl":
 			state.ttl = nil
-			state.ttlUpdatedAt = ""
+			state.ttlUpdatedAt = touchedAt
 		default:
 			t.Errorf("delete request asked for unknown claim %q", claim)
 		}
@@ -218,10 +234,22 @@ func (a *oidcClaimsAPI) write(w http.ResponseWriter, path string) {
 		// order the audience was sent in and reports it back in an order of its
 		// own. See reorderedAudienceLikeTheAPI.
 		payload["audience"] = reorderedAudienceLikeTheAPI(*state.audience)
+	}
+	// [NET, measured 2026-08-21] audience_updated_at is a tombstone: once a
+	// scope has any history, it is present in every response regardless of
+	// whether "audience" itself is present — including a response to a PATCH
+	// that never mentioned audience at all. Gating it on state.audience != nil
+	// (as this fake previously did) hides exactly the case
+	// TestAccOIDCCustomClaimsResetLeavesUpdatedAtTombstone exists to catch:
+	// the timestamp surviving after the claim it names has been reset to its
+	// default. Same for ttl_updated_at and ttl.
+	if state.audienceUpdatedAt != "" {
 		payload["audience_updated_at"] = state.audienceUpdatedAt
 	}
 	if state.ttl != nil {
 		payload["ttl"] = *state.ttl
+	}
+	if state.ttlUpdatedAt != "" {
 		payload["ttl_updated_at"] = state.ttlUpdatedAt
 	}
 
@@ -260,6 +288,16 @@ func (a *oidcClaimsAPI) reset(path string) {
 	defer a.mu.Unlock()
 
 	a.scopes[path] = &oidcScopeState{}
+}
+
+// audienceUpdatedAt returns a scope's stored audience tombstone timestamp,
+// under lock so -race has nothing to complain about when a test reads it
+// after the test framework's own request goroutines have finished writing it.
+func (a *oidcClaimsAPI) audienceUpdatedAt(path string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.scope(path).audienceUpdatedAt
 }
 
 func TestAccOIDCCustomClaimsResourceOrgScope(t *testing.T) {
@@ -567,6 +605,75 @@ resource "circleci_oidc_custom_claims" "test" {
 	if !sawAudienceOnlyDelete {
 		t.Errorf("dropping audience from the configuration did not reset it, got %v", api.recorded())
 	}
+}
+
+// TestAccOIDCCustomClaimsResetLeavesUpdatedAtTombstone is the regression test
+// for the *_updated_at fields' real behavior: [NET, measured 2026-08-21]
+// resetting a claim does NOT clear its *_updated_at timestamp, unlike the
+// value itself. Dropping "audience" from the configuration (which triggers a
+// DELETE, not merely omits it from a PATCH) must still leave
+// audience_updated_at non-null, because that is what production actually
+// returns — a fake that cleared it to "" on delete would make this resource
+// look like it can return that attribute to null, which the real API never
+// does once a scope has any history.
+func TestAccOIDCCustomClaimsResetLeavesUpdatedAtTombstone(t *testing.T) {
+	api := newOIDCClaimsAPI()
+	srv := newOIDCClaimsServer(t, api)
+
+	both := governanceProviderConfig(srv.URL) + fmt.Sprintf(`
+resource "circleci_oidc_custom_claims" "test" {
+  organization_id = %q
+  audience        = ["one"]
+  ttl             = "1h"
+}
+`, testOIDCOrgID)
+
+	ttlOnly := governanceProviderConfig(srv.URL) + fmt.Sprintf(`
+resource "circleci_oidc_custom_claims" "test" {
+  organization_id = %q
+  ttl             = "1h"
+}
+`, testOIDCOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: governanceProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: both},
+			{
+				// Dropping audience deletes it; audience_updated_at must stay
+				// non-null even though the resource no longer manages that claim
+				// and the API's audience value itself is now absent.
+				Config: ttlOnly,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_oidc_custom_claims.test",
+						tfjsonpath.New("audience"),
+						knownvalue.Null(),
+					),
+					// The resource's own state must carry this through, not just
+					// the fake's internal bookkeeping: Read() populates
+					// audience_updated_at from whatever the API returns, and the
+					// API returns this tombstone even for a claim the resource no
+					// longer manages.
+					statecheck.ExpectKnownValue(
+						"circleci_oidc_custom_claims.test",
+						tfjsonpath.New("audience_updated_at"),
+						knownvalue.NotNull(),
+					),
+				},
+				Check: func(*terraform.State) error {
+					if got := api.audienceUpdatedAt("/api/v2/org/" + testOIDCOrgID + "/oidc-custom-claims"); got == "" {
+						return fmt.Errorf(
+							"audience_updated_at was cleared by the reset; production never clears it " +
+								"once a scope has history",
+						)
+					}
+
+					return nil
+				},
+			},
+		},
+	})
 }
 
 // TestAccOIDCCustomClaimsResetOutsideTerraform covers drift detection. The API

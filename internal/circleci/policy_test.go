@@ -470,12 +470,13 @@ func TestSetPolicyDecisionSettingsPayload(t *testing.T) {
 // off.
 //
 // It does NOT mean the route supports a partial update, which is what the pointer
-// was originally documented as being for. The handler validates the decoded body
-// with a NotNil rule on enabled, so the empty object this produces is rejected
-// with a 400 rather than leaving the current value alone — and the fake here
-// answers exactly that, so nothing in this package can come to rely on a partial
-// PATCH working. Both halves are asserted: the body must be empty (never false),
-// and the call must fail.
+// was originally documented as being for. [NET, measured 2026-08-21] The real
+// route rejects a body of {} with 400 and `{"error":"enabled: is required."}`
+// rather than leaving the current value alone — the fake here answers exactly
+// that message, so nothing in this package can come to rely on a partial PATCH
+// working, and no assertion here is keyed to a message this project only ever
+// asserted, never measured. Both halves are asserted: the body must be empty
+// (never false), and the call must fail.
 func TestSetPolicyDecisionSettingsOmitsUnsetEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -486,7 +487,7 @@ func TestSetPolicyDecisionSettingsOmitsUnsetEnabled(t *testing.T) {
 
 		if _, ok := gotBody["enabled"]; !ok {
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"enabled: cannot be blank."}`))
+			_, _ = w.Write([]byte(`{"error":"enabled: is required."}`))
 
 			return
 		}
@@ -509,7 +510,7 @@ func TestSetPolicyDecisionSettingsOmitsUnsetEnabled(t *testing.T) {
 	if !circleci.HasStatus(err, http.StatusBadRequest) {
 		t.Errorf("HasStatus(err, 400) = false, err = %v", err)
 	}
-	if got := circleci.Detail(err); !strings.Contains(got, "cannot be blank") {
+	if got := circleci.Detail(err); !strings.Contains(got, "is required") {
 		t.Errorf("Detail(err) = %q, want the service's own message", got)
 	}
 }
@@ -532,19 +533,20 @@ func TestPolicyContextIsNotACircleCIContext(t *testing.T) {
 // PolicyContextCustom exists to document: the constant is spelled correctly and
 // the API refuses it everywhere.
 //
-// Every handler taking the {context} segment validates it against a single
-// permitted value, "config" — the bundle routes with an In(internal.Config) rule
-// and the decision-settings routes with In("config") plus a second explicit
-// comparison. So "custom" is a 400 on all of them, and the fake answers that way
-// rather than accepting it. The client deliberately does not validate the value
-// itself: the API's message is clearer, and the schema refuses it at plan time.
+// [NET, measured 2026-08-21] Every one of the five routes below was probed
+// directly against the real API with policyContext="custom" and every one
+// answered 400 with the identical body `{"error":"Context: must be a valid
+// value."}` (capital C — the fake preserves that casing rather than the
+// lowercase this test previously guessed at, since nothing had measured it).
+// The client deliberately does not validate the value itself: the API's
+// message is clearer, and the schema refuses it at plan time.
 func TestPolicyContextCustomIsRejectedByEveryRoute(t *testing.T) {
 	t.Parallel()
 
 	srv := newGovernanceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/context/"+circleci.PolicyContextCustom+"/") {
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"context: must be a valid value."}`))
+			_, _ = w.Write([]byte(`{"error":"Context: must be a valid value."}`))
 
 			return
 		}

@@ -45,6 +45,14 @@ So the bundle is the unit of management. One `circleci_config_policy_bundle` res
 
 Keeping the Rego itself in files under `policies/` and referencing them with `file()` gives you the best of both: reviewable, individually testable policy documents (`circleci policy test`), assembled into one bundle by Terraform.
 
+## The map key must equal the policy's declared name
+
+CircleCI does not store the map key you upload under. Every policy's Rego is required to declare a name as its first rule, `policy_name["some_name"]`, and CircleCI keys the stored bundle by *that* name — on every read, and in the created/modified/deleted arrays the upload route itself reports — discarding whatever key the upload used entirely.
+
+Concretely: uploading `{"allow-docker.rego": <Rego declaring policy_name["allow_docker"]>}` is followed by a read reporting `{"allow_docker": {...}}`. `"allow-docker.rego"` is gone. Terraform's state is built from that read, so it now holds the key `"allow_docker"` while the configuration still says `"allow-docker.rego"` — a mismatch no apply can fix, because `policies` is a required, non-computed map: the provider cannot adopt the server's key without Terraform rejecting the result as inconsistent. Every plan after the first apply shows that policy being removed and re-added, forever.
+
+**The fix is entirely on the configuration side: name every map key after its own policy's `policy_name`**, not after its filename. The example above does this — the files on disk are named `allow-docker.rego` and `require-approval.rego` by convention, but the map keys are `allow_docker` and `require_approval`, matching the `policy_name` each file declares. This provider checks for the mismatch right after every apply and raises a warning naming both keys when it finds one, so a misnamed key is visible immediately rather than only on the next plan.
+
 ## Removing policies
 
 A policy is deleted by removing its key from `policies`. Setting `policies = {}` empties the context entirely, and destroying the resource does the same — since there is no delete route, an upload of an empty bundle is how a bundle is removed.
