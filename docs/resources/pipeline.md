@@ -88,5 +88,5 @@ route, which reports correctly on every integration, before concluding anything:
 
 - `checkout_source_repo_full_name` (String) The full name of the repository used for code checkout.
 - `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration. Empty when config_source_provider is `circleci`, which has no repository.
-- `created_at` (String) The timestamp when the pipeline was created.
+- `created_at` (String) The timestamp when the pipeline was created. Empty for an **implicit** pipeline definition — one CircleCI creates automatically for an OAuth-backed project rather than through this resource's create route — which the API never assigns a creation timestamp to. This resource can only create explicit definitions (always timestamped), but an implicit one can still end up here through `terraform import`, since the singular pipeline-definition route serves it.
 - `id` (String) The unique identifier of the pipeline.

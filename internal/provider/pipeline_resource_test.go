@@ -51,10 +51,17 @@ func TestAccPipelineResource(t *testing.T) {
 	// sense where explicit definitions are creatable. Without the gate, a run
 	// pointed at GitLab fixtures fails on a create the API was never going to
 	// accept, which reads exactly like a regression in this resource.
-	testRequireVCSType(t, "github_app")
+	//
+	// github_hybrid belongs here alongside github_app: measured over the
+	// network (see testHybridConfigSourceRepoExternalID), an explicit
+	// github_app pipeline definition creates, updates and imports on the
+	// hybrid fixture project exactly as it does on a GitHub App one — that is
+	// what makes the organization "hybrid" rather than a second github_oauth
+	// fixture.
+	testRequireVCSType(t, "github_app", "github_hybrid")
 
 	projectID := testProjectID(t)
-	repoExternalID := testGithubAppRepoExternalID(t)
+	repoExternalID := testConfigSourceRepoExternalID(t, projectID)
 	uuidRegex, err := regexp.Compile(`[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`)
 	if err != nil {
 		t.Fatalf("Regex to check UUID could not be created")
@@ -367,10 +374,12 @@ func pipelineDefinitionSteps(t *testing.T, projectID, repoExternalID, vcsProvide
 // real GitHub App organization: create, two in-place updates and an import that
 // round-trips with no ignored attributes.
 func TestAccPipelineDefinitionResource(t *testing.T) {
-	testRequireVCSType(t, "github_app")
+	// See TestAccPipelineResource's comment: github_hybrid supports the same
+	// create/update/import cycle as github_app, measured over the network.
+	testRequireVCSType(t, "github_app", "github_hybrid")
 
 	projectID := testProjectID(t)
-	repoExternalID := testGithubAppRepoExternalID(t)
+	repoExternalID := testConfigSourceRepoExternalID(t, projectID)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -395,6 +404,19 @@ func TestAccPipelineDefinitionResourceGithubServer(t *testing.T) {
 	})
 }
 
+// testAccPipelineDefinitionClient builds a *circleci.Client from the same
+// environment the provider itself configures from (see provider.go's
+// Configure), so an out-of-band call made directly through this client reaches
+// the same installation as the resource under test rather than always
+// circleci.com.
+func testAccPipelineDefinitionClient() *circleci.Client {
+	return circleci.New(circleci.Config{
+		Host:       os.Getenv("CIRCLE_HOST"),
+		Token:      os.Getenv("CIRCLE_TOKEN"),
+		Deployment: circleci.DeploymentCloud,
+	})
+}
+
 // testAccDeleteDefinitionOutOfBand deletes a pipeline definition through the API
 // directly, behind Terraform's back, using the same token the provider is
 // configured with.
@@ -407,18 +429,66 @@ func TestAccPipelineDefinitionResourceGithubServer(t *testing.T) {
 func testAccDeleteDefinitionOutOfBand(t *testing.T, projectID, definitionID string) {
 	t.Helper()
 
-	// The same environment the provider itself configures from (see
-	// provider.go's Configure), so the out-of-band call reaches the same
-	// installation as the resource under test rather than always circleci.com.
-	client := circleci.New(circleci.Config{
-		Host:       os.Getenv("CIRCLE_HOST"),
-		Token:      os.Getenv("CIRCLE_TOKEN"),
-		Deployment: circleci.DeploymentCloud,
-	})
-
-	if err := client.DeletePipelineDefinition(context.Background(), projectID, definitionID); err != nil {
+	if err := testAccPipelineDefinitionClient().DeletePipelineDefinition(context.Background(), projectID, definitionID); err != nil {
 		t.Fatalf("deleting pipeline definition %s out of band: %v", definitionID, err)
 	}
+}
+
+// testHybridConfigSourceRepoExternalID resolves the external id of a
+// repository the hybrid fixture organization's GitHub App installation can
+// see, by reading it back off a pipeline definition the project already
+// carries.
+//
+// There is no static CIRCLECI_TEST_GH_HYBRID_REPO_EXTERNAL_ID fixture (unlike
+// GH_APP and GH_SERVER, see README.md), and CIRCLECI_TEST_GH_APP_REPO_EXTERNAL_ID
+// cannot stand in for it: that repository belongs to the GH_APP fixture's own
+// GitHub account, which is a different account from the hybrid organization's
+// (gh-oauth-cci-2 vs. the GH_APP org) — the hybrid org's GitHub App
+// installation has no visibility into it.
+//
+// Measured over the network on 2026-08-22 against the hybrid fixture project:
+// its implicit pipeline definition's config_source.repo.external_id names a
+// repository ("gh-oauth-cci-2/project-1", the project's own OAuth-linked
+// repo) that installation CAN see — the app's repository_selection on that
+// org is "all". Creating an explicit github_app pipeline definition with that
+// same external id on that project succeeds (POST answers 200 with created_at
+// populated), and so do PATCH, GET and DELETE against the definition it
+// creates. That is what makes the organization "hybrid" rather than a second
+// github_oauth fixture: see acctest_test.go's integrationKeys comment.
+func testHybridConfigSourceRepoExternalID(t *testing.T, projectID string) string {
+	t.Helper()
+
+	definitions, err := testAccPipelineDefinitionClient().ListPipelineDefinitions(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("listing pipeline definitions on project %s to find a repo external id the hybrid "+
+			"organization's GitHub App installation can see: %v", projectID, err)
+	}
+
+	for _, definition := range definitions {
+		if definition.ConfigSource.Repo.ExternalID != "" {
+			return definition.ConfigSource.Repo.ExternalID
+		}
+	}
+
+	t.Skipf("project %s carries no pipeline definition with a repo external id to reuse for a "+
+		"github_app config_source", projectID)
+
+	return ""
+}
+
+// testConfigSourceRepoExternalID resolves a repo external id usable in a
+// github_app config_source, for whichever of github_app or github_hybrid is
+// active. github_app has a static fixture (testGithubAppRepoExternalID);
+// github_hybrid does not, so it is discovered live — see
+// testHybridConfigSourceRepoExternalID.
+func testConfigSourceRepoExternalID(t *testing.T, projectID string) string {
+	t.Helper()
+
+	if testVCSType(t) == "github_hybrid" {
+		return testHybridConfigSourceRepoExternalID(t, projectID)
+	}
+
+	return testGithubAppRepoExternalID(t)
 }
 
 // TestAccPipelineDefinitionResource_DeletedOutOfBandRecovers is the real-API
@@ -435,10 +505,13 @@ func testAccDeleteDefinitionOutOfBand(t *testing.T, projectID, definitionID stri
 // (the definition will be recreated) rather than erroring. Step 3 applies it, so
 // the case ends with a definition that Terraform's own destroy can clean up.
 func TestAccPipelineDefinitionResource_DeletedOutOfBandRecovers(t *testing.T) {
-	testRequireVCSType(t, "github_app")
+	// See TestAccPipelineResource's comment: the create/GET-after-delete
+	// sequence this test drives was measured directly against the hybrid
+	// fixture project too (create, delete, GET answers the same 400).
+	testRequireVCSType(t, "github_app", "github_hybrid")
 
 	projectID := testProjectID(t)
-	repoExternalID := testGithubAppRepoExternalID(t)
+	repoExternalID := testConfigSourceRepoExternalID(t, projectID)
 
 	const address = "circleci_pipeline_definition.test"
 

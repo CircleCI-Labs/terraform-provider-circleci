@@ -78,7 +78,7 @@ Read-Only:
 - `config_source_provider` (String) Provider serving the pipeline configuration, such as `github_app`.
 - `config_source_repo_external_id` (String) Provider-side identifier of the repository holding the configuration.
 - `config_source_repo_full_name` (String) Full name (`owner/repo`) of the repository holding the configuration.
-- `created_at` (String) Timestamp the definition was created, as the API reported it. Empty for definitions created before CircleCI recorded it.
+- `created_at` (String) Timestamp the definition was created, as the API reported it. Empty for an **implicit** definition — one CircleCI creates automatically for an OAuth-backed project — which the API never assigns a creation timestamp to. Not a matter of age: measured on a project holding both, the explicit definition carries the key and the implicit one omits it.
 - `description` (String) Description of the pipeline definition. Empty when none is set.
 - `id` (String) Unique identifier (UUID) of the pipeline definition.
 - `name` (String) Name of the pipeline definition.

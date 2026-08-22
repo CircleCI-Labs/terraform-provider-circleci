@@ -85,8 +85,12 @@ func (d *PipelineDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 				Computed:            true,
 			},
 			"created_at": schema.StringAttribute{
-				MarkdownDescription: "The timestamp when the pipeline was created.",
-				Computed:            true,
+				MarkdownDescription: "The timestamp when the pipeline was created. Empty for an " +
+					"**implicit** pipeline definition — one CircleCI creates automatically for an " +
+					"OAuth-backed project rather than through the `circleci_pipeline_definition` " +
+					"resource — which the API never assigns a creation timestamp to. Measured on both " +
+					"the singular and the plural route: the key is absent, not null.",
+				Computed: true,
 			},
 			"config_source_provider": schema.StringAttribute{
 				MarkdownDescription: "The provider for the pipeline configuration source.",
