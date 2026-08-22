@@ -72,6 +72,16 @@ func (r *configPolicyBundleResource) Schema(_ context.Context, _ resource.Schema
 			"is therefore the complete desired state, a policy missing from it is deleted, and you must " +
 			"not declare two `" + configPolicyBundleTypeName + "` resources for the same " +
 			"`owner_id` and `policy_context` — they would clobber each other on every apply.\n\n" +
+			"!> **Each map key MUST equal the `policy_name` its Rego declares.** CircleCI does not " +
+			"store the map key at all: it parses each policy's Rego, requires the first rule to be " +
+			"`policy_name[\"some_name\"]`, and keys the bundle by that declared name on every read — " +
+			"discarding whatever key this configuration used. A key that does not match its own " +
+			"policy's declared name (a filename like `allow-docker.rego`, say, for Rego whose rule is " +
+			"`policy_name[\"allow_docker\"]`) applies successfully once and then shows that policy " +
+			"being removed and re-added on every plan thereafter, forever — Terraform cannot resolve " +
+			"the mismatch because the map is a required, non-computed attribute. This provider warns " +
+			"when it detects the mismatch right after an apply, but the fix is on the configuration " +
+			"side: name each map key after its policy's `policy_name`.\n\n" +
 			"~> **Requires the Scale plan on CircleCI Cloud**, or CircleCI Server 4.2 or later. On other " +
 			"plans the API rejects these requests.\n\n" +
 			"~> Uploading policies does not by itself enforce them. Use " +
@@ -110,12 +120,17 @@ func (r *configPolicyBundleResource) Schema(_ context.Context, _ resource.Schema
 				},
 			},
 			"policies": schema.MapAttribute{
-				MarkdownDescription: "The complete bundle, mapping each policy's name to its Rego source. " +
-					"Names are conventionally filenames ending in `.rego`. Reading policies from disk with " +
-					"`file()` keeps them reviewable:\n\n" +
-					"```terraform\npolicies = {\n  \"allow-docker.rego\" = file(\"${path.module}/policies/allow-docker.rego\")\n}\n```\n\n" +
+				MarkdownDescription: "The complete bundle, mapping each policy's key to its Rego source. " +
+					"**The key must equal the `policy_name` the Rego declares as its first rule** " +
+					"(`policy_name[\"allow_docker\"]`, for example) — CircleCI keys the stored bundle by " +
+					"that declared name, not by this map's key, so the two must already match or every " +
+					"plan after the first apply shows the policy being removed and re-added. Reading " +
+					"policies from disk with `file()` keeps them reviewable:\n\n" +
+					"```terraform\npolicies = {\n  \"allow_docker\" = file(\"${path.module}/policies/allow-docker.rego\")\n}\n```\n\n" +
 					"Setting this to `{}` removes every policy from the context. The whole bundle must " +
-					"stay under roughly 2.5 MiB, which the API enforces.",
+					"stay under roughly 2.5 MiB, which the API enforces. Rego that does not parse — " +
+					"including Rego whose first rule is not the required `policy_name` declaration — is " +
+					"rejected with an error naming the offending file.",
 				ElementType: types.StringType,
 				Required:    true,
 				Validators: []validator.Map{
@@ -294,7 +309,103 @@ func (r *configPolicyBundleResource) upload(
 		return false
 	}
 
+	r.warnOnKeyMismatch(ctx, plan, policies, diags)
+
 	return true
+}
+
+// warnOnKeyMismatch re-reads the bundle just uploaded and warns about every
+// policy whose map key in the configuration does not match the key CircleCI
+// actually stored it under.
+//
+// [NET, measured against the live API on 2026-08-21] The upload route does
+// NOT key a bundle entry by the map key the caller submits. It parses each
+// policy's Rego, requires the first rule to be a "policy_name" declaration
+// (`policy_name["some_name"]`), and keys the bundle — on every subsequent GET,
+// and in this very upload's created/modified/deleted arrays — by that
+// declared name instead. The submitted map key is not stored anywhere and is
+// not even required to look like a filename.
+//
+// Concretely: uploading {"probe.rego": "package org\n\npolicy_name[\"probe_policy\"]\n"}
+// is followed by a bundle GET returning {"probe_policy": {...}} — "probe.rego"
+// appears nowhere in the response. Re-uploading the identical configuration
+// produces a diff of created:["probe_policy"], deleted:["probe_policy"] as
+// far as Terraform can tell, forever: Read() populates state from the server's
+// keys, the configuration keeps the filename-style keys, and no apply can ever
+// make the two agree, because the act of applying is what the server
+// re-derives its key from.
+//
+// This resource cannot correct the mismatch itself: `policies` is a Required,
+// non-Computed map, so the framework rejects any attempt to hand back state
+// with different keys than the plan ("Provider produced inconsistent result
+// after apply"). The only real fix is a configuration whose map key already
+// equals the Rego's declared policy_name — verified stable in the same
+// session: a key of "stable_name" holding `policy_name["stable_name"]`
+// round-trips with no server-side rename at all. So this warns loudly instead
+// of silently leaving a permanent diff for the next plan to discover.
+func (r *configPolicyBundleResource) warnOnKeyMismatch(
+	ctx context.Context, plan configPolicyBundleResourceModel, submitted map[string]string, diags *diag.Diagnostics,
+) {
+	stored, err := r.client.GetPolicyBundle(ctx, plan.OwnerID.ValueString(), plan.PolicyContext.ValueString())
+	if err != nil {
+		// The upload itself already succeeded; failing to verify it is not fatal,
+		// but nothing else can check the key mapping either.
+		diags.AddWarning(
+			"Could not verify CircleCI config policy bundle keys",
+			fmt.Sprintf(
+				"The policy bundle upload succeeded, but re-reading it to confirm every policy's key "+
+					"matches this configuration failed: %s. If a policy's map key does not equal the "+
+					"policy_name its Rego declares, every future plan for this resource will show that "+
+					"policy being removed and re-added.",
+				circleci.Detail(err),
+			),
+		)
+
+		return
+	}
+
+	// Match by content rather than by count: two configured keys can collapse
+	// onto the same declared policy_name, in which case the stored bundle has
+	// fewer entries than were submitted and one policy silently overwrote
+	// another.
+	byContent := make(map[string][]string, len(stored))
+	for storedKey, policy := range stored {
+		byContent[policy.Content] = append(byContent[policy.Content], storedKey)
+	}
+
+	for configuredKey, content := range submitted {
+		storedKeys := byContent[content]
+		switch len(storedKeys) {
+		case 0:
+			// Should not happen right after a successful upload; a concurrent
+			// write is the only plausible cause, and the next Read will surface it.
+			continue
+		case 1:
+			if storedKeys[0] != configuredKey {
+				diags.AddWarning(
+					"CircleCI renamed a policy's key",
+					fmt.Sprintf(
+						"The policy configured under the map key %q was stored by CircleCI under the key "+
+							"%q instead — the API keys each policy by the policy_name its Rego declares "+
+							"(`policy_name[%q]`), not by the map key in this configuration. Every future "+
+							"plan for this resource will show %q being removed and %q being added, forever, "+
+							"unless the map key is renamed to %q to match.",
+						configuredKey, storedKeys[0], storedKeys[0], configuredKey, storedKeys[0], storedKeys[0],
+					),
+				)
+			}
+		default:
+			diags.AddWarning(
+				"Multiple policies collapsed onto one CircleCI-assigned key",
+				fmt.Sprintf(
+					"The policy configured under the map key %q declares the same policy_name as %d other "+
+						"policy/policies in this bundle; CircleCI stores only one of them. Give each policy "+
+						"a distinct policy_name.",
+					configuredKey, len(storedKeys)-1,
+				),
+			)
+		}
+	}
 }
 
 // parsePolicyImportID splits an import ID shared by the policy resources into an

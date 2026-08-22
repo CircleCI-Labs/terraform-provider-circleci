@@ -45,6 +45,10 @@ The write route is a partial update: a field it does not carry is left alone. Re
 
 Declare both claims in one resource, or split them across scopes. Do not point two instances at the same `organization_id` and `project_id`.
 
+## `audience_updated_at` and `ttl_updated_at` are tombstones, not "is this customized"
+
+Once a scope's audience or ttl has ever been written — including by this resource's own destroy, which resets it — the matching `*_updated_at` timestamp stays populated forever, even after the claim itself goes back to its default. Do not read a non-null `audience_updated_at` as "audience is customized"; check `audience` itself instead. This provider's own drift detection already does the right thing here — it looks at the claim values, never at these timestamps.
+
 ## Import
 
 Import is supported using `organization_id` for organization-level claims:

@@ -63,16 +63,34 @@ type OIDCCustomClaims struct {
 	// Audience is the list of values placed in the token's "aud" claim.
 	Audience []string `json:"audience"`
 	// AudienceUpdatedAt is when the audience claim was last written.
+	//
+	// [NET, measured 2026-08-21] This is a tombstone, not a companion to
+	// Audience: once a scope's audience has ever been written (customized, or
+	// even just reset back to default), this timestamp stays populated forever
+	// — including in a response where Audience itself is absent because the
+	// claim is back at its default, and including in a response to a PATCH
+	// that set only ttl and never mentioned audience at all. IsZero ignores
+	// this field for exactly that reason: it is not a signal that the audience
+	// claim is customized, only that it has a history.
 	AudienceUpdatedAt string `json:"audience_updated_at"`
 	// TTL is the token lifetime as a duration string, e.g. "1h30m".
 	TTL string `json:"ttl"`
-	// TTLUpdatedAt is when the ttl claim was last written.
+	// TTLUpdatedAt is when the ttl claim was last written. See
+	// AudienceUpdatedAt: the same tombstone behavior applies to this field for
+	// ttl.
 	TTLUpdatedAt string `json:"ttl_updated_at"`
 }
 
 // IsZero reports whether no claim is customized in this scope, which is how the
 // API represents "reset to defaults". It is the drift signal for a resource that
 // manages these claims, because a reset answers 200 rather than 404.
+//
+// Deliberately excludes AudienceUpdatedAt and TTLUpdatedAt: those persist
+// indefinitely once a scope has any history, so a scope that is genuinely back
+// at its defaults can still carry non-empty timestamps (see
+// OIDCCustomClaims.AudienceUpdatedAt). Checking them here would make IsZero
+// report "still customized" forever after the first customization, which
+// defeats its entire purpose as a drift signal.
 func (c OIDCCustomClaims) IsZero() bool {
 	return len(c.Audience) == 0 && c.TTL == ""
 }
