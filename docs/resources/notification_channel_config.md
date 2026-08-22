@@ -72,6 +72,8 @@ output "build_alerts_channel_name" {
 - `scope` (String) Whether this config belongs to the calling user (`user`) or to a project (`project`). `project_id` is required when this is `project`, and must be omitted when this is `user`. Changing this value forces a new resource to be created.
 - `target` (String) The delivery address: an email address for `channel_type = "email"`, or a Slack channel ID for `channel_type = "slack"`. Updatable in place.
 
+~> **`scope = "project"` with `channel_type = "email"` never reports this value back.** CircleCI accepts the write, but omits `target` from the create response, from every subsequent read, and from `circleci_notification_channel_configs` list entries -- verified against the live API. This provider keeps whatever value it last knew about instead of nulling it out on every refresh, so the plan stays empty; there is no way to read back what target CircleCI is actually using for this one scope/channel_type combination, so a drifted value (changed outside Terraform) would not be detected either. Every other scope/channel_type combination echoes `target` normally.
+
 ### Optional
 
 - `project_id` (String) Unique identifier (UUID) of the project this config belongs to. Required when `scope = "project"`, and must be omitted when `scope = "user"`. Changing this value forces a new resource to be created.

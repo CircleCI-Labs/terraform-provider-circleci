@@ -200,8 +200,19 @@ func notificationFakeDecode(w http.ResponseWriter, r *http.Request, dst any) boo
 func (a *notificationFakeAPI) channelConfigEntity(cc *notificationFakeChannelConfig) map[string]any {
 	attrs := map[string]any{
 		"channel_type": cc.ChannelType,
-		"target":       cc.Target,
 		"is_enabled":   cc.IsEnabled,
+	}
+	// Verified against the real API [NET]: a project-scoped, channel_type =
+	// "email" config never echoes target back, on create, get or list, even
+	// though the create request carried one and the API accepted it. Every
+	// other scope/channel_type combination probed did echo it back. An
+	// earlier version of this fake always included target, which is the wrong
+	// belief -- it let TestAccNotificationChannelConfigResource_ProjectSlack
+	// and the user-scope tests pass while hiding the one combination that
+	// actually drops it.
+	targetIsNeverEchoed := cc.Scope == "project" && cc.ChannelType == "email"
+	if !targetIsNeverEchoed {
+		attrs["target"] = cc.Target
 	}
 	if cc.ChannelName != "" {
 		attrs["channel_name"] = cc.ChannelName

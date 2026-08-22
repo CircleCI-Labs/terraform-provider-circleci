@@ -66,6 +66,49 @@ resource "circleci_notification_channel_config" "test" {
 	}
 }
 
+// TestAccNotificationChannelConfigResource_ProjectEmailTargetNeverEchoed
+// covers the one combination the real API [NET] was confirmed to handle
+// differently from every other: a project-scoped, channel_type = "email"
+// config accepts a target on create but never returns one afterwards -- not
+// on the create response, not on a subsequent get, not in a list. Without
+// applyNotificationChannelConfig's "leave target alone when the API sends
+// none back" behaviour, this shows up as a plan that is never empty: every
+// refresh nulls state's target to "", and the next plan wants to set it back
+// to what the configuration says, forever. resource.Test's built-in
+// post-apply plan check is what actually catches that, with no assertion of
+// its own needed here.
+func TestAccNotificationChannelConfigResource_ProjectEmailTargetNeverEchoed(t *testing.T) {
+	api := newNotificationFakeAPI(t)
+
+	config := orbProviderConfig(api.URL()) + fmt.Sprintf(`
+resource "circleci_notification_channel_config" "test" {
+  scope        = "project"
+  channel_type = "email"
+  target       = "team@example.com"
+  is_enabled   = true
+  project_id   = "55555555-5555-5555-5555-555555555555"
+  org_id       = %q
+}
+`, notificationTestOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("circleci_notification_channel_config.test", "target", "team@example.com"),
+				),
+				// The bug this guards manifests as a non-empty plan on the
+				// implicit post-apply refresh below, not as an error from this
+				// step -- resource.Test performs that check on every step
+				// unless ExpectNonEmptyPlan is set, which it deliberately is
+				// not here.
+			},
+		},
+	})
+}
+
 // TestAccNotificationChannelConfigResource_ProjectSlack covers a
 // project-scoped Slack config and its resolved channel_name.
 func TestAccNotificationChannelConfigResource_ProjectSlack(t *testing.T) {

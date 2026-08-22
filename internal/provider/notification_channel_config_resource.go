@@ -106,7 +106,15 @@ func (r *notificationChannelConfigResource) Schema(_ context.Context, _ resource
 			},
 			"target": schema.StringAttribute{
 				MarkdownDescription: "The delivery address: an email address for `channel_type = \"email\"`, " +
-					"or a Slack channel ID for `channel_type = \"slack\"`. Updatable in place.",
+					"or a Slack channel ID for `channel_type = \"slack\"`. Updatable in place.\n\n" +
+					"~> **`scope = \"project\"` with `channel_type = \"email\"` never reports this value " +
+					"back.** CircleCI accepts the write, but omits `target` from the create response, from " +
+					"every subsequent read, and from `circleci_notification_channel_configs` list entries -- " +
+					"verified against the live API. This provider keeps whatever value it last knew about " +
+					"instead of nulling it out on every refresh, so the plan stays empty; there is no way to " +
+					"read back what target CircleCI is actually using for this one scope/channel_type " +
+					"combination, so a drifted value (changed outside Terraform) would not be detected " +
+					"either. Every other scope/channel_type combination echoes `target` normally.",
 				Required: true,
 			},
 			"channel_name": schema.StringAttribute{
@@ -310,11 +318,28 @@ func (r *notificationChannelConfigResource) ModifyPlan(_ context.Context, req re
 }
 
 // applyNotificationChannelConfig copies an API channel config into the model.
+//
+// model.Target is left untouched when cc.Target is empty, rather than
+// overwritten with an empty string. Verified against the real API [NET]: a
+// project-scoped, channel_type = "email" config never returns target at all
+// -- not on create, not on the read straight after, not in a list -- even
+// though the create request carried one and the API accepted it with no
+// error. (Every other scope/channel_type combination the API accepted during
+// that probe echoed target back unchanged.) Overwriting model.Target with ""
+// here reproduced exactly the bug class this family was warned about: the
+// resource would report a successful apply, and then show a permanent,
+// un-appliable diff on target on every subsequent plan, because state now
+// disagreed with configuration for a reason invisible to the practitioner.
+// model is `plan` on Create/Update and `state` on Read, so "leave it alone"
+// means "keep what the caller already had" in every caller -- the same
+// preserve-don't-null shape webhook_resource.go uses for signing_secret.
 func applyNotificationChannelConfig(model *notificationChannelConfigResourceModel, cc *circleci.NotificationChannelConfig) {
 	model.ID = types.StringValue(cc.ID)
 	model.Scope = types.StringValue(cc.Scope)
 	model.ChannelType = types.StringValue(cc.ChannelType)
-	model.Target = types.StringValue(cc.Target)
+	if cc.Target != "" {
+		model.Target = types.StringValue(cc.Target)
+	}
 	model.IsEnabled = types.BoolValue(cc.IsEnabled)
 	model.OrgID = types.StringValue(cc.OrgID)
 
