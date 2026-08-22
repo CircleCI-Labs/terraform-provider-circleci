@@ -146,10 +146,19 @@ func (s *GitHubAppService) GetInstallation(ctx context.Context, orgID string) (*
 // ListRepositories returns every repository the CircleCI GitHub App can access
 // for an organization, following pagination to the last page.
 //
-// The result is nil when the app has no repositories, or when no installation
-// exists at all — the route answers 200 with an empty items array in the latter
-// case rather than 404, so callers that need to distinguish "no installation"
-// from "installation with no repositories" cannot do it from here.
+// The result is nil (with no error) when an installation exists but was
+// granted no repositories. [NET, reproduced against the live API on
+// 2026-08-21]: an organization with NO installation at all — an OAuth-only or
+// GitLab organization, tried against this route — instead answers HTTP 404
+// with {"message": "Organization not found."}, which this method surfaces as
+// an ordinary error satisfying IsNotFound. An earlier revision of this comment
+// claimed the opposite (200 with an empty items array for both cases,
+// indistinguishable from here); that was never checked against the live route
+// and was wrong. The two situations *are* distinguishable from this method's
+// return alone: err == nil with a possibly-empty slice means an installation
+// exists, err != nil (IsNotFound) means it does not (or the organization id
+// itself is wrong — the route answers the same 404 for both, see
+// GetInstallation, which is the only way to tell those two apart).
 func (s *GitHubAppService) ListRepositories(ctx context.Context, orgID string) ([]GitHubAppRepository, error) {
 	var all []GitHubAppRepository
 

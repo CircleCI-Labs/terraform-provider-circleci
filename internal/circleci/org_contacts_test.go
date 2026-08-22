@@ -95,15 +95,30 @@ func TestSetOrganizationContactsSendsBothListsInFull(t *testing.T) {
 
 	const orgID = "org-1"
 
-	srv, calls := newContactsServer(t, http.StatusOK, `{"primary":["a@example.com"],"security":[]}`)
+	// [NET, reproduced against the live API on 2026-08-21] a successful PUT
+	// answers 200 with an empty JSON object, not the updated lists — see
+	// SetOrganizationContacts.
+	srv, calls := newContactsServer(t, http.StatusOK, `{}`)
 	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
-	_, err := c.SetOrganizationContacts(context.Background(), orgID, circleci.OrganizationContacts{
+	updated, err := c.SetOrganizationContacts(context.Background(), orgID, circleci.OrganizationContacts{
 		Primary:  []string{"a@example.com"},
 		Security: nil,
 	})
 	if err != nil {
 		t.Fatalf("SetOrganizationContacts returned error: %v", err)
+	}
+
+	// The whole point of this fixture: the API's empty {} response must not
+	// leak into the returned value. A caller that trusted a decode of that body
+	// would get back two empty lists after every single write, which is exactly
+	// what shipped before this was caught — see SetOrganizationContacts.
+	if len(updated.Primary) != 1 || updated.Primary[0] != "a@example.com" {
+		t.Errorf("SetOrganizationContacts returned Primary = %v, want [a@example.com] echoed back "+
+			"from the request, not decoded from the API's empty {} response", updated.Primary)
+	}
+	if len(updated.Security) != 0 {
+		t.Errorf("SetOrganizationContacts returned Security = %v, want an empty (non-nil) list", updated.Security)
 	}
 
 	if len(*calls) != 1 {
@@ -143,9 +158,12 @@ func TestSetOrganizationContactsSendsBothListsInFull(t *testing.T) {
 func TestSetOrganizationContactsTooManyIsAnError(t *testing.T) {
 	t.Parallel()
 
-	// Mirrors the org-migration CLI's own coverage of this case: the API rejects
-	// a 6th address in a list with HTTP 422.
-	srv, _ := newContactsServer(t, http.StatusUnprocessableEntity, `{"message":"too many contacts"}`)
+	// [NET, reproduced against the live API on 2026-08-21] a 6th address in
+	// either list answers HTTP 400 with {"message": "Invalid parameter."}, not
+	// the HTTP 422 "too many contacts" this fixture used to claim — that belief
+	// came from the org-migration CLI's own test coverage and was never checked
+	// against this service directly. See OrganizationContacts.
+	srv, _ := newContactsServer(t, http.StatusBadRequest, `{"message":"Invalid parameter."}`)
 	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
 
 	_, err := c.SetOrganizationContacts(context.Background(), "org-1", circleci.OrganizationContacts{
@@ -154,7 +172,7 @@ func TestSetOrganizationContactsTooManyIsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	if got := circleci.Detail(err); got != "too many contacts (HTTP 422)" {
-		t.Errorf("Detail(err) = %q, want %q", got, "too many contacts (HTTP 422)")
+	if got := circleci.Detail(err); got != "Invalid parameter. (HTTP 400)" {
+		t.Errorf("Detail(err) = %q, want %q", got, "Invalid parameter. (HTTP 400)")
 	}
 }

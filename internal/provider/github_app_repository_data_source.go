@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -150,10 +151,23 @@ func (d *githubAppRepositoryDataSource) Read(ctx context.Context, req datasource
 
 	repository, err := d.client.GitHubApp().FindRepository(ctx, organizationID, fullName)
 	if err != nil {
-		// A miss is much more likely to be a repository outside the installation's
-		// scope than a typo, so the message says how to widen it rather than just
-		// reporting "not found".
-		if circleci.IsNotFound(err) {
+		// FindRepository's two failure shapes are NOT the same situation, even
+		// though both satisfy circleci.IsNotFound, and conflating them used to
+		// produce a misleading diagnostic for the second one:
+		//
+		//   - errors.Is(err, circleci.ErrNotFound): the listing itself succeeded —
+		//     an installation exists — but no repository in it matched fullName. A
+		//     miss here is much more likely to be a repository outside the
+		//     installation's scope than a typo.
+		//   - circleci.IsNotFound(err) without the sentinel: the listing itself
+		//     failed with an HTTP 404, which [NET, reproduced against the live API
+		//     on 2026-08-21] is what an organization with no GitHub App
+		//     installation at all gets back (see
+		//     circleci.GitHubAppService.ListRepositories). Reporting this the same
+		//     way as the first case — "check the name, or widen the installation on
+		//     GitHub" — tells a practitioner on an OAuth-only or GitLab organization
+		//     to fix something that was never there to begin with.
+		if errors.Is(err, circleci.ErrNotFound) {
 			resp.Diagnostics.AddError(
 				"No GitHub App repository named "+fullName,
 				"The CircleCI GitHub App installation for organization "+organizationID+" does not report a "+
@@ -163,6 +177,20 @@ func (d *githubAppRepositoryDataSource) Read(ctx context.Context, req datasource
 					"so a repository the organization owns can still be invisible here. Use the "+
 					"`circleci_github_app_repositories` data source to list what the installation can see, and "+
 					"grant access on GitHub if the repository is missing from that list.",
+			)
+
+			return
+		}
+
+		if circleci.IsNotFound(err) {
+			resp.Diagnostics.AddError(
+				"No GitHub App installation for organization "+organizationID,
+				"Listing GitHub App repositories answered \"not found\" for this organization, which means "+
+					"either the CircleCI GitHub App is not installed here, or the organization id is wrong — "+
+					"this is not about "+fullName+" specifically. Check circleci_github_app_installation to "+
+					"tell those apart, or install the app from the organization's VCS integration settings "+
+					"in the CircleCI web app.\n\n"+
+					"Underlying error: "+circleci.Detail(err),
 			)
 
 			return

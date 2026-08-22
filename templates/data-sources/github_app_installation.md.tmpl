@@ -9,7 +9,7 @@ description: |-
 
 Reports the CircleCI GitHub App installation for an organization: whether it is installed at all, which GitHub account it is attached to, and how much of that account the installation can reach.
 
-This is the precondition for [`circleci_github_app_repository`](github_app_repository) and [`circleci_github_app_repositories`](github_app_repositories). Both of those answer with an empty result whether the app is not installed at all, or is installed but was not granted the repository asked for — and this data source is the only way to tell those two situations apart, because it reports an explicit error when there is no installation rather than an empty list.
+[`circleci_github_app_repository`](github_app_repository) and [`circleci_github_app_repositories`](github_app_repositories) already report a distinct, named error when there is no GitHub App installation at all — they do not fall back to an empty result for that case, only for an installation that exists but was granted no repositories. This data source is not required to tell those two situations apart, but it is the more direct way to check, and the only way to see the installation's own attributes (`login`, `repository_selection`) at all.
 
 ## Availability
 
@@ -29,11 +29,11 @@ It sits in the same block of internal routes as the GitHub App *repositories* ro
 
 The field names in the schema below were read from CircleCI's production source and confirmed against its handler tests, rather than inferred from the shape of neighbouring routes.
 
-## A missing installation is an error, not an empty result
+## A missing installation is an error here, and everywhere else in this family
 
 If the organization has no GitHub App installation, the route answers HTTP 404 and this data source reports an error naming the organization, with instructions to install the app from the organization's VCS integration settings in the CircleCI web application.
 
-That is deliberately different from the repositories data sources, which answer HTTP 200 with an empty `items` array both when nothing is installed and when an installation exists that was granted no repositories. Reading this data source alongside them resolves the ambiguity: if this read succeeds, the app *is* installed, so an empty repository list means "installed, but granted nothing".
+An earlier revision of this page claimed the repositories data sources answer HTTP 200 with an empty `items` array in that same case, making this data source the *only* way to detect it — reasoning that turned out to be wrong when [checked against the live API]: `circleci_github_app_repository` and `circleci_github_app_repositories` also answer HTTP 404 `"Organization not found."` for an organization with no installation at all, and both report that as a named error rather than an empty result. An empty (non-erroring) repository list only ever means "installed, but granted nothing" — it was never ambiguous with "not installed" to begin with. Reading this data source alongside them is still useful for the installation's own attributes (`login`, `repository_selection`), just not required to resolve that particular ambiguity.
 
 ## Why there is no matching resource
 

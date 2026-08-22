@@ -290,9 +290,11 @@ data "circleci_github_app_repositories" "test" {
 func TestAccGitHubAppRepositoriesDataSource_empty(t *testing.T) {
 	api, host := newMockDiscoveryAPI(t)
 
-	// No installation and an installation granted nothing look identical from here:
-	// the API answers 200 with an empty items array for both. Either way the result
-	// must be an empty list rather than null, so for_each and length() keep working.
+	// An installation granted no repositories answers 200 with an empty items
+	// array. This is NOT the same wire shape as "no installation at all" — see
+	// TestAccGitHubAppRepositoriesDataSource_notInstalled below, [NET, reproduced
+	// against the live API on 2026-08-21] — but it must still surface as an
+	// empty list rather than an error, so for_each and length() keep working.
 	api.repositories = nil
 
 	config := discoveryProviderConfig(host, "cloud") + fmt.Sprintf(`
@@ -315,5 +317,56 @@ data "circleci_github_app_repositories" "test" {
 				},
 			},
 		},
+	})
+}
+
+// TestAccGitHubAppRepositoriesDataSource_notInstalled pins the shape an
+// organization with NO GitHub App installation at all gets back from this
+// route — distinct from TestAccGitHubAppRepositoriesDataSource_empty above,
+// which is an installation granted nothing. [NET, reproduced against the live
+// API on 2026-08-21]: the repositories route answers 404 "Organization not
+// found." for a GitLab or GitHub-OAuth-only organization, not 200 with an
+// empty list. Before the diagnostic in github_app_repositories_data_source.go
+// special-cased this, that 404 surfaced as a bare "Unable to list GitHub App
+// repositories ...: Organization not found.", which reads like the configured
+// organization id itself is wrong rather than naming the missing installation.
+func TestAccGitHubAppRepositoriesDataSource_notInstalled(t *testing.T) {
+	api, host := newMockDiscoveryAPI(t)
+
+	api.repositoriesNotInstalled = true
+
+	config := discoveryProviderConfig(host, "cloud") + fmt.Sprintf(`
+data "circleci_github_app_repositories" "test" {
+  organization_id = %[1]q
+}
+`, testDiscoveryOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: discoveryProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      config,
+			ExpectError: regexp.MustCompile(`No GitHub App installation for organization`),
+		}},
+	})
+}
+
+// TestAccGitHubAppRepositoryDataSource_notInstalled is the singular
+// data source's version of the same case: a lookup by full_name on an
+// organization with no GitHub App installation at all must not be reported the
+// same way as a genuine miss (TestAccGitHubAppRepositoryDataSource_notFound
+// above) — the fix is telling the two apart in the code
+// (errors.Is(err, circleci.ErrNotFound) vs. a plain circleci.IsNotFound), and
+// this pins the distinguishable diagnostic on the "no installation" side.
+func TestAccGitHubAppRepositoryDataSource_notInstalled(t *testing.T) {
+	api, host := newMockDiscoveryAPI(t)
+
+	api.repositoriesNotInstalled = true
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: discoveryProviderFactories,
+		Steps: []resource.TestStep{{
+			Config:      testAccGitHubAppRepositoryConfig(host, "acme/api"),
+			ExpectError: regexp.MustCompile(`No GitHub App installation for organization`),
+		}},
 	})
 }

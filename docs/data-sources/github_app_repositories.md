@@ -29,11 +29,11 @@ Pagination is followed internally, so the result covers every repository rather 
 
 It is used here because there is no published way to resolve a repository name to the numeric external ID that `circleci_pipeline_definition` and `circleci_trigger` require. See `circleci_github_app_repository` for the single-repository lookup and the full rationale.
 
-## An empty list is ambiguous
+## No installation is an error, not an empty list
 
-The route answers HTTP 200 with an empty `items` array both when the organization has **no GitHub App installation at all** and when it has one that has been granted **no repositories**. The two cannot be told apart from here, so an empty `repositories` list means "CircleCI can see nothing", not specifically "the app is not installed".
+An earlier revision of this page claimed the route answers HTTP 200 with an empty `items` array both when the organization has no GitHub App installation at all and when it has one that has been granted no repositories — reasoning that looked plausible from the handler code alone. [Checked against the live API]: it is wrong for the first case. An organization with no installation at all answers HTTP 404 `"Organization not found."`, and this data source reports that as an explicit error naming the missing installation, not as an empty `repositories` list. `circleci_github_app_installation` is one way to confirm this ahead of time, but is no longer the *only* way to tell the two situations apart — the error here already does.
 
-An installation configured for selected repositories reports only what it was granted. A repository the organization owns but has not granted the app is absent from this list, and the only fix is to widen the installation on GitHub.
+An empty, *non-erroring* `repositories` list means the installation exists but was granted no repositories. An installation configured for selected repositories reports only what it was granted, so a repository the organization owns but has not granted the app is absent from this list either way, and the only fix is to widen the installation on GitHub.
 
 ## Example Usage
 

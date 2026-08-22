@@ -4,10 +4,12 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -39,7 +41,8 @@ import (
 //     same order back would never notice `primary_contacts`/`security_contacts`
 //     needing to be sets rather than lists.
 //   - It rejects a write with more than 5 addresses in either list with HTTP
-//     422, which the real service is expected to as well.
+//     400, matching the real service. [NET, reproduced against the live API on
+//     2026-08-21]; see circleci.OrganizationContacts.
 type fakeOrgContactsAPI struct {
 	mu       sync.Mutex
 	primary  []string
@@ -89,16 +92,33 @@ func newFakeOrgContactsAPI(t *testing.T) (*httptest.Server, *fakeOrgContactsAPI)
 				"security": append([]string(nil), body.Security...),
 			})
 
+			// [NET, reproduced against the live API on 2026-08-21] a 6th address in
+			// either list answers 400 with {"message": "Invalid parameter."} — not
+			// the 422 "too many contacts" this fake used to answer, a belief
+			// inherited from the org-migration CLI's own coverage and never checked
+			// against this service directly. See circleci.OrganizationContacts.
 			if len(body.Primary) > 5 || len(body.Security) > 5 {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnprocessableEntity)
-				_, _ = w.Write([]byte(`{"message":"too many contacts"}`))
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"message":"Invalid parameter."}`))
 
 				return
 			}
 
 			api.primary = reordered(body.Primary)
 			api.security = reordered(body.Security)
+
+			// [NET, reproduced against the live API on 2026-08-21] a successful PUT
+			// answers 200 with an empty JSON object, not the updated lists — see
+			// circleci.SetOrganizationContacts. Answering with the stored lists here,
+			// as this fake used to, would hide the exact bug that shape caused: the
+			// client decoded them back over the freshly-written value, so every write
+			// applied correctly upstream while the provider's own state ended up
+			// empty.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -329,8 +349,10 @@ func TestAccOrganizationContacts_OrgIDRequiresReplace(t *testing.T) {
 }
 
 func TestAccOrganizationContacts_TooManyAddressesRejectedAtPlanTime(t *testing.T) {
-	// setvalidator.SizeAtMost(5) must catch this before any request is sent —
-	// the API is expected to reject a 6th address with HTTP 422.
+	// setvalidator.SizeAtMost(5) must catch this before any request is sent — the
+	// live API rejects a 6th address in a list with HTTP 400 "Invalid parameter."
+	// (see circleci.OrganizationContacts), which would otherwise be an apply-time
+	// failure instead of a plan-time one.
 	srv, api := newFakeOrgContactsAPI(t)
 
 	sdkresource.UnitTest(t, sdkresource.TestCase{
@@ -482,6 +504,104 @@ func TestAccOrganizationContacts_DeleteMakesNoAPICall(t *testing.T) {
 	if puts != 1 {
 		t.Errorf("recorded PUT requests = %d across %v, want exactly 1 (from create only)", puts, paths)
 	}
+}
+
+// TestAccOrganizationContactsNet_Lifecycle is the one test in this file that
+// talks to a real CircleCI organization rather than the fake above. Every
+// other TestAcc* function here exercises the resource against newFakeOrgContactsAPI,
+// which — before this test was added — meant circleci_organization_contacts had
+// never actually been run against production: the "[NET, reproduced against
+// the live API ...]" comments elsewhere in this family came from ad hoc curl
+// probes during development, not from a test anyone can re-run.
+//
+// It is also what caught the real bug this family shipped with: SetOrganizationContacts
+// used to decode the PUT response into the returned OrganizationContacts, and
+// the live API answers a successful PUT with an empty `{}`, not the updated
+// lists. Every fake in this file used to echo the written lists back on PUT,
+// which is why the bug was invisible to every test that ran before this one —
+// see circleci.SetOrganizationContacts and the fake's PUT handler above for
+// the fix on both sides.
+//
+// org_id is a singleton per organization rather than a created-and-destroyed
+// object, so this test cannot rely on CheckDestroy to clean up after itself
+// the way an ordinary resource test would: it must read the organization's
+// contacts before doing anything, and restore exactly that value afterwards,
+// so a shared fixture organization is left as this test found it.
+func TestAccOrganizationContactsNet_Lifecycle(t *testing.T) {
+	testAccPreCheck(t)
+
+	orgID := testOrgID(t)
+
+	client := circleci.New(circleci.Config{Token: os.Getenv("CIRCLE_TOKEN")})
+
+	original, err := client.GetOrganizationContacts(t.Context(), orgID)
+	if err != nil {
+		t.Fatalf("could not read organization %s's contacts before the test; refusing to proceed "+
+			"without a known-good value to restore: %v", orgID, err)
+	}
+
+	t.Cleanup(func() {
+		if _, err := client.SetOrganizationContacts(context.Background(), orgID, *original); err != nil {
+			t.Errorf("could not restore organization %s's original contacts (primary=%v, security=%v) "+
+				"after the test: %v", orgID, original.Primary, original.Security, err)
+		}
+	})
+
+	const probeAddress = "t2-breadth-probe@example.invalid"
+
+	sdkresource.Test(t, sdkresource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []sdkresource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "circleci_organization_contacts" "net_test" {
+  org_id            = %[1]q
+  primary_contacts  = [%[2]q]
+  security_contacts = []
+}
+`, orgID, probeAddress),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(
+						"circleci_organization_contacts.net_test", tfjsonpath.New("primary_contacts"),
+						knownvalue.SetExact([]knownvalue.Check{knownvalue.StringExact(probeAddress)}),
+					),
+					statecheck.ExpectKnownValue(
+						"circleci_organization_contacts.net_test", tfjsonpath.New("security_contacts"),
+						knownvalue.SetExact(nil),
+					),
+				},
+			},
+			// Import round-trip: the entire point of the org_id-only ImportState
+			// above, now exercised against the real GET route instead of the fake.
+			{
+				ResourceName:                         "circleci_organization_contacts.net_test",
+				ImportState:                          true,
+				ImportStateId:                        orgID,
+				ImportStateVerify:                    true,
+				ImportStateVerifyIdentifierAttribute: "org_id",
+			},
+		},
+		// Runs after resource.Test's own destroy step (an empty config). Confirms
+		// the documented claim in Delete: destroying this resource must not clear
+		// the organization's lists upstream, unlike a resource with a real DELETE.
+		CheckDestroy: func(*terraform.State) error {
+			after, err := client.GetOrganizationContacts(context.Background(), orgID)
+			if err != nil {
+				return fmt.Errorf("could not read organization %s's contacts after destroy: %w", orgID, err)
+			}
+
+			if len(after.Primary) != 1 || after.Primary[0] != probeAddress {
+				return fmt.Errorf(
+					"organization %s's primary contacts after destroy = %v, want [%s] still present — "+
+						"destroy must leave CircleCI's copy alone, only stop tracking it",
+					orgID, after.Primary, probeAddress,
+				)
+			}
+
+			return nil
+		},
+	})
 }
 
 func equalStrings(a, b []string) bool {
