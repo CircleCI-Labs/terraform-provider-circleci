@@ -91,6 +91,15 @@ const (
 	// handed back the seeded environment/component for *any* org, so it could
 	// not represent this case at all — see TestAccDeployEnvironmentsDataSource_emptyOrg
 	// and TestAccDeployComponentsDataSource_emptyOrg.
+	//
+	// [NET, 2026-08-22] This is no longer just an assumption about every
+	// fixture organization looking the same: two organizations now carry real,
+	// seeded deploy data (see this file's real-API counterpart's header
+	// comment), and every organization that was not seeded — checked directly
+	// against the API, not only through this mock's assumptions — still
+	// answers exactly this shape. Seeding one organization changed nothing
+	// about any other, including the response headers, so "never enabled" and
+	// "enabled but unused" remain indistinguishable.
 	testDeployEmptyOrganizationID = "5b6a4b0e-3f0f-4d3a-9d5f-2f7e6c8b9a10"
 	// testDeployEnvironmentID is a pre-seeded environment id.
 	testDeployEnvironmentID = "9f1c2f6a-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
