@@ -111,8 +111,13 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Required:            true,
 			},
 			"created_at": schema.StringAttribute{
-				MarkdownDescription: "The timestamp when the pipeline was created.",
-				Computed:            true,
+				MarkdownDescription: "The timestamp when the pipeline was created. Empty for an " +
+					"**implicit** pipeline definition — one CircleCI creates automatically for an " +
+					"OAuth-backed project rather than through this resource's create route — which the " +
+					"API never assigns a creation timestamp to. This resource can only create explicit " +
+					"definitions (always timestamped), but an implicit one can still end up here through " +
+					"`terraform import`, since the singular pipeline-definition route serves it.",
+				Computed: true,
 			},
 			"config_source_provider": schema.StringAttribute{
 				MarkdownDescription: "Where the pipeline's configuration is read from: " +
@@ -209,6 +214,16 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 // config source always has none — or Terraform reports an inconsistent result after
 // apply: the plan carries null (the practitioner omitted it), and a bare
 // types.StringValue("") would not match that.
+//
+// created_at, by contrast, is left as a bare types.StringValue even when the API
+// omitted it — which it always does for an implicit pipeline definition (see
+// circleci.PipelineDefinition.CreatedAt). Unlike config_source_repo_external_id,
+// nothing in config can ever supply created_at (it is Computed, not Optional), so
+// there is no null-shaped plan value it needs to match, and the empty string is
+// stable: this same implicit definition returns no created_at on every future
+// read too, so no diff and no inconsistent-result error follows. See the
+// attribute's MarkdownDescription in Schema, which is what actually needed fixing
+// here — it used to promise a timestamp implicit definitions never get.
 func pipelineResourceModelFromAPI(projectID types.String, definition circleci.PipelineDefinition) pipelineResourceModel {
 	configSourceRepoExternalID := types.StringNull()
 	if definition.ConfigSource.Repo.ExternalID != "" {

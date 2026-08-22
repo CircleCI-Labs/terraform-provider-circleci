@@ -98,7 +98,10 @@ func (d *pipelinesDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 						},
 						"created_at": schema.StringAttribute{
 							MarkdownDescription: "Timestamp the definition was created, as the API reported it. " +
-								"Empty for definitions created before CircleCI recorded it.",
+								"Empty for an **implicit** definition — one CircleCI creates automatically " +
+								"for an OAuth-backed project — which the API never assigns a creation " +
+								"timestamp to. Not a matter of age: measured on a project holding both, the " +
+								"explicit definition carries the key and the implicit one omits it.",
 							Computed: true,
 						},
 						"config_source_provider": schema.StringAttribute{

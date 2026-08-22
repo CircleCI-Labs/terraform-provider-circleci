@@ -24,7 +24,7 @@ covers the move.
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | No — and **not** for the v3 reason that covers orbs and organization settings. `pipeline-definitions` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. v3 arriving on Server would therefore not make this work. `deployment = "server"` is refused at plan time. Define workflows in `.circleci/config.yml` on Server instead. |
 | **API** | `GET` and `POST /api/v2/projects/{project_id}/pipeline-definitions`, `GET`, `PATCH` and `DELETE .../pipeline-definitions/{id}` |
-| **Organization type** | Any for **read**. **Create, update and delete require GitHub App or GitHub Enterprise Server**: on GitHub OAuth, GitLab and Bitbucket Cloud CircleCI synthesises a definition from the project id rather than storing one, so there is nothing to write. See the compatibility table in the README. |
+| **Organization type** | Any for **read**. **Create, update and delete require a GitHub App or GitHub Enterprise Server config source**: on a pure GitHub OAuth, GitLab or Bitbucket Cloud organization CircleCI synthesises a definition from the project id rather than storing one, so there is nothing to write. A GitHub OAuth organization that *also* has a GitHub App installation is the exception — its projects still take `gh/<org>` slugs, but an explicit `github_app` definition creates, updates and deletes there exactly as it does on a GitHub App organization, alongside the implicit one CircleCI keeps for OAuth. See the compatibility table in the README. |
 | **Token** | A personal API token belonging to an organization admin. |
 
 ## Example Usage

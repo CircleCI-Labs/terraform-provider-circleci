@@ -160,8 +160,16 @@ type PipelineCheckoutSource struct {
 // configuration source with a checkout source that triggers run against.
 //
 // CreatedAt is kept as the string the API sent (an RFC 3339 timestamp) so that
-// it round-trips into Terraform state exactly as received. It is omitted by the
-// API for definitions created before the timestamp was recorded.
+// it round-trips into Terraform state exactly as received. Confirmed over the
+// network on 2026-08-22: it is omitted by the API — the JSON key is absent, not
+// merely empty — for every IMPLICIT pipeline definition, the kind CircleCI
+// creates automatically for an OAuth-backed project rather than one created
+// through CreatePipelineDefinition. Measured on the same project at the same
+// moment: an explicit definition created moments earlier carries created_at,
+// while the project's own implicit definition, on both the plural list and the
+// singular route, never has. Whether age independently omits it for some
+// explicit definition too (the original, unverified theory here) is not
+// something this client has confirmed either way.
 type PipelineDefinition struct {
 	ID             string                 `json:"id"`
 	Name           string                 `json:"name"`

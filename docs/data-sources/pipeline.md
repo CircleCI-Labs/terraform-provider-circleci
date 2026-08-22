@@ -52,6 +52,6 @@ For everything else — arguments, availability, examples — see
 - `config_source_provider` (String) The provider for the pipeline configuration source.
 - `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration.
 - `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration.
-- `created_at` (String) The timestamp when the pipeline was created.
+- `created_at` (String) The timestamp when the pipeline was created. Empty for an **implicit** pipeline definition — one CircleCI creates automatically for an OAuth-backed project rather than through the `circleci_pipeline_definition` resource — which the API never assigns a creation timestamp to. Measured on both the singular and the plural route: the key is absent, not null.
 - `description` (String) The description of the pipeline.
 - `name` (String) The name of the pipeline.

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -465,6 +466,39 @@ func (a *fakePipelineDefAPI) setSingularUnservable(projectID string, unservable 
 	defer a.mu.Unlock()
 
 	a.singularUnservable[projectID] = unservable
+}
+
+// seedImplicitDefinition inserts a definition directly, bypassing create(),
+// with no "created_at" key at all — standing in for an IMPLICIT pipeline
+// definition, the kind CircleCI creates automatically for an OAuth-backed
+// project rather than one this resource ever POSTs.
+//
+// Before this method existed, create() was the fake's only way to populate a
+// definition, and create() always writes created_at (correctly: measured over
+// the network, an explicit definition always gets one). That made the fake
+// unable to represent the one case this resource can encounter but never
+// creates — an implicit definition reached only through `terraform import` —
+// the same shape of gap TestFakePipelineDefAPIAnswersTheStatusesTheRealRouteAnswers
+// closed for the singular route's statuses.
+func (a *fakePipelineDefAPI) seedImplicitDefinition(projectID, id, provider, repoExternalID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.definitions[projectID+"/"+id] = map[string]any{
+		"id":          id,
+		"name":        "project-1",
+		"description": "Implicit pipeline definition associated with an OAuth-based project.",
+		// No "created_at" key — deliberately, see the method doc.
+		"config_source": resolvedSource(map[string]any{
+			"provider":  provider,
+			"file_path": ".circleci/config.yml",
+			"repo":      map[string]any{"external_id": repoExternalID},
+		}, true),
+		"checkout_source": resolvedSource(map[string]any{
+			"provider": provider,
+			"repo":     map[string]any{"external_id": repoExternalID},
+		}, false),
+	}
 }
 
 func (a *fakePipelineDefAPI) setFail(status int, body string) {
@@ -1224,4 +1258,118 @@ func TestFakePipelineDefAPIAnswersTheStatusesTheRealRouteAnswers(t *testing.T) {
 		t.Errorf("the list no longer carries %s (%s); the GitLab case is a definition that EXISTS while "+
 			"the singular route refuses it", liveID, stillListed.body)
 	}
+}
+
+// TestPipelineResourceSchema_CreatedAtDescribesImplicitAbsence pins the fix to
+// created_at's documentation: it used to unconditionally promise "The
+// timestamp when the pipeline was created", which is simply false for an
+// implicit pipeline definition — one CircleCI creates automatically for an
+// OAuth-backed project — since the API never assigns one a created_at at all
+// (see circleci.PipelineDefinition.CreatedAt, and
+// TestPipelineResourceUnit_ImplicitDefinitionImport below for the behaviour
+// this describes). This resource never creates an implicit definition itself,
+// but `terraform import` can still bring one under management, because the
+// singular pipeline-definition route serves it.
+//
+// This test fails without that documentation fix and passes with it; it does
+// not (and should not) require changing how created_at is decoded, because an
+// empty Computed string is an acceptable representation of "absent" here —
+// see the test below for why: no diff and no inconsistent-result error
+// follows from it.
+func TestPipelineResourceSchema_CreatedAtDescribesImplicitAbsence(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	resp := &fwresource.SchemaResponse{}
+	(&pipelineResource{}).Schema(ctx, fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	attr, ok := resp.Schema.Attributes["created_at"]
+	if !ok {
+		t.Fatal("schema is missing the created_at attribute")
+	}
+
+	description := attr.GetMarkdownDescription()
+	if !strings.Contains(description, "implicit") {
+		t.Errorf("created_at description = %q, does not say anything about implicit pipeline "+
+			"definitions, which never have one", description)
+	}
+	if !strings.Contains(strings.ToLower(description), "import") {
+		t.Errorf("created_at description = %q, does not say how a practitioner can end up managing "+
+			"an implicit definition (terraform import) despite this resource never creating one", description)
+	}
+}
+
+// TestPipelineResourceUnit_ImplicitDefinitionImport is the behavioural half of
+// the created_at fix: it imports a definition the fake seeds directly (never
+// created through this resource, exactly like an implicit pipeline
+// definition — see fakePipelineDefAPI.seedImplicitDefinition), and asserts
+// what happens to created_at across that import and the plan right after it.
+//
+// Measured over the network (pipeline_definition.go's PipelineDefinition.CreatedAt
+// doc): an implicit definition's created_at is permanently absent, on every
+// read, forever — not absent-then-later-populated. So the empty string this
+// decodes to is stable rather than drifting, and the two things that WOULD make
+// an empty string wrong here — a permanent diff, or a "provider produced
+// inconsistent result after apply" error — do not occur. Reverting the schema
+// description fix does not make this test fail (the description is not
+// checked here, see the test above for that); this test exists to pin the
+// behaviour the description now truthfully describes, on a path
+// (import-an-implicit-definition) no other test in this file reaches.
+func TestPipelineResourceUnit_ImplicitDefinitionImport(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	const implicitID = "99999999-8888-7777-6666-555555555555"
+	api.seedImplicitDefinition(fakePipelineProjectID, implicitID, "github_app", "100001")
+
+	// Matches exactly what seedImplicitDefinition stored — including
+	// config_source_file_path, which pipelineFakeResourceConfig hardcodes to a
+	// different value ("config.yml") and so cannot be reused here without
+	// producing an unrelated diff on that field.
+	config := pipelineFakeProviderConfig(host, "cloud") + fmt.Sprintf(`
+resource "circleci_pipeline" "test" {
+  project_id                       = %[1]q
+  name                              = "project-1"
+  description                       = "Implicit pipeline definition associated with an OAuth-based project."
+  config_source_provider            = "github_app"
+  config_source_file_path           = ".circleci/config.yml"
+  config_source_repo_external_id    = "100001"
+  checkout_source_provider          = "github_app"
+  checkout_source_repo_external_id  = "100001"
+}
+`, fakePipelineProjectID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// Bring the never-created-by-Terraform definition under
+				// management. ImportStatePersist is required to carry the
+				// imported state into the next step — see
+				// TestAccIOSSigningCertificateResource_ImportForcesReplacement's
+				// comment in ios_signing_certificate_resource_test.go.
+				ResourceName:       "circleci_pipeline.test",
+				ImportState:        true,
+				ImportStateId:      fakePipelineProjectID + "/" + implicitID,
+				ImportStatePersist: true,
+				Config:             config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					// Absent from the wire decodes to an empty string, not an
+					// error and not some other placeholder.
+					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("created_at"), knownvalue.StringExact("")),
+				},
+			},
+			{
+				// Nothing about the definition changed, so a plan immediately
+				// after import must be empty. A diff here would mean the
+				// empty created_at is not the stable value the doc now
+				// describes it as.
+				Config:   config,
+				PlanOnly: true,
+			},
+		},
+	})
 }
