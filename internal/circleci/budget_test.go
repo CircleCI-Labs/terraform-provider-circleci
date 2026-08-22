@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"terraform-provider-circleci/internal/circleci"
@@ -278,16 +279,37 @@ func TestDeleteBudget_HappyPath(t *testing.T) {
 	}
 }
 
-func TestDeleteBudget_NotFound(t *testing.T) {
+// TestDeleteBudget_MissingIDAnswers500NotIsNotFound guards against the belief
+// this test used to encode: that deleting a budget id which no longer exists
+// answers 404. [NET] measurement against gh-app-cci-1 (2026-08-21) shows the
+// real route answers 500 with {"error":"There was an error deleting the
+// budget"} for both a syntactically-valid-but-unknown id and the id of a
+// budget this same client just deleted — never 404. IsNotFound must therefore
+// be false here: a caller that wanted the earlier behaviour (IsNotFound(err)
+// suppressing the error) would silently swallow a real server error too,
+// since this status code cannot distinguish the two. See DeleteBudget's doc
+// comment and budgetResource.Delete, which corroborates via FindBudget instead
+// of trusting this status code.
+func TestDeleteBudget_MissingIDAnswers500NotIsNotFound(t *testing.T) {
 	t.Parallel()
 
-	client, _ := newBudgetServer(t, http.StatusNotFound, `{"message":"not found"}`)
+	client, calls := newBudgetServer(t, http.StatusInternalServerError, `{"error":"There was an error deleting the budget"}`)
 
 	err := client.DeleteBudget(context.Background(), testBudgetOrgID, "missing-id")
 	if err == nil {
 		t.Fatal("DeleteBudget returned no error, want one")
 	}
-	if !circleci.IsNotFound(err) {
-		t.Errorf("IsNotFound(err) = false for a 404, want true: %v", err)
+	if circleci.IsNotFound(err) {
+		t.Errorf("IsNotFound(err) = true for a 500, want false: %v", err)
+	}
+	if detail := circleci.Detail(err); !strings.Contains(detail, "error deleting the budget") {
+		t.Errorf("Detail(err) = %q, want it to surface the server's message", detail)
+	}
+	// The underlying transport retries a 500 up to 3 times (see httpcl), so 4
+	// identical requests, not 1, is the correct count here — unrelated to
+	// anything this test is about, but asserting the wrong number would be its
+	// own false belief.
+	if want := 4; len(*calls) != want {
+		t.Fatalf("made %d requests, want %d (1 plus 3 retries on a 500)", len(*calls), want)
 	}
 }

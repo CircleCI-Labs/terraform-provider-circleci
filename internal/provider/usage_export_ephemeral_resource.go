@@ -234,7 +234,11 @@ func (e *usageExportEphemeralResource) Schema(_ context.Context, _ ephemeral.Sch
 						"no further authentication. Because this is ephemeral data, these URLs are never "+
 						"written to a state or plan file.\n\n"+
 						"Each URL is minted at the moment the job was observed to be complete and is valid "+
-						"for %s from then, so consume them within the same run rather than passing them on.",
+						"for %s from then, so consume them within the same run rather than passing them on.\n\n"+
+						"Can be an empty list even when `state` is `\"completed\"`: measured against a live "+
+						"organization, a window with no matching usage data completes normally with no URLs "+
+						"at all, rather than failing or omitting a result. Check for this rather than "+
+						"assuming a completed job always has something to download.",
 					circleci.UsageExportURLValidity,
 				),
 			},

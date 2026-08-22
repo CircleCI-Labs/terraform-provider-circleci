@@ -116,9 +116,19 @@ type UsageExportJob struct {
 type UsageExportJobStatus struct {
 	UsageExportJobID string `json:"usage_export_job_id"`
 	State            string `json:"state"`
-	// DownloadURLs is null for every state but "completed", and for "completed"
-	// it is minted fresh on each request and valid for UsageExportURLValidity
-	// from then. Each URL is itself the credential: it grants the download with
+	// DownloadURLs is null for every state but "completed" — but "completed"
+	// does not guarantee it is non-null. [NET] measurement against
+	// gh-app-cci-1 (2026-08-21): a job whose window held no matching usage
+	// data completed with state "completed" and download_urls still null,
+	// while an otherwise identical job for a window that did have data came
+	// back "completed" with one signed URL. A caller polling for "completed"
+	// must still handle an empty result; it is not evidence of a bug in the
+	// job. When URLs are present, each is minted fresh on the request that
+	// observed the job complete and valid for UsageExportURLValidity from
+	// then (measured: the X-Amz-Expires query parameter reads 129599 seconds,
+	// consistent with the ~36h validity this constant documents) — polling
+	// again some time later returns a different, re-signed URL to the same
+	// object. Each URL is itself the credential: it grants the download with
 	// no further authentication.
 	DownloadURLs []string `json:"download_urls"`
 	// ErrorReason explains a "failed" state. It is empty for every other state.

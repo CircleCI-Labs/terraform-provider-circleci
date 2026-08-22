@@ -1,6 +1,9 @@
 # The organization-level budget: omit project_id entirely. Applying this a
-# second time with a different credits value updates the existing budget in
-# place rather than creating a duplicate.
+# second time with a different credits value still leaves exactly one budget
+# for this scope, not two — but measured against a live organization, CircleCI
+# does not update the existing record in place: it deletes it and mints a new
+# id every time, even when credits does not change. `id` is therefore not a
+# stable handle to a particular budget outside Terraform.
 resource "circleci_budget" "org" {
   org_id  = "00000000-0000-0000-0000-000000000000"
   credits = 2000000

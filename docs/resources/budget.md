@@ -14,7 +14,7 @@ Manages a CircleCI spend budget: a credit limit for an organization, or for one 
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. |
+| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against; this is derived from how the private origin is configured for Cloud, the same reasoning `circleci_usage_export`'s Server row documents its own version of. |
 | **API** | `GET` and `PUT /private/orgs/{org_id}/budgets`, `DELETE /private/orgs/{org_id}/budgets/{budget_id}` |
 | **Organization type** | Any. |
 | **Token** | A personal API token belonging to an organization admin. |
@@ -25,7 +25,17 @@ Manages a CircleCI spend budget: a credit limit for an organization, or for one 
 
 An organization's budgets are one collection on the API, distinguished only by whether `project_id` is set: `GET` returns every budget for the organization together, and the same `PUT` writes either one depending on whether `project_id` is present in the request body. This resource follows that shape rather than splitting into an organization-level type and a project-level type — set `project_id` to manage a per-project budget, or omit it to manage the organization-level one.
 
-Applying this resource a second time for the same `org_id`/`project_id` pair updates the existing budget's `credits` in place; it does not create a duplicate.
+Applying this resource a second time for the same `org_id`/`project_id` pair still leaves exactly one budget for that scope; it does not create a duplicate.
+
+## `id` is not stable across writes
+
+**Measured against a live organization (2026-08-21):** the write above is not an update of the underlying budget record. Every `PUT` for an existing scope — including one that resends the same `credits` with nothing changed — deletes the old budget and creates a new one with a freshly minted `id`. Three consecutive writes of `2000`, `2000`, then `3000` credits to the same scope came back with three different ids in a row.
+
+Do not treat `id` as a durable handle to a particular budget outside Terraform — it survives only until the next write to its own scope. This is also why import addresses a budget by `org_id`/`project_id`, never by `id`: see "Import" below.
+
+## `credits` must be at least 1
+
+**Measured against a live organization:** `credits = 0` is rejected with `400 {"error":"Invalid budget settings"}`; `credits = 1` is accepted. This resource validates that at plan time.
 
 ## `enforcement_type` cannot be set
 
@@ -43,12 +53,17 @@ These three are runtime statistics CircleCI computes from actual usage, reported
 
 A budget removed outside Terraform is dropped from state on the next refresh, rather than reported as an error, since there is nothing left to read.
 
+**Measured against a live organization:** deleting an `id` that does not currently exist — never created, already deleted, or superseded by the id churn described above — answers `500 {"error":"There was an error deleting the budget"}`, never `404`. This resource does not trust that status code to mean "already gone": it corroborates by re-listing the organization's budgets for this resource's scope, and only tolerates the error if nothing is found there.
+
 ## Example Usage
 
 ```terraform
 # The organization-level budget: omit project_id entirely. Applying this a
-# second time with a different credits value updates the existing budget in
-# place rather than creating a duplicate.
+# second time with a different credits value still leaves exactly one budget
+# for this scope, not two — but measured against a live organization, CircleCI
+# does not update the existing record in place: it deletes it and mints a new
+# id every time, even when credits does not change. `id` is therefore not a
+# stable handle to a particular budget outside Terraform.
 resource "circleci_budget" "org" {
   org_id  = "00000000-0000-0000-0000-000000000000"
   credits = 2000000
@@ -79,7 +94,7 @@ output "checkout_service_budget_usage" {
 
 ### Required
 
-- `credits` (Number) The credit limit for this scope. Updatable in place.
+- `credits` (Number) The credit limit for this scope. Updatable in place. Measured against a live organization: CircleCI rejects `0` (`400 "Invalid budget settings"`), so the minimum accepted value is `1`, not `0`.
 
 ### Optional
 
@@ -100,6 +115,8 @@ Changing this value forces a new resource to be created: it addresses a differen
 - `consumption` (Number) Credits consumed against this budget so far, as CircleCI last computed it. This reflects real spend and can change between applies with no configuration change.
 - `enforcement_type` (String) CircleCI's report of what happens once spend crosses this budget: `warn` (surface overage without blocking) or `block` (stop new workflows). Read-only — see the resource-level warning above.
 - `id` (String) Unique identifier (UUID) of the budget, assigned by CircleCI. There is no route to read a budget by this id — it exists so `terraform destroy` has something to send to the delete route, which addresses a budget only by id.
+
+**This id is not stable across writes.** Measured against a live organization: every `PUT` to an existing scope — including one that resends the same `credits` unchanged — deletes the underlying budget and creates a new one with a freshly minted id. Do not rely on this value outside Terraform, and expect it to show `(known after apply)` on every `terraform plan` that updates `credits`, not only on create.
 - `percentage` (Number) `consumption` as a percentage of `credits`, as CircleCI last computed it. Like `consumption`, this can change between applies on its own.
 - `threshold_exceeded` (Boolean) Whether CircleCI reports this budget's enforcement threshold as currently exceeded.
 

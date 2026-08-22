@@ -48,8 +48,15 @@ not be applied at all, where one refused by CircleCI at least says so.
 an additional set of organizations to report usage for.
 
 The signed URLs in `download_urls` are minted at the moment the job was observed
-to be complete and are valid for 36 hours from then, so consume them within the
-same run rather than passing them on.
+to be complete and are valid for 36 hours from then (measured: the signed
+URL's own `X-Amz-Expires` reads 129599 seconds, matching), so consume them
+within the same run rather than passing them on.
+
+**`download_urls` can be an empty list even when `state` is `"completed"`.**
+Measured against a live organization: a window with no matching usage data
+completes normally with no URLs at all, rather than failing or reporting
+something else. Do not treat an empty `download_urls` on a completed job as an
+error condition on its own.
 
 ## Example Usage
 
@@ -117,6 +124,8 @@ This is the same field as the deprecated `organization_id`; set exactly one of t
 - `download_urls` (List of String, Sensitive) Signed URLs the export's data can be downloaded from. Marked sensitive because each URL itself grants access to the data — anyone holding the URL can download it, with no further authentication. Because this is ephemeral data, these URLs are never written to a state or plan file.
 
 Each URL is minted at the moment the job was observed to be complete and is valid for 36h0m0s from then, so consume them within the same run rather than passing them on.
+
+Can be an empty list even when `state` is `"completed"`: measured against a live organization, a window with no matching usage data completes normally with no URLs at all, rather than failing or omitting a result. Check for this rather than assuming a completed job always has something to download.
 - `error_reason` (String) Why the job failed. Empty unless `state` is `"failed"`.
 - `id` (String) The usage export job's id.
 - `state` (String) The job's terminal state: `"completed"` or `"failed"`. `Open` only returns once the job has reached one of these — it never returns `"created"` or `"processing"`.

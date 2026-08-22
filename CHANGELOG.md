@@ -4,6 +4,49 @@
 
 ### BUG FIXES
 
+* **`circleci_budget` could fail every subsequent `terraform apply` with "Provider
+  produced inconsistent result after apply" the first time `credits` was changed.**
+  `id` carried a `UseStateForUnknown` plan modifier, which tells Terraform the value
+  will not change unless the resource is replaced. Measured against a live
+  organization: it always does. Every `PUT` to an existing budget scope — including
+  one that resends the same `credits` with nothing changed — deletes the underlying
+  budget and mints a new `budget_id`; three consecutive writes of `2000`, `2000`, then
+  `3000` credits to the same scope came back with three different ids in a row. `id`
+  no longer carries that plan modifier, so Terraform now correctly expects it to show
+  `(known after apply)` on every update rather than being told it will stay the same
+  and then observing otherwise.
+
+* **`circleci_budget`'s `Delete` could error on a budget that was already gone.** It
+  treated only `circleci.IsNotFound` (404) as "already deleted." Measured against a
+  live organization: deleting a `budget_id` that no longer exists — never created,
+  already deleted, or superseded by the id churn described above — answers `500`
+  with a generic `{"error":"There was an error deleting the budget"}`, never `404`.
+  `Delete` now corroborates by re-listing the organization's budgets for this
+  resource's scope before treating a delete failure as real, the same way absence is
+  established everywhere else this route has no single-item read.
+
+* **`circleci_budget`'s `credits` accepted `0`, which CircleCI rejects.** The
+  validator was `int64validator.AtLeast(0)`; measured against a live organization,
+  `credits = 0` answers `400 {"error":"Invalid budget settings"}` and `credits = 1` is
+  the actual minimum. A configuration with `credits = 0` used to pass `terraform
+  plan` and fail at apply with an error naming no field; it is now rejected at plan
+  time with a message that says why.
+
+* **`circleci_storage_retention`'s fake, tests and documentation described the wrong
+  failure mode for an out-of-bounds retention value.** They said CircleCI silently
+  clamps a value outside the reported `min`/`max` bounds to the nearest bound and
+  answers success either way. Measured against a live organization: it does not.
+  Every out-of-bounds value — over the max, under the min, negative, or a body
+  missing one of the three required fields — answers `400 {"error":"Invalid value
+  given"}` and applies none of the three fields, including the two that were within
+  bounds; a value exactly at a reported bound is accepted normally. The resource's
+  actual behaviour was already correct for this (a failed `PUT` already short-circuits
+  before the read-back), so this is a documentation and test fix, not a behaviour
+  change: the fake now rejects instead of clamping, the "warns when clamped" test is
+  replaced with one asserting the apply-time error, and `warnClampedStorageRetention`
+  is now documented as a defensive check for a scenario measurement did not observe
+  rather than the primary safety net it was described as.
+
 * **`circleci_trigger` left `created_at` empty in state after every create, so every
   refresh after an apply showed a permanent diff on it** and `ImportStateVerify` failed.
   The create route does not return the field: `POST
@@ -84,6 +127,17 @@
   matched nothing before this fix.
 
 ### NOTES
+
+* **`circleci_usage_export`'s `download_urls` can be an empty list even when `state`
+  is `"completed"`.** Measured against a live organization: a job whose window held
+  no matching usage data completed normally with `download_urls` still `null`, while
+  an otherwise identical job for a window that did have data completed with one
+  signed URL. This is not a bug in the job or in this provider; a caller should not
+  treat an empty result on a completed job as an error condition on its own. The
+  36-hour URL validity this provider has always documented is now also confirmed by
+  measurement: a completed job's signed URL carries an `X-Amz-Expires` of 129599
+  seconds, and re-polling later returns a freshly re-signed URL rather than the same
+  one.
 
 * **The diagnostic for an over-long context no longer suggests a route that does not
   exist.** It previously advised reading the variables "individually by name"; `GET

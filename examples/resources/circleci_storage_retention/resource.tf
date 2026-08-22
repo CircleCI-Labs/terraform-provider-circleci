@@ -1,8 +1,8 @@
-# CircleCI clamps these to the organization's plan-enforced bounds rather than
-# rejecting an out-of-range value, so the values actually stored may differ from
-# what is configured here. The provider warns when that happens; the
-# cache/workspace/artifact_retention_days_min and _max attributes report the
-# current bounds after the first apply or refresh.
+# Each value has a plan-enforced minimum and maximum, reported after the first
+# apply or refresh as the matching cache/workspace/artifact_retention_days_min
+# and _max attributes. Configuring a value outside that range fails the apply
+# outright (CircleCI rejects it; it does not clamp to the nearest bound), with
+# a message that does not say which field was the problem.
 resource "circleci_storage_retention" "example" {
   org_id = "00000000-0000-0000-0000-000000000000"
 

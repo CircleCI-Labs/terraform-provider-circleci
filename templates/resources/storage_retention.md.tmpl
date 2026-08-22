@@ -14,7 +14,7 @@ Manages how many days CircleCI retains an organization's build cache, workspace 
 | | |
 | --- | --- |
 | **CircleCI Cloud** | Yes |
-| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. |
+| **CircleCI Server** | No — this route is served on CircleCI's private origin, which a Server installation's gateway does not route to at all. Using this with `deployment = "server"` reports an explicit error rather than the confusing failure the request would otherwise produce. **Reasoned rather than measured**: no CircleCI Server installation has been available to test against; this is derived from how the private origin is configured for Cloud, the same reasoning `circleci_usage_export`'s Server row documents its own version of. |
 | **API** | `GET` and `PUT /private/orgs/{org_id}/storage-retention-controls` |
 | **Organization type** | Any. |
 | **Token** | A personal API token belonging to an organization admin. |
@@ -28,16 +28,14 @@ An organization's storage-retention record always exists and always holds a valu
 - **All three `*_retention_days` attributes are `Required`, not sparse.** The underlying route is a single `PUT` that replaces all three values together; there is no way to change one and leave the other two alone. This resource therefore owns all three in full.
 - **Destroy removes the resource from Terraform state and makes no API call.** CircleCI has no route that deletes or resets storage-retention controls, so all three values keep whatever Terraform last applied.
 
-## CircleCI clamps out-of-range values instead of rejecting them
+## CircleCI rejects an out-of-range value; it does not clamp it
 
 Each of the three values has a plan-enforced minimum and maximum, which this resource reports as `cache_retention_days_min`/`_max`, `workspace_retention_days_min`/`_max` and `artifact_retention_days_min`/`_max`. These are `Computed`: CircleCI derives them from the organization's plan, this provider cannot set them, and it cannot even learn them before the first successful read.
 
-That matters because of what CircleCI does with a value outside that range: it does not reject the request. It silently stores the nearest bound instead, and answers success either way. So a configuration asking for more retention than the plan allows does not fail `terraform apply` — it applies, and then behaves oddly:
+**Measured against a live organization (2026-08-21):** a value outside that range — over the max, under the min, or negative — fails the write with `400 {"error":"Invalid value given"}` and applies none of the three fields, not even the two that were within bounds. An in-range value at the exact boundary (e.g. the reported maximum) is accepted normally. So a configuration asking for more retention than the plan allows fails `terraform apply` outright, with a message that does not say which field was the problem.
 
-- This provider always reads the record back immediately after writing it, and adds a warning naming exactly which value(s) were clamped and to what, if any were.
-- Terraform state reflects what CircleCI actually stored, not what was configured. If the two differ, every subsequent `terraform plan` shows a difference, because Terraform cannot reach a value CircleCI will not accept. This is not a bug in the resource; it is that configuration being permanently unsatisfiable until it is changed to fit within the reported bounds, or the organization's plan changes.
-
-Because the bounds are unknowable before a read and unenforced on write, this resource does not validate `*_retention_days` against them at plan time — there is nothing to validate against until after the first apply, and even then the service itself does not enforce the bounds it reports.
+- Because the bounds are unknowable before a read, this resource cannot validate `*_retention_days` against them at plan time on a brand-new resource — there is nothing to validate against until after the first apply or an import.
+- This provider still reads the record back after every successful write and warns if what is now stored ever differs from what was configured. On every case measured this never fires — a write either applies exactly as sent or is rejected outright — but it is kept as a defensive check against that changing.
 
 ## Example Usage
 
