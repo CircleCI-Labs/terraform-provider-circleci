@@ -51,7 +51,7 @@ output "category_names" {
 
 ### Read-Only
 
-- `categories` (Attributes List) Every registry category, in the order the API returns them. (see [below for nested schema](#nestedatt--categories))
+- `categories` (Attributes List) Every registry category, sorted by name. The API's own order is not part of its contract and is not what this returns: it is sorted here (via the same orbCategoriesToList used by circleci_orb) so the value is stable across reads instead of following the API's ordering. (see [below for nested schema](#nestedatt--categories))
 - `ids_by_name` (Map of String) Category ids keyed by category name, for looking up the value to put in `circleci_orb.category_ids`.
 
 <a id="nestedatt--categories"></a>

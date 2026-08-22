@@ -46,8 +46,10 @@ const (
 //
 // Not every field is populated by every route. The /orb/packages collection
 // returns a thinner record than the by-id route does — see orbPackageListWire —
-// so Namespace, CreatedAt, HomeURL and the usage counts are empty on packages
-// that came from a listing.
+// so Namespace, CreatedAt and HomeURL are empty on packages that came from a
+// listing. The usage counts are the exception: [NET] confirms the collection
+// reports them too, so a package from a listing has real Last30Days* values,
+// not zeroes.
 type OrbPackage struct {
 	ID          string
 	Name        string
@@ -165,17 +167,30 @@ type orbPackageWire struct {
 // orbPackageListWire is the shape returned by GET /orb/packages.
 //
 // It is deliberately a second type rather than a reuse of orbPackageWire,
-// because the collection is genuinely thinner: references.namespace carries only
-// an id with no attributes.name, and the created_at, home_url and usage counts
-// are absent. Decoding the collection into the detail type would silently yield
-// a package whose Namespace is "" and whose counts are zero, which reads as real
-// data rather than as missing data.
+// because the collection is genuinely thinner in some respects:
+// references.namespace carries only an id with no attributes.name, and
+// created_at and home_url are absent. Decoding the collection into the detail
+// type would silently yield a package whose Namespace is "" and whose
+// CreatedAt/HomeURL are empty, which reads as real data rather than as
+// missing data.
+//
+// The usage counts are NOT one of the thinner fields — this is the one place
+// this comment used to be wrong. [NET], confirmed against a live account on
+// both filter[namespace_id] and filter[name]: every /orb/packages collection
+// response carries last_30_days_build_count/project_count/org_count in
+// attributes, at the same value the detail route reports. A type that omits
+// them (as this one used to) silently reports real traffic as zero on every
+// read that goes through a listing — circleci_orbs and circleci_orb_categories
+// in particular. See TestListOrbPackagesUsesTheThinnerCollectionShape.
 type orbPackageListWire struct {
 	ID         string `json:"id"`
 	Attributes struct {
-		Name      string `json:"name"`
-		IsPrivate bool   `json:"is_private"`
-		IsListed  bool   `json:"is_listed"`
+		Name                   string `json:"name"`
+		IsPrivate              bool   `json:"is_private"`
+		IsListed               bool   `json:"is_listed"`
+		Last30DaysBuildCount   int64  `json:"last_30_days_build_count"`
+		Last30DaysProjectCount int64  `json:"last_30_days_project_count"`
+		Last30DaysOrgCount     int64  `json:"last_30_days_org_count"`
 	} `json:"attributes"`
 	References struct {
 		Namespace  thinNamespaceRef `json:"namespace"`
@@ -281,11 +296,14 @@ func (w orbPackageWire) toOrbPackage() *OrbPackage {
 
 func (w orbPackageListWire) toOrbPackage() *OrbPackage {
 	pkg := &OrbPackage{
-		ID:          w.ID,
-		Name:        w.Attributes.Name,
-		NamespaceID: w.References.Namespace.ID,
-		IsPrivate:   w.Attributes.IsPrivate,
-		IsListed:    w.Attributes.IsListed,
+		ID:                     w.ID,
+		Name:                   w.Attributes.Name,
+		NamespaceID:            w.References.Namespace.ID,
+		IsPrivate:              w.Attributes.IsPrivate,
+		IsListed:               w.Attributes.IsListed,
+		Last30DaysBuildCount:   w.Attributes.Last30DaysBuildCount,
+		Last30DaysProjectCount: w.Attributes.Last30DaysProjectCount,
+		Last30DaysOrgCount:     w.Attributes.Last30DaysOrgCount,
 	}
 
 	if len(w.References.Versions) > 0 {

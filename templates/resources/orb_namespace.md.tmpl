@@ -13,7 +13,7 @@ A namespace is the globally unique prefix that owns a set of orbs, as in `<names
 
 A namespace is also what a self-hosted runner resource class is named after: a resource class is always `<namespace>/<class>`. That makes this resource the way to create the namespace a `circleci_runner_resource_class` needs.
 
-!> **Deleting a namespace deletes its orbs.** There is no way to recover them, and published orb versions cannot be republished under the same namespace and version.
+!> **Renaming and deleting a namespace are not self-service, in practice.** The v3 API has routes for both (`POST .../rename`, `DELETE ...`), and the provider calls them, but every account this provider's author was able to test — including an organization-admin token on an organization it had just created — received `403 Forbidden` from both, on namespaces both inside and outside the calling account's own organization. CircleCI's support documentation describes a namespace rename or transfer as a support-ticket process, not an API call, and this investigation found no equivalent process documented for deletion at all. Deleting the *organization* that owns a namespace does not delete the namespace either: it is orphaned, keeps existing, and keeps the name claimed with no owner able to act on it again. Treat `name` as permanent once applied, and expect `terraform destroy` on this resource to fail rather than remove anything.
 
 ## Availability
 
@@ -21,7 +21,7 @@ A namespace is also what a self-hosted runner resource class is named after: a r
 | --- | --- |
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
-| **API** | `POST /api/v3/namespaces`, `GET /api/v3/namespaces/{id}`, `POST /api/v3/namespaces/{id}/rename`, `DELETE /api/v3/namespaces/{id}` |
+| **API** | `POST /api/v3/namespaces`, `GET /api/v3/namespaces/{id}`, `POST /api/v3/namespaces/{id}/rename` (403 for every account tested; see above), `DELETE /api/v3/namespaces/{id}` (same) |
 | **Organization type** | Any. An organization is normally limited to one namespace. |
 | **Token** | A personal API token belonging to an organization admin. |
 
@@ -31,16 +31,11 @@ A namespace is also what a self-hosted runner resource class is named after: a r
 
 ## Renaming
 
-`name` is **not** a replace-forcing attribute. The v3 API has a dedicated rename route, so changing `name` renames the namespace in place: it keeps its id and its orbs, and Terraform reports a plain update rather than a destroy and create.
+`name` is **not** a replace-forcing attribute: the v3 API's rename route has the shape of a genuine in-place update (a namespace it succeeds against keeps its id and its orbs), so a `RequiresReplace` here would risk Terraform destroying an organization's only namespace just to satisfy a rename. `name` is left as a plain, non-replacing update instead, specifically so that the outcome measured below is a clean failed apply rather than data loss.
 
-A rename is still disruptive outside Terraform's view of the world:
+**In practice, expect the rename to fail.** Every attempt this provider's author made against a live account — regardless of which organization owned the namespace or issued the request — answered `403 Forbidden`, and left the namespace's name unchanged. CircleCI's support documentation describes renaming or transferring a namespace as something to request via a support ticket rather than this API call. The error surfaced by Terraform says as much and links to that documentation; a retry with the same configuration will not succeed.
 
-* orbs in the namespace are reachable only under the new name, so any `.circleci/config.yml` that references `<old-namespace>/<orb>@<version>` stops resolving;
-* runner resource classes named `<old-namespace>/<class>` stop matching.
-
-The provider emits a warning after a successful rename to say so.
-
-`organization_id` cannot change: a namespace cannot be moved between organizations, so changing it forces a new namespace, which deletes the old one and everything in it.
+`organization_id` cannot change: a namespace cannot be moved between organizations, so changing it forces a new namespace to be planned. Given the above, do not expect that plan to succeed either, and do not rely on the old namespace being destroyed — see the deletion note at the top of this page.
 
 {{ .SchemaMarkdown | trimspace }}
 

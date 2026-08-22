@@ -25,10 +25,17 @@ var (
 
 // orbSummaryModel is one entry of the orbs list.
 //
-// It carries only what the /orb/packages collection returns. The collection's
-// records are thinner than the by-id route's: there is no created_at, home_url or
-// usage count, and the namespace reference has an id but no name. Use the
-// `circleci_orb` data source for those.
+// It carries only what the /orb/packages collection returns, which is thinner
+// than the by-id route's response in two respects: there is no created_at or
+// home_url, and the namespace reference has an id but no name (worked around
+// above by taking the namespace off the qualified name instead). Use the
+// `circleci_orb` data source for those two fields.
+//
+// The usage counts are NOT one of the thinner fields — [NET] confirms the
+// collection reports them at the same value the detail route does, see
+// circleci.OrbPackage's doc comment — but this data source does not expose
+// them regardless. That is a scope choice, not a limit of the collection; add
+// them here if a consumer needs them.
 type orbSummaryModel struct {
 	Id                     types.String `tfsdk:"id"`
 	FullName               types.String `tfsdk:"full_name"`

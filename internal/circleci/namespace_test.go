@@ -119,6 +119,10 @@ func TestCreateNamespaceSendsFlatBody(t *testing.T) {
 	}
 }
 
+// TestRenameNamespace is a [FAKE] test of the request/response mechanics
+// only: it proves the client sends the right verb, path and body and decodes
+// a 200 correctly. It is not evidence that a real rename ever answers 200 —
+// see RenameNamespace's doc comment for the [NET] finding that it does not.
 func TestRenameNamespace(t *testing.T) {
 	t.Parallel()
 
@@ -150,6 +154,9 @@ func TestRenameNamespace(t *testing.T) {
 	}
 }
 
+// TestDeleteNamespace is a [FAKE] test of the request mechanics only, same
+// caveat as TestRenameNamespace: see DeleteNamespace's doc comment for the
+// [NET] finding that a real delete answers 403, not 204.
 func TestDeleteNamespace(t *testing.T) {
 	t.Parallel()
 

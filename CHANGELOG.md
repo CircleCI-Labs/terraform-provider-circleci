@@ -157,6 +157,39 @@ CircleCI installation, not provider users.
 The entry below affects contributors running the acceptance test suite against a real CircleCI
 installation, not provider users — nothing there changes provider behaviour.
 
+* **`circleci_orbs` and `circleci_orb_categories` silently reported an orb's last-30-days
+  usage counts as zero when the data came from a listing rather than a single-orb read.**
+  The v3 orb-packages collection was believed to omit `last_30_days_build_count`,
+  `last_30_days_project_count` and `last_30_days_org_count` the way it omits `created_at`,
+  `home_url` and the namespace name — but confirmed against a live account, the collection
+  reports the same usage counts the by-id route does. The client's listing wire type had no
+  fields for them, so every count decoded from a list came back as the Go zero value
+  regardless of the real number, which reads as "no usage" rather than as missing data.
+
+  The client now decodes these three fields from a listing too. `circleci_orb` (the
+  singular data source) was unaffected — it always resolves through the by-id route — and
+  `circleci_orbs` does not currently surface the counts in its schema at all, so this is a
+  correctness fix in the client library with no visible schema change.
+
+* **`circleci_orb_namespace`'s rename and delete diagnostics read as an ordinary,
+  possibly-transient API error, with no hint that retrying cannot help.** Confirmed against
+  a live account: every rename and every delete attempt this investigation made — on a
+  namespace the calling organization had just created, and on one belonging to an unrelated
+  organization — answered `403 Forbidden`, and left the namespace unchanged. CircleCI's
+  support documentation describes a namespace rename or transfer as a support-ticket
+  process rather than a self-service API call, and no equivalent process is documented for
+  deletion at all.
+
+  The diagnostic for both operations now says so explicitly, with a link to CircleCI's
+  support documentation, whenever the API answers 403. Nothing about `terraform plan` or
+  `terraform apply`'s pass/fail outcome changes: `name` was already a non-replacing update
+  and `Delete` already surfaced a failure rather than reporting a removal that did not
+  happen. This is a diagnostic-quality fix, not a behavioural one.
+
+
+This entry (aside from the two bug fixes above) affects contributors running the
+acceptance test suite against a real CircleCI installation, not provider users.
+
 * **Acceptance-test environment variables are now named per integration**, and a placeholder
   value skips cleanly instead of failing. Every fixture variable is `CIRCLECI_TEST_<KEY>_<SUFFIX>`,
   where `KEY` is `GH_APP`, `GH_OAUTH`, `GH_SERVER`, `GL_CLOUD`, `GL_SM` or `BB_CLOUD` and the
