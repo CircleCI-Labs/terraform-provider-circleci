@@ -4,34 +4,53 @@
 package provider
 
 import (
+	"crypto/rand"
 	"fmt"
 	"regexp"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-testing/compare"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
+// TestAccContextDataSource used to read a pre-existing fixture context
+// (CIRCLECI_TEST_<key>_CONTEXT_ID / _CONTEXT_NAME), which is never set in any
+// of the four CI jobs' environment blocks (see .circleci/config.yml), so this
+// test skipped on every run and had no live coverage at all. It now creates
+// its own scratch context — the same pattern TestAccContextResource and
+// TestAccContextRestrictionResource already use — so it needs only
+// testOrgID, which every CI job does set.
+//
+// It also drops the config's hardcoded `provider "circleci" { host =
+// "https://circleci.com/api/v2" }` block: that pinned every run to CircleCI
+// Cloud regardless of CIRCLE_HOST, which would have been silently wrong on a
+// CircleCI Server run. No test ever caught it because the fixture requirement
+// above kept this test from running at all. Omitting the block lets the
+// provider resolve the host the same way every other acceptance test in this
+// package does.
+//
+// The restrictions assertion is unchanged: a freshly created context is born
+// with exactly one restriction, an "All members" group grant whose value is
+// the organization's own UUID (see circleci_context_restriction's package
+// doc and TestAccContextRestrictionResource_GroupType). A test that creates
+// its own context has to account for that restriction existing already,
+// rather than assuming an empty list, or it would be surprised by it the
+// first time it ran for real.
 func TestAccContextDataSource(t *testing.T) {
-	contextID := testContextID(t)
-	contextName := testContextName(t)
 	organizationID := testOrgID(t)
+	contextName := "tf-acc-context-ds-" + rand.Text()
 	dateRegex := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$`)
+
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			// Read testing
 			{
-				Config: testContextDataSourceConfig(contextID),
+				Config: testContextDataSourceConfig(organizationID, contextName),
 				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue(
-						"data.circleci_context.test_context",
-						tfjsonpath.New("id"),
-						knownvalue.StringExact(contextID),
-					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_context.test_context",
 						tfjsonpath.New("name"),
@@ -60,20 +79,30 @@ func TestAccContextDataSource(t *testing.T) {
 							},
 						),
 					),
+					// The data source must resolve to the same context the config
+					// created, not merely one with the same name.
+					statecheck.CompareValuePairs(
+						"circleci_context.test_context",
+						tfjsonpath.New("id"),
+						"data.circleci_context.test_context",
+						tfjsonpath.New("id"),
+						compare.ValuesSame(),
+					),
 				},
 			},
 		},
 	})
 }
 
-func testContextDataSourceConfig(contextID string) string {
+func testContextDataSourceConfig(organizationID, name string) string {
 	return fmt.Sprintf(`
-provider "circleci" {
-  host = "https://circleci.com/api/v2"
+resource "circleci_context" "test_context" {
+  name            = %[2]q
+  organization_id = %[1]q
 }
 
 data "circleci_context" "test_context" {
-  id = %[1]q
+  id = circleci_context.test_context.id
 }
-`, contextID)
+`, organizationID, name)
 }

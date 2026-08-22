@@ -310,12 +310,14 @@ So: `task test:fast` while iterating, `task test` before pushing.
 ## Acceptance tests
 
 The acceptance tests in `internal/provider` run against a real CircleCI
-installation. They only execute when `TF_ACC=1` is set, and every fixture they
-touch (organization, project, pipeline, context, trigger, webhook, runner
-namespace) has to already exist in the account the token belongs to. Those
-identifiers are read from environment variables — **any test whose variable is
-unset, or set to a placeholder (see below), skips instead of failing**, so a
-clean checkout with no credentials still passes `go test ./...`.
+installation. They only execute when `TF_ACC=1` is set, and most of the
+fixtures they touch (organization, project, pipeline, trigger, runner
+namespace) have to already exist in the account the token belongs to —
+context and webhook are the exceptions, created and destroyed by the test
+itself. Those identifiers are read from environment variables — **any test
+whose variable is unset, or set to a placeholder (see below), skips instead
+of failing**, so a clean checkout with no credentials still passes
+`go test ./...`.
 
 Authentication:
 
@@ -373,15 +375,14 @@ Suffixes, and what each identifies:
 | `TRIGGER_ID` | UUID of a pre-existing trigger. |
 | `TRIGGER_PROJECT_ID` | UUID of the project owning that trigger. |
 | `SCHEDULED_TRIGGER_ID` | UUID of a pre-existing scheduled trigger in the `STATIC_PROJECT_ID` project. |
-| `CONTEXT_ID` | UUID of a pre-existing context in the primary organization. |
-| `CONTEXT_NAME` | Name of that context. |
-| `CONTEXT_ENV_VAR_NAME` | Name of an environment variable that already exists on that context. |
-| `WEBHOOK_ID` | UUID of a pre-existing webhook scoped to the `PROJECT_ID` project. |
-| `WEBHOOK_NAME` | Name of that webhook. |
-| `WEBHOOK_URL` | Receiver URL of that webhook. |
 | `RUNNER_NAMESPACE` | Runner namespace of the primary organization; resource classes are named `<namespace>/<class>`. |
 | `REPO_NAME` | Full name (`owner/repo`) of a repository reachable through the integration. |
 | `REPO_EXTERNAL_ID` | External (VCS-side) ID of that repository. |
+
+There is no `CONTEXT_*` or `WEBHOOK_*` suffix: the acceptance tests for
+`circleci_context`, `circleci_context_environment_variable` and
+`circleci_webhook` create their own scratch context or webhook per run from
+`ORG_ID`/`PROJECT_ID` alone, rather than reading a shared, pre-existing one.
 
 For example, with `CIRCLECI_TEST_VCS_TYPE=github_app` the primary
 organization's UUID is read from `CIRCLECI_TEST_GH_APP_ORG_ID`; switch to

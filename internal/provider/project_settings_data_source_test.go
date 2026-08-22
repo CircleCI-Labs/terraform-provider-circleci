@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -242,13 +241,7 @@ data "circleci_project_settings" "test_project" {
 func testAccProjectSettingsClient(t *testing.T) *circleci.Client {
 	t.Helper()
 
-	return circleci.New(circleci.Config{
-		// The same two variables the provider itself falls back to, so a run
-		// against CircleCI Server reaches the same installation.
-		Host:       os.Getenv("CIRCLE_HOST"),
-		Token:      os.Getenv("CIRCLE_TOKEN"),
-		Deployment: circleci.Deployment(os.Getenv("CIRCLE_DEPLOYMENT")),
-	})
+	return testAccClient(t)
 }
 
 // testAccPreserveProjectSettings reads a project's advanced settings and

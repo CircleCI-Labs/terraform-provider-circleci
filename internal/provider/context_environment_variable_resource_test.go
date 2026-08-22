@@ -16,19 +16,19 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
-// Every name below is unique per run, including the replacement one. This
-// resource is created on the *pre-existing* fixture context
-// (CIRCLECI_TEST_<key>_CONTEXT_ID), which is shared with
-// TestAccContextEnvironmentVariableDataSource and is not torn down between
-// runs, and the write route is a PUT upsert (see
-// UpsertContextEnvironmentVariable in internal/circleci/environment_variable.go)
-// — so a fixed name here does not fail loudly on a re-run, it silently
-// overwrites whatever variable of that name is already on the context and then
-// deletes it on destroy. The replacement step used the literal name "one",
-// which is exactly the kind of name a maintainer might have seeded as
-// CIRCLECI_TEST_<key>_CONTEXT_ENV_VAR_NAME.
+// This resource used to be created on the pre-existing fixture context
+// (CIRCLECI_TEST_<key>_CONTEXT_ID), which none of the four CI jobs'
+// environment blocks set (see .circleci/config.yml), so this test never ran
+// there. It now creates its own scratch context — a resource this test owns
+// outright and that Terraform destroys at the end of the TestCase — so the
+// only fixture it needs is testOrgID, which every CI job does set. Every name
+// below, including the context's own, is unique per run for the same reason
+// the old comment gave for its env-var names: PutContextEnvironmentVariable
+// is an upsert, so a fixed name would silently overwrite whatever a
+// concurrent or crashed run left behind rather than failing loudly.
 func TestAccContextEnvironmentVariableResource(t *testing.T) {
-	contextID := testContextID(t)
+	organizationID := testOrgID(t)
+	contextName := "tf-acc-ctx-envvar-" + rand.Text()
 	name := fmt.Sprintf("N%s", rand.Text())
 	value := rand.Text()
 	replacementName := fmt.Sprintf("N%s", rand.Text())
@@ -39,13 +39,8 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 		Steps: []resource.TestStep{
 			// Create and Read testing
 			{
-				Config: testAccContextEnvironmentVariableResourceConfig(contextID, name, value),
+				Config: testAccContextEnvironmentVariableResourceConfig(organizationID, contextName, name, value),
 				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue(
-						"circleci_context_environment_variable.test_env",
-						tfjsonpath.New("context_id"),
-						knownvalue.StringExact(contextID),
-					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
 						tfjsonpath.New("name"),
@@ -60,15 +55,12 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 			},
 			// Update and Read testing. name has RequiresReplace, so this step is a
 			// replacement: the variable created above is deleted and this one
-			// created, which is the behaviour the step is here to exercise.
+			// created, which is the behaviour the step is here to exercise. The
+			// context itself is unchanged across every step, so it is not
+			// replaced.
 			{
-				Config: testAccContextEnvironmentVariableResourceConfig(contextID, replacementName, replacementValue),
+				Config: testAccContextEnvironmentVariableResourceConfig(organizationID, contextName, replacementName, replacementValue),
 				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue(
-						"circleci_context_environment_variable.test_env",
-						tfjsonpath.New("context_id"),
-						knownvalue.StringExact(contextID),
-					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
 						tfjsonpath.New("name"),
@@ -102,13 +94,8 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 			},
 			// Re-apply config after import to reconcile value in state
 			{
-				Config: testAccContextEnvironmentVariableResourceConfig(contextID, replacementName, replacementValue),
+				Config: testAccContextEnvironmentVariableResourceConfig(organizationID, contextName, replacementName, replacementValue),
 				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue(
-						"circleci_context_environment_variable.test_env",
-						tfjsonpath.New("context_id"),
-						knownvalue.StringExact(contextID),
-					),
 					statecheck.ExpectKnownValue(
 						"circleci_context_environment_variable.test_env",
 						tfjsonpath.New("name"),
@@ -121,21 +108,23 @@ func TestAccContextEnvironmentVariableResource(t *testing.T) {
 					),
 				},
 			},
-			// Delete testing automatically occurs in TestCase
+			// Delete testing automatically occurs in TestCase, for both the
+			// environment variable and the scratch context it lives on.
 		},
 	})
 }
 
-func testAccContextEnvironmentVariableResourceConfig(contextID, name, value string) string {
+func testAccContextEnvironmentVariableResourceConfig(organizationID, contextName, name, value string) string {
 	return fmt.Sprintf(`
-data "circleci_context" "test_context" {
-  id = %[3]q
+resource "circleci_context" "test_context" {
+  organization_id = %[1]q
+  name             = %[2]q
 }
 
 resource "circleci_context_environment_variable" "test_env" {
-  context_id = data.circleci_context.test_context.id
-  name       = %[1]q
-  value      = %[2]q
+  context_id = circleci_context.test_context.id
+  name       = %[3]q
+  value      = %[4]q
 }
-`, name, value, contextID)
+`, organizationID, contextName, name, value)
 }

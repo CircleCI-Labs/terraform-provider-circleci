@@ -231,15 +231,50 @@ jobs:
   #     separates these four from build-and-test is the credential and the
   #     fixtures, not the flag.
   #   * Only the identifiers these organizations were provisioned with are set:
-  #     the organization and the writable project. Everything else the suite
-  #     reads — PROJECT_SLUG, STATIC_PROJECT_*, PIPELINE_ID, TRIGGER_*,
-  #     SCHEDULED_TRIGGER_ID, CONTEXT_*, WEBHOOK_*, RUNNER_NAMESPACE, and the
-  #     static GH_APP_REPO_* and GH_SERVER_* pairs — is deliberately left unset,
+  #     the organization, the writable project, its slug, and — as of this
+  #     revision — the runner namespace each of these four organizations
+  #     already had claimed (see the comment on PROJECT_SLUG/RUNNER_NAMESPACE
+  #     below for why those two are safe to add and the rest are not yet).
+  #     Everything else the suite reads — STATIC_PROJECT_*, PIPELINE_ID,
+  #     TRIGGER_*, SCHEDULED_TRIGGER_ID, CONTEXT_*, WEBHOOK_*, and the static
+  #     GH_APP_REPO_* and GH_SERVER_* pairs — is deliberately left unset,
   #     because an unset variable skips with a message naming itself while a
   #     guessed one fails against a nonsense identifier in a way that reads
   #     exactly like a regression. The summary step prints every such skip;
   #     filling them in is a matter of adding lines here as each fixture is
   #     actually created.
+  #
+  #     CONTEXT_* and WEBHOOK_* stay unset on purpose even though this
+  #     revision added full live CRUD coverage for both resources: those tests
+  #     now create their own scratch context/webhook per run (the same
+  #     pattern TestAccContextResource and TestAccWebhookResource already
+  #     used) instead of reading a shared, pre-existing fixture, so they need
+  #     nothing beyond ORG_ID/PROJECT_ID here. See context_data_source_test.go,
+  #     context_environment_variable_*_test.go and webhook_data_source_test.go.
+  #
+  #     PROJECT_SLUG is the slug of the same project PROJECT_ID names — no new
+  #     object, just its other identifier — and unlocks every test in this
+  #     package that was already written against a real project but could not
+  #     run in CI for the want of it: TestAccProjectSettingsDataSource and
+  #     TestAccProjectEnvironmentVariableResource(Update)/DataSource on all
+  #     four jobs, plus TestAccCheckoutKeyResourceNet_DeployKeyLifecycle on
+  #     acceptance-gh-oauth alone — it is also gated to github_oauth/bitbucket,
+  #     and github_hybrid is a different CIRCLECI_TEST_VCS_TYPE value, so it
+  #     stays skipped on acceptance-gh-hybrid even with this set.
+  #
+  #     RUNNER_NAMESPACE is a self-hosted-runner namespace, claimed once
+  #     through circleci_orb_namespace or the CLI and permanent — CircleCI has
+  #     no way to delete one (see DeleteNamespace's doc comment in
+  #     internal/circleci/namespace.go), so unlike every other fixture here it
+  #     cannot be created per test run. All four organizations below already
+  #     had one claimed, named after the organization itself, from earlier
+  #     manual validation of the runner resource-class and token resources;
+  #     this revision only wires the existing name into each job so
+  #     TestAccRunnerResourceClass*, TestAccRunnerToken* and
+  #     TestAccRunnerTokenResourceLimitLive stop skipping here. [NET, verified
+  #     2026-08-22 against every organization below: GET /namespaces?filter
+  #     [name]=<name> resolves, and this token can create and then delete a
+  #     resource class under it].
   #   * CIRCLECI_TEST_GH_OAUTH_ORG_ID/_ORG_SLUG are set in exactly one job,
   #     acceptance-gh-oauth. They are static fixtures — testGithubOrgID reads
   #     them whatever CIRCLECI_TEST_VCS_TYPE says — and the tests that read them
@@ -258,6 +293,8 @@ jobs:
       CIRCLECI_TEST_GH_APP_ORG_SLUG: circleci/Va2k7FVcHE7EyFDbRioifr
       CIRCLECI_TEST_GH_APP_ORG_NAME: gh-app-cci-1
       CIRCLECI_TEST_GH_APP_PROJECT_ID: 18ae5fa4-d11c-4fe1-a1a7-fbcae4d037de
+      CIRCLECI_TEST_GH_APP_PROJECT_SLUG: circleci/Va2k7FVcHE7EyFDbRioifr/43maL3EYJhT5Q9EMGbc5uF
+      CIRCLECI_TEST_GH_APP_RUNNER_NAMESPACE: gh-app-cci-1
     steps:
       - acceptance_test
 
@@ -270,6 +307,8 @@ jobs:
       CIRCLECI_TEST_GH_OAUTH_ORG_SLUG: gh/gh-oauth-cci-1
       CIRCLECI_TEST_GH_OAUTH_ORG_NAME: gh-oauth-cci-1
       CIRCLECI_TEST_GH_OAUTH_PROJECT_ID: d8fc5b21-353a-4743-9969-6a24a189527a
+      CIRCLECI_TEST_GH_OAUTH_PROJECT_SLUG: gh/gh-oauth-cci-1/project-1
+      CIRCLECI_TEST_GH_OAUTH_RUNNER_NAMESPACE: gh-oauth-cci-1
       # The org-move test (TestAccCircleCiProjectOrgUpdateResource) creates a
       # project in ORG_ID and moves it to ALT_ORG_ID. It is gated to
       # github_oauth/bitbucket, so of the four jobs here this is the only one
@@ -292,16 +331,29 @@ jobs:
   #
   # gh-oauth-cci-2 is also a CLASSIC (VCS-backed) organization, so
   # testRequireStandaloneOrg's tests skip here too (project_resource_test.go)
-  # — every route into a real API call in this package is gated to an
-  # integration or an organization class this job's fixtures are neither, so
-  # "Exercised by this run (0)" is not a possibility to expect and shrug off,
-  # it is the honest count, and .circleci/scripts/summarize-acceptance-run.sh
-  # fails this job on it (the check that catches a job proving nothing — see
-  # that script). Leave it failing rather than gating anything to
-  # github_hybrid just to make it pass: this integration genuinely has zero
-  # real-API coverage today. It stops failing the day a real acceptance test
-  # is written that this organization's class or integration actually
-  # supports and is gated to include github_hybrid.
+  # — every route into a real API call that is GATED to an integration or an
+  # organization class in this package is gated to one this job's fixtures
+  # are neither, so "Exercised by this run (0)" is not a possibility to
+  # expect and shrug off, it is the honest count of THAT metric, and
+  # .circleci/scripts/summarize-acceptance-run.sh fails this job on it (the
+  # check that catches a job proving nothing — see that script). Leave it
+  # failing rather than gating anything to github_hybrid just to make it
+  # pass: no test is gated to include github_hybrid today. It stops failing
+  # the day a real acceptance test is written that this organization's class
+  # or integration actually supports and is gated to include github_hybrid.
+  #
+  # "(0)" measures only tests that call testRequireVCSType or
+  # testRequireStandaloneOrg — it is NOT a count of every real-API call this
+  # job makes. Most tests in this package carry no VCS or org-class gate at
+  # all, because most resources behave identically everywhere, so they run
+  # here same as on any other job and are simply not tallied by that specific
+  # instrumentation: circleci_context, circleci_context_environment_variable,
+  # circleci_webhook and circleci_runner_resource_class/token all get full
+  # live CRUD coverage on THIS job too, from PROJECT_SLUG and
+  # RUNNER_NAMESPACE below plus the ORG_ID/PROJECT_ID already set. "This
+  # integration genuinely has zero real-API coverage today", a few lines up,
+  # is therefore true of the tally this job is checked against, not of what
+  # actually reaches CircleCI when this job runs.
   #
   # No ALT_ORG pair. testAltOrgID resolves CIRCLECI_TEST_GH_HYBRID_ALT_ORG_ID
   # under this integration, and a second *hybrid* organization is not something
@@ -316,6 +368,8 @@ jobs:
       CIRCLECI_TEST_GH_HYBRID_ORG_SLUG: gh/gh-oauth-cci-2
       CIRCLECI_TEST_GH_HYBRID_ORG_NAME: gh-oauth-cci-2
       CIRCLECI_TEST_GH_HYBRID_PROJECT_ID: 7ffb1015-ec6b-4ac4-b3ec-8a2d1f68944b
+      CIRCLECI_TEST_GH_HYBRID_PROJECT_SLUG: gh/gh-oauth-cci-2/project-1
+      CIRCLECI_TEST_GH_HYBRID_RUNNER_NAMESPACE: gh-oauth-cci-2
     steps:
       - acceptance_test
 
@@ -336,6 +390,8 @@ jobs:
       CIRCLECI_TEST_GL_CLOUD_ORG_SLUG: circleci/WU9ypMiQgrZYrbiHJUGT13
       CIRCLECI_TEST_GL_CLOUD_ORG_NAME: gitlab-test
       CIRCLECI_TEST_GL_CLOUD_PROJECT_ID: f8a56969-9788-4a89-a73a-f17793625c7f
+      CIRCLECI_TEST_GL_CLOUD_PROJECT_SLUG: circleci/WU9ypMiQgrZYrbiHJUGT13/XhpsUwvVpk8E38Cm3syPyQ
+      CIRCLECI_TEST_GL_CLOUD_RUNNER_NAMESPACE: gitlab-test
     steps:
       - acceptance_test
 

@@ -4,27 +4,32 @@
 package provider
 
 import (
+	"crypto/rand"
 	"fmt"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-testing/compare"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
+// This used to read a pre-existing fixture webhook (CIRCLECI_TEST_<key>_WEBHOOK_ID
+// / _WEBHOOK_NAME / _WEBHOOK_URL), none of which any CI job's environment block
+// sets, so it never ran in CI. It now creates its own scratch webhook — the
+// same resource TestAccWebhookResource creates — so the only fixture it needs
+// is testProjectID, which every CI job does set.
 func TestAccWebhookDataSource(t *testing.T) {
-	name := testWebhookName(t)
-	url := testWebhookURL(t)
+	name := "tf-acc-webhook-ds-" + rand.Text()
 	projectId := testProjectID(t)
-	webhookId := testWebhookID(t)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Create webhook resource first, then read with data source
 			{
-				Config: testAccWebhookDataSourceConfig(webhookId),
+				Config: testAccWebhookDataSourceConfig(name, projectId),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(
 						"data.circleci_webhook.test_webhook_data",
@@ -34,7 +39,7 @@ func TestAccWebhookDataSource(t *testing.T) {
 					statecheck.ExpectKnownValue(
 						"data.circleci_webhook.test_webhook_data",
 						tfjsonpath.New("url"),
-						knownvalue.StringExact(url),
+						knownvalue.StringExact("https://example.com/webhook"),
 					),
 					statecheck.ExpectKnownValue(
 						"data.circleci_webhook.test_webhook_data",
@@ -58,16 +63,35 @@ func TestAccWebhookDataSource(t *testing.T) {
 							knownvalue.StringExact("workflow-completed"),
 						}),
 					),
+					// The data source must resolve to the same webhook the config
+					// created, not merely one with the same name.
+					statecheck.CompareValuePairs(
+						"circleci_webhook.test_webhook",
+						tfjsonpath.New("id"),
+						"data.circleci_webhook.test_webhook_data",
+						tfjsonpath.New("id"),
+						compare.ValuesSame(),
+					),
 				},
 			},
 		},
 	})
 }
 
-func testAccWebhookDataSourceConfig(id string) string {
+func testAccWebhookDataSourceConfig(name, scopeId string) string {
 	return fmt.Sprintf(`
-data "circleci_webhook" "test_webhook_data" {
-  id = %[1]q
+resource "circleci_webhook" "test_webhook" {
+  name           = %[1]q
+  url            = "https://example.com/webhook"
+  verify_tls     = true
+  signing_secret = "secret"
+  scope_id       = %[2]q
+  scope_type     = "project"
+  events         = ["workflow-completed"]
 }
-`, id)
+
+data "circleci_webhook" "test_webhook_data" {
+  id = circleci_webhook.test_webhook.id
+}
+`, name, scopeId)
 }
