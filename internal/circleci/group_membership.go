@@ -48,10 +48,13 @@ const (
 // the group": a member added moments earlier came back with
 // created_at "0001-01-01T00:00:00Z" (Go's zero time) alongside a real,
 // current updated_at. The response also carries creator_id and updater_id,
-// neither decoded here because nothing consumes them; updater_id was the
-// caller's own user id and creator_id was the all-zeros UUID. Whatever the
-// server populates *_at from, it is not "when this GroupMember row was
-// created" — treat CreatedAt as decorative, not as data.
+// neither decoded here because nothing consumes them. An earlier version of
+// this comment claimed updater_id was the caller's own user id; re-measured
+// on 2026-08-22 across two separate add-users calls (different groups, same
+// caller), both creator_id and updater_id came back the all-zeros UUID. That
+// claim did not survive the retest and is corrected rather than repeated.
+// Whatever the server populates *_at from, it is not "when this GroupMember
+// row was created" — treat CreatedAt as decorative, not as data.
 type GroupMember struct {
 	UserID    string `json:"user_id"`
 	Username  string `json:"username"`
