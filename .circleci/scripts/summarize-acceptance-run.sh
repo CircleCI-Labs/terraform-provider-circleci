@@ -109,7 +109,7 @@ extract_testcases() {
 }
 
 # The actual t.Skip/t.Skipf text, stripped of the "=== RUN"/"--- SKIP" frame
-# gotestsum wraps around it and the "file.go:NN: " prefix testing adds. A
+# gotestsum wraps around it and the "<source file>:NN: " prefix testing adds. A
 # multi-line message (more than one t.Log before the skip) keeps every line.
 skip_reason() {
   printf '%s' "$1" \

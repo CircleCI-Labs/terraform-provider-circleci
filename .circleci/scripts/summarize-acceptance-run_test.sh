@@ -139,7 +139,7 @@ LOG
     echo '<testcase classname="internal/provider" name="TestAccPassing2" time="0.010000"></testcase>'
     echo '<testcase classname="internal/provider" name="TestAccPassing3" time="0.010000"></testcase>'
     echo '<testcase classname="internal/provider" name="TestAccWeird" time="0.000000">'
-    echo '<skipped message="=== RUN   TestAccWeird&#xA;    somefile.go:1: a reason this script has never seen before&#xA;--- SKIP: TestAccWeird (0.00s)&#xA;"></skipped>'
+    echo '<skipped message="=== RUN   TestAccWeird&#xA;    vcs_gating_test.go:1: a reason this script has never seen before&#xA;--- SKIP: TestAccWeird (0.00s)&#xA;"></skipped>'
     echo '</testcase>'
     echo '<testcase classname="internal/provider" name="TestAccPipelineDefinitionResourceGithubServer" time="0.000000">'
     echo '<skipped message="=== RUN   TestAccPipelineDefinitionResourceGithubServer&#xA;    vcs_gating_test.go:67: TestAccPipelineDefinitionResourceGithubServer only runs against github_server; CIRCLECI_TEST_VCS_TYPE=github_app does not support this feature&#xA;--- SKIP: TestAccPipelineDefinitionResourceGithubServer (0.00s)&#xA;"></skipped>'
