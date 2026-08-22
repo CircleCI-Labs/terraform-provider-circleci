@@ -57,71 +57,115 @@ func testRequireVCSType(t *testing.T, supported ...string) {
 	t.Helper()
 
 	actual := testVCSType(t)
+	name := t.Name()
 
 	if !slices.Contains(supported, actual) {
-		vcsCoverage.mu.Lock()
-		vcsCoverage.skipped = append(vcsCoverage.skipped,
-			fmt.Sprintf("%s (needs %s, got %s)", t.Name(), strings.Join(supported, "/"), actual))
-		vcsCoverage.mu.Unlock()
+		recordVCSCoverageSkip(name, fmt.Sprintf("%s (needs %s, got %s)", name, strings.Join(supported, "/"), actual))
 
 		t.Skipf("%s only runs against %s; CIRCLECI_TEST_VCS_TYPE=%s does not support this feature "+
-			"(see the compatibility matrix in README.md)", t.Name(), strings.Join(supported, "/"), actual)
+			"(see the compatibility matrix in README.md)", name, strings.Join(supported, "/"), actual)
 
 		return
 	}
 
-	vcsCoverage.mu.Lock()
-	vcsCoverage.ran = append(vcsCoverage.ran, fmt.Sprintf("%s (%s)", t.Name(), actual))
-	vcsCoverage.mu.Unlock()
+	recordVCSCoverageRan(name, fmt.Sprintf("%s (%s)", name, actual))
 }
 
-// testIsolateVCSCoverage keeps the calling test's own calls to
-// testRequireVCSType out of the end-of-run summary, restoring whatever was
-// recorded before it once the test finishes.
+// isRealAcceptanceTestName reports whether name — a *testing.T.Name(), which
+// for a subtest is "Parent/Child/…" — belongs to a genuine acceptance test
+// rather than to one of this package's own tests of the gating helpers.
 //
-// Only the guard's own mutation tests below should use this. They drive
-// testRequireVCSType directly, with a CIRCLECI_TEST_VCS_TYPE they set
-// themselves, and without this their entries land in the same slices the real
-// acceptance tests record into — which made the summary state something
-// false. A CI job pointed at GitLab reported:
+// Every real acceptance test in this package is named TestAcc* (see
+// TESTING.md and the "=== Acceptance tests (TestAcc*)" section of the CI
+// summary); every test that drives testRequireVCSType or
+// testRequireStandaloneOrg directly — the mutation tests below and in
+// project_resource_test.go — is not. Only the root test name decides this: a
+// subtest's own name (after t.Run's space-to-underscore mangling) could
+// coincidentally start with "TestAcc" and must not count.
 //
-//	=== VCS integration coverage (CIRCLECI_TEST_VCS_TYPE=gitlab) ===
-//	Exercised by this run (1):
-//	  TestRequireVCSTypeRunsWhenSupported/subtest (github_app)
-//
-// naming a github_app test as exercised by a GitLab run, because that is the
-// value the mutation test needs for its own purposes. It also meant the block
-// was never empty whatever the configuration, so its absence stopped being
-// usable as a signal that a run never resolved CIRCLECI_TEST_VCS_TYPE at all
-// — which is exactly what .circleci/config.yml's acceptance jobs check for.
-//
-// Snapshot-and-restore is safe here rather than racy: a test that calls
-// testRequireVCSType for real also calls testAccPreCheck, which calls
-// t.Setenv, which panics in a test that has called t.Parallel — so no gated
-// test can be running concurrently with these.
-func testIsolateVCSCoverage(t *testing.T) {
-	t.Helper()
+// recordVCSCoverageRan/Skip call this so that recording into vcsCoverage is
+// opt-IN by construction: a new gating helper's self-test is excluded the
+// moment it exists, with nothing to call and nothing to remember. That
+// replaces an earlier opt-OUT design (a helper named testIsolateVCSCoverage,
+// which every self-test had to remember to call) that one self-test —
+// TestRequireStandaloneOrgGatesOnClass, in project_resource_test.go — forgot,
+// and which then reported its own synthetic run as VCS coverage a real
+// acceptance test never provided. See TestGatingSelfTestsNeverRecordCoverage
+// below for the regression this replaces.
+func isRealAcceptanceTestName(name string) bool {
+	root := name
+	if i := strings.IndexByte(root, '/'); i >= 0 {
+		root = root[:i]
+	}
 
-	vcsCoverage.mu.Lock()
-	ran := append([]string(nil), vcsCoverage.ran...)
-	skipped := append([]string(nil), vcsCoverage.skipped...)
-	vcsCoverage.mu.Unlock()
-
-	t.Cleanup(func() {
-		vcsCoverage.mu.Lock()
-		defer vcsCoverage.mu.Unlock()
-
-		vcsCoverage.ran = ran
-		vcsCoverage.skipped = skipped
-	})
+	return strings.HasPrefix(root, "TestAcc")
 }
 
-// TestVCSCoverageIsolationKeepsSelfTestsOutOfTheSummary pins the behaviour
-// testIsolateVCSCoverage exists for: driving the guard the way the two
-// mutation tests below do must leave the coverage record exactly as it found
-// it. Without the isolation this test sees one extra entry — the entry that
-// used to appear in every CI job's summary as coverage nobody had.
-func TestVCSCoverageIsolationKeepsSelfTestsOutOfTheSummary(t *testing.T) {
+// recordVCSCoverageRan and recordVCSCoverageSkip are the only writers of
+// vcsCoverage. Both gate on isRealAcceptanceTestName so that a gating
+// helper's own self-test — called from a test not named TestAcc* — can never
+// land in either slice.
+func recordVCSCoverageRan(testName, entry string) {
+	if !isRealAcceptanceTestName(testName) {
+		return
+	}
+
+	vcsCoverage.mu.Lock()
+	defer vcsCoverage.mu.Unlock()
+
+	vcsCoverage.ran = append(vcsCoverage.ran, entry)
+}
+
+func recordVCSCoverageSkip(testName, entry string) {
+	if !isRealAcceptanceTestName(testName) {
+		return
+	}
+
+	vcsCoverage.mu.Lock()
+	defer vcsCoverage.mu.Unlock()
+
+	vcsCoverage.skipped = append(vcsCoverage.skipped, entry)
+}
+
+// TestIsRealAcceptanceTestName is a permanent unit test of the naming rule
+// recordVCSCoverageRan/Skip gate on, independent of the testing package's own
+// skip/parallel machinery. The two mutation-test names are the actual names
+// this guarded against polluting the summary.
+func TestIsRealAcceptanceTestName(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"TestAccGithubProjectResource", true},
+		{"TestAccGithubProjectResource/subtest", true},
+		{"TestRequireVCSTypeRunsWhenSupported/subtest", false},
+		{"TestRequireStandaloneOrgGatesOnClass/a_standalone_organization_runs/subtest", false},
+		{"TestGatingSelfTestsNeverRecordCoverage/subtest", false},
+	}
+
+	for _, c := range cases {
+		if got := isRealAcceptanceTestName(c.name); got != c.want {
+			t.Errorf("isRealAcceptanceTestName(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestGatingSelfTestsNeverRecordCoverage pins the opt-in design that replaced
+// the old opt-out (a testIsolateVCSCoverage helper self-tests had to
+// remember to call): driving testRequireVCSType or testRequireStandaloneOrg
+// directly, the way their own mutation tests do, must leave vcsCoverage
+// exactly as it found it, with nothing extra to call.
+//
+// This is the test that would have caught the actual incident: it drives
+// testRequireStandaloneOrg exactly the way TestRequireStandaloneOrgGatesOnClass
+// (project_resource_test.go) does — directly, with a synthetic standalone-org
+// slug, from a subtest of a test not named TestAcc* — and checks nothing
+// lands in vcsCoverage. Before this fix, that exact call was the one entry a
+// green acceptance-gh-hybrid job reported as its only "exercised" real-API
+// test.
+func TestGatingSelfTestsNeverRecordCoverage(t *testing.T) {
 	recorded := func() int {
 		vcsCoverage.mu.Lock()
 		defer vcsCoverage.mu.Unlock()
@@ -131,21 +175,28 @@ func TestVCSCoverageIsolationKeepsSelfTestsOutOfTheSummary(t *testing.T) {
 
 	before := recorded()
 
-	// The nesting matters: the isolation is undone by t.Cleanup, which runs
-	// when this subtest ends, so the assertion has to be outside it.
-	t.Run("drives the guard the way a mutation test does", func(t *testing.T) {
-		testIsolateVCSCoverage(t)
-		t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
+	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
 
-		t.Run("subtest", func(t *testing.T) {
-			testRequireVCSType(t, "github_app")
-		})
+	t.Run("testRequireVCSType, supported", func(t *testing.T) {
+		testRequireVCSType(t, "github_app")
+	})
+
+	t.Run("testRequireVCSType, unsupported", func(t *testing.T) {
+		testRequireVCSType(t, "gitlab")
+	})
+
+	t.Run("testRequireStandaloneOrg, standalone", func(t *testing.T) {
+		testRequireStandaloneOrg(t, "circleci/TFtestOrgFragment01234")
+	})
+
+	t.Run("testRequireStandaloneOrg, classic", func(t *testing.T) {
+		testRequireStandaloneOrg(t, "gh/example-org")
 	})
 
 	if after := recorded(); after != before {
-		t.Errorf("the guard's own use of testRequireVCSType left %d entries in vcsCoverage, want %d; "+
-			"they would be reported as VCS integration coverage that no acceptance test provided",
-			after, before)
+		t.Errorf("driving the gating helpers directly, as a self-test does, left %d entries in "+
+			"vcsCoverage, want %d; they would be reported as VCS integration coverage that no "+
+			"acceptance test provided", after, before)
 	}
 }
 
@@ -156,10 +207,10 @@ func TestVCSCoverageIsolationKeepsSelfTestsOutOfTheSummary(t *testing.T) {
 // no API involved, by checking whether code placed after the call in a subtest
 // ever runs.
 //
-// Both isolate themselves from the coverage record: they are tests of the
-// guard, not evidence about an integration. See testIsolateVCSCoverage.
+// Neither needs to isolate itself from the coverage record: neither is named
+// TestAcc*, so recordVCSCoverageRan/Skip already exclude them — see
+// isRealAcceptanceTestName.
 func TestRequireVCSTypeSkipsWhenUnsupported(t *testing.T) {
-	testIsolateVCSCoverage(t)
 	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "gitlab")
 
 	ranPastTheGate := false
@@ -176,7 +227,6 @@ func TestRequireVCSTypeSkipsWhenUnsupported(t *testing.T) {
 }
 
 func TestRequireVCSTypeRunsWhenSupported(t *testing.T) {
-	testIsolateVCSCoverage(t)
 	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
 
 	ranPastTheGate := false
@@ -223,7 +273,8 @@ func printVCSCoverageSummary() {
 		// having exactly one meaning: they fail when the block is absent,
 		// because for a job that configures an integration its absence means
 		// the gate was never reached. That only holds because the guard's own
-		// mutation tests keep out of the record — see testIsolateVCSCoverage.
+		// mutation tests can never land in the record — see
+		// isRealAcceptanceTestName.
 		return
 	}
 

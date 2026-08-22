@@ -75,10 +75,15 @@ func projectOrgClass(orgSlug string) string {
 // standalone organization, which is the only class where circleci_project can
 // create a project rather than adopt an existing repository.
 //
-// It records into vcsCoverage (vcs_gating_test.go) exactly as testRequireVCSType
-// does, so printVCSCoverageSummary still states what a green run proved. What it
-// deliberately does not do is key off CIRCLECI_TEST_VCS_TYPE: every integration
-// can be either class — a GitHub organization can be classic or standalone — so a
+// It records into vcsCoverage (vcs_gating_test.go) through the same
+// recordVCSCoverageRan/Skip helpers testRequireVCSType uses, so
+// printVCSCoverageSummary still states what a green run proved — and, like
+// testRequireVCSType, only for a caller whose root test name is TestAcc*
+// (see isRealAcceptanceTestName): this gate's own mutation test,
+// TestRequireStandaloneOrgGatesOnClass below, drives it directly and must
+// never be counted as coverage. What testRequireStandaloneOrg deliberately
+// does not do is key off CIRCLECI_TEST_VCS_TYPE: every integration can be
+// either class — a GitHub organization can be classic or standalone — so a
 // VCS-type list would be wrong for whichever half of an integration's
 // organizations it did not name.
 func testRequireStandaloneOrg(t *testing.T, orgSlug string) {
@@ -88,10 +93,8 @@ func testRequireStandaloneOrg(t *testing.T, orgSlug string) {
 	name := t.Name()
 
 	if class != orgClassStandalone {
-		vcsCoverage.mu.Lock()
-		vcsCoverage.skipped = append(vcsCoverage.skipped,
+		recordVCSCoverageSkip(name,
 			fmt.Sprintf("%s (needs a standalone organization, got the classic org %s)", name, orgSlug))
-		vcsCoverage.mu.Unlock()
 
 		t.Skipf("%s creates a project, which only a standalone (\"circleci/…\") organization "+
 			"supports; the configured organization %s is classic and VCS-backed, where this route "+
@@ -102,10 +105,7 @@ func testRequireStandaloneOrg(t *testing.T, orgSlug string) {
 		return
 	}
 
-	vcsCoverage.mu.Lock()
-	vcsCoverage.ran = append(vcsCoverage.ran,
-		fmt.Sprintf("%s (standalone org %s, %s)", name, orgSlug, testVCSType(t)))
-	vcsCoverage.mu.Unlock()
+	recordVCSCoverageRan(name, fmt.Sprintf("%s (standalone org %s, %s)", name, orgSlug, testVCSType(t)))
 }
 
 // testAdoptableRepoName returns the name of a repository that already exists in
@@ -162,6 +162,14 @@ func TestProjectOrgClass(t *testing.T) {
 // way TestRequireVCSTypeSkipsWhenUnsupported does for testRequireVCSType: the
 // tests it guards all need a live CircleCI account, so its own correctness would
 // otherwise be unobservable in this repository.
+//
+// This test's own name is not TestAcc*, so its two direct calls to
+// testRequireStandaloneOrg below can never be recorded as VCS coverage — see
+// isRealAcceptanceTestName in vcs_gating_test.go. That is what makes it safe
+// for this test not to isolate itself: an earlier version of this test did
+// pollute vcsCoverage this way, under the opt-out design that mechanism
+// replaced (see TestGatingSelfTestsNeverRecordCoverage in vcs_gating_test.go
+// for the regression test).
 func TestRequireStandaloneOrgGatesOnClass(t *testing.T) {
 	t.Setenv("CIRCLECI_TEST_VCS_TYPE", "github_app")
 
