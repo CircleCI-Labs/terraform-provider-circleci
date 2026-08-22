@@ -15,7 +15,20 @@ import (
 // like a certificate's cert_blob: it is accepted on create and never appears
 // in any response, so there is no field for it here. See
 // CreateSigningProvisioningProfile.
+//
+// ID is the profile's own identifier, distinct from the signing
+// configuration's id. [NET] against the real API: this project's
+// provisioning-profile struct used to carry only FileName, on the belief
+// that file_name was the whole of what a profile entry reports -- checked
+// against neither the OpenAPI spec (silent on the point) nor a real account
+// until this was measured. Production's GET .../signing/configs answers each
+// provisioning_profiles entry as {"id", "file_name"}, not {"file_name"}
+// alone. Nothing in this provider currently looks a profile up by this id --
+// there is no per-profile route, only whole-configuration create/delete --
+// but it is real, server-assigned data, so it is captured here rather than
+// silently discarded the way an untagged struct field would discard it.
 type SigningProvisioningProfile struct {
+	ID       string
 	FileName string
 }
 
@@ -86,10 +99,13 @@ type signingConfigCertRef struct {
 	} `json:"attributes"`
 }
 
-// signingConfigProfileAttributes is one provisioning profile as reported back:
-// only its file name. The blob supplied on create is write-only and never
-// echoed, exactly like a certificate's cert_blob.
+// signingConfigProfileAttributes is one provisioning profile as reported
+// back: its own id and its file name. The blob supplied on create is
+// write-only and never echoed, exactly like a certificate's cert_blob. See
+// the [NET] note on SigningProvisioningProfile.ID for why "id" is here at
+// all -- an earlier version of this struct carried only file_name.
 type signingConfigProfileAttributes struct {
+	ID       string `json:"id"`
 	FileName string `json:"file_name"`
 }
 

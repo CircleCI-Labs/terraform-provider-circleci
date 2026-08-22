@@ -22,13 +22,22 @@ const (
 
 // signingCertificateEntityBody is the GET .../signing/certificates/{id} shape:
 // id + attributes + a references.org the list endpoint omits.
+//
+// fingerprint is 40 lowercase hex characters with no separators -- [NET]
+// measured against a real self-signed certificate. An earlier version of
+// this fixture showed "AA:BB:CC:DD" (colon-separated, uppercase, and far
+// shorter than a real SHA-1 digest), which was never checked against a real
+// certificate. Fingerprint is an opaque passthrough string everywhere in this
+// package -- nothing parses or validates its shape -- so the wrong format
+// caused no behavioural bug, but it was still a false belief about the wire
+// worth correcting once measured.
 const signingCertificateEntityBody = `{
   "data": {
     "id": "11111111-1111-1111-1111-111111111111",
     "attributes": {
       "file_name": "dist.p12",
       "cert_type": "distribution",
-      "fingerprint": "AA:BB:CC:DD",
+      "fingerprint": "aabbccddeeff00112233445566778899aabbccd",
       "created_at": "2024-01-02T03:04:05.000Z",
       "expires_at": "2025-01-02T03:04:05.000Z"
     },
@@ -136,8 +145,8 @@ func TestCreateSigningCertificateSendsEnvelopeAndFollowsUpWithGet(t *testing.T) 
 	if cert.CertType != circleci.SigningCertificateTypeDistribution {
 		t.Errorf("CertType = %q, want %q", cert.CertType, circleci.SigningCertificateTypeDistribution)
 	}
-	if cert.Fingerprint != "AA:BB:CC:DD" {
-		t.Errorf("Fingerprint = %q, want %q", cert.Fingerprint, "AA:BB:CC:DD")
+	if cert.Fingerprint != "aabbccddeeff00112233445566778899aabbccd" {
+		t.Errorf("Fingerprint = %q, want %q", cert.Fingerprint, "aabbccddeeff00112233445566778899aabbccd")
 	}
 	if cert.CreatedAt == nil || *cert.CreatedAt != "2024-01-02T03:04:05.000Z" {
 		t.Errorf("CreatedAt = %v, want 2024-01-02T03:04:05.000Z", cert.CreatedAt)

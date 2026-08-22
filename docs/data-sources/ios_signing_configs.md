@@ -74,6 +74,7 @@ Read-Only:
 Read-Only:
 
 - `file_name` (String) The profile's display name.
+- `id` (String) Unique identifier (UUID) of the provisioning profile itself, distinct from the signing configuration's `id`. There is no route that takes this id -- a provisioning profile is only ever read or written as part of the whole list on its signing configuration -- so it is reported for reference only.
 
 ## Security
 

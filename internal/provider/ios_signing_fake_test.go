@@ -120,120 +120,49 @@ func iosSigningFakeWriteError(w http.ResponseWriter, status int, title string) {
 	})
 }
 
-// iosSigningFakeDecode decodes a v3 request body, refusing any key the real
-// handler would not bind.
+// iosSigningFakeDecode decodes a v3 request body into dst.
 //
-// The refusal is not this fake being fussy: the v3 route group these handlers are
-// registered in binds request bodies with unknown members rejected, and answers
-// 400 "Unexpected field '<name>'." for anything left over -- the same binder, and
-// the same message, as the usage export route in
-// usage_export_ephemeral_resource_test.go. A fake that quietly dropped an
-// unrecognised key could not tell a correct field name from a misspelled one,
-// which is exactly the class of bug this package's fakes exist to catch: the
-// client and the fake would agree on `cert_blob_base64` and production would
-// answer 400.
-//
-// allowed is keyed the way rejectUnexpectedFields wants it: "" for the top level,
-// dotted paths below. Only object-valued keys need an entry.
-// It returns the body decoded generically as well, so a caller can walk into an
-// array rejectUnexpectedFields does not descend into.
-func iosSigningFakeDecode(
-	w http.ResponseWriter, r *http.Request, dst any, allowed map[string][]string,
-) (map[string]any, bool) {
+// It does NOT reject an unrecognised key, and that is deliberate, not an
+// oversight: [NET] against the real API, POST .../signing/certificates and
+// POST .../signing/configs both answer 201 for a body carrying an extra key
+// at every level tried -- top-level, inside "attributes", and inside one
+// entry of "provisioning_profiles" -- with the value under that key simply
+// never landing anywhere. An earlier version of this fake rejected such a
+// body with 400 "Unexpected field '<name>'.", on the belief that these two
+// routes shared a strict binder with the usage export route in
+// usage_export_ephemeral_resource_test.go (which really does reject unknown
+// fields -- that binder claim is correct there, just not generalisable to
+// every v3 route). That belief was never checked against a real account and
+// was wrong for these two routes specifically: TestIOSSigningFakeRejectsUnexpectedFields
+// used to assert a 400 no real request has ever produced, which is exactly
+// backwards from what a fake protecting this package should do -- see
+// TestIOSSigningFakeAcceptsUnknownFieldsLikeProduction below for the
+// corrected coverage, and the MEASURED FACTS note in this project's own
+// review process: unknown keys are silently dropped rather than rejected,
+// and a 200 (or 201) does not mean the API read what you sent, so any field
+// that matters has to be proven landed by reading it back rather than by the
+// create call's status code.
+func iosSigningFakeDecode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _, _ = io.Copy(io.Discard, r.Body) }()
-
-	badRequest := func(err error) {
-		iosSigningFakeWriteJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]any{"type": "validation_error", "id": "trace", "title": "Bad Request", "detail": err.Error()},
-		})
-	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		badRequest(err)
+		iosSigningFakeWriteJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]any{"type": "validation_error", "id": "trace", "title": "Bad Request", "detail": err.Error()},
+		})
 
-		return nil, false
-	}
-
-	var generic map[string]any
-	if err := json.Unmarshal(body, &generic); err != nil {
-		badRequest(err)
-
-		return nil, false
-	}
-
-	if rejectUnexpectedFields(w, generic, allowed) {
-		return nil, false
+		return false
 	}
 
 	if err := json.Unmarshal(body, dst); err != nil {
-		badRequest(err)
+		iosSigningFakeWriteJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]any{"type": "validation_error", "id": "trace", "title": "Bad Request", "detail": err.Error()},
+		})
 
-		return nil, false
+		return false
 	}
 
-	return generic, true
-}
-
-// iosSigningFakeProfileObjects digs the provisioning_profiles array out of a
-// generically decoded create-config body, so each entry can be checked for
-// unexpected keys. A body without the array yields nothing, which is correct:
-// there is nothing to check.
-func iosSigningFakeProfileObjects(generic map[string]any) []map[string]any {
-	data, ok := generic["data"].(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	attributes, ok := data["attributes"].(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	entries, ok := attributes["provisioning_profiles"].([]any)
-	if !ok {
-		return nil
-	}
-
-	objects := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		if object, ok := entry.(map[string]any); ok {
-			objects = append(objects, object)
-		}
-	}
-
-	return objects
-}
-
-// createCertificateFields is the create route's request body, field for field:
-// the v3 data envelope, file_name/cert_blob/cert_password in attributes, and org
-// as the only reference. Anything else is a 400.
-var createCertificateFields = map[string][]string{
-	"":                    {"data"},
-	"data":                {"attributes", "references"},
-	"data.attributes":     {"file_name", "cert_blob", "cert_password"},
-	"data.references":     {"org"},
-	"data.references.org": {"id"},
-}
-
-// createSigningConfigFields is the same for the signing config create route:
-// name/provisioning_profiles in attributes, org and signing_certificate as
-// references. provisioning_profiles is an array, so rejectUnexpectedFields does
-// not walk into it -- its per-entry keys are checked by the strict decode into the
-// typed struct below plus createConfigProfileFields.
-var createSigningConfigFields = map[string][]string{
-	"":                                    {"data"},
-	"data":                                {"attributes", "references"},
-	"data.attributes":                     {"name", "provisioning_profiles"},
-	"data.references":                     {"org", "signing_certificate"},
-	"data.references.org":                 {"id"},
-	"data.references.signing_certificate": {"id"},
-}
-
-// createConfigProfileFields is one provisioning_profiles entry. It is applied
-// per entry because rejectUnexpectedFields walks objects, not arrays.
-var createConfigProfileFields = map[string][]string{
-	"": {"blob", "file_name"},
+	return true
 }
 
 // --- certificates ---
@@ -283,10 +212,23 @@ func iosSigningFakeCertType(blob string) string {
 	return circleci.SigningCertificateTypeDistribution
 }
 
+// iosSigningFakeFingerprint stands in for the server's SHA-1-of-DER-bytes
+// fingerprint.
+//
+// The format matches what [NET] testing measured against the real API: 40
+// lowercase hex characters, no colons and no separators. An earlier version
+// of the test fixtures in signing_certificate_test.go showed
+// "AA:BB:CC:DD" -- colon-separated and uppercase -- which was never checked
+// against a real certificate and is not the real shape; nothing in this
+// package parses the field, so the wrong shape caused no behavioural bug, but
+// it was still a false belief worth correcting once measured. This fake uses
+// SHA-256 rather than a real SHA-1-of-DER computation (there is no real
+// certificate to hash), truncated and re-encoded to the same 40-character
+// lowercase hex shape production reports.
 func iosSigningFakeFingerprint(blob string) string {
 	sum := sha256.Sum256([]byte(blob))
 
-	return fmt.Sprintf("%X", sum[:8])
+	return fmt.Sprintf("%x", sum[:20])
 }
 
 func (a *iosSigningFakeAPI) certEntity(c *iosSigningFakeCert) map[string]any {
@@ -343,7 +285,7 @@ func (a *iosSigningFakeAPI) createCertificate(w http.ResponseWriter, r *http.Req
 			} `json:"references"`
 		} `json:"data"`
 	}
-	if _, ok := iosSigningFakeDecode(w, r, &body, createCertificateFields); !ok {
+	if !iosSigningFakeDecode(w, r, &body) {
 		return
 	}
 
@@ -462,8 +404,21 @@ func (a *iosSigningFakeAPI) deleteCertificate(w http.ResponseWriter, r *http.Req
 
 func (a *iosSigningFakeAPI) configItem(cfg *iosSigningFakeConfig) map[string]any {
 	profiles := make([]map[string]any, 0, len(cfg.Profiles))
-	for _, p := range cfg.Profiles {
-		profiles = append(profiles, map[string]any{"file_name": p.FileName})
+	for i, p := range cfg.Profiles {
+		// Production reports {"id", "file_name"} per profile, not "file_name"
+		// alone -- see the [NET] note on circleci.SigningProvisioningProfile.ID.
+		// iosSigningFakeProfile itself carries no id field, deliberately: several
+		// tests compare a whole []iosSigningFakeProfile against a literal built
+		// from FileName and Blob alone (see
+		// TestIOSSigningConfigWriteOnly_SameRequestAsProvisioningProfiles), and a
+		// stored, minted id would break that comparison for no benefit -- nothing
+		// in this fake's own logic needs to look a profile up by this id. The id
+		// is synthesized here, at response-rendering time only, so the wire shape
+		// is realistic without changing what the fake stores.
+		profiles = append(profiles, map[string]any{
+			"id":        fmt.Sprintf("%s-profile-%d", cfg.ID, i),
+			"file_name": p.FileName,
+		})
 	}
 
 	cert := a.certs[cfg.CertID]
@@ -512,17 +467,8 @@ func (a *iosSigningFakeAPI) createConfig(w http.ResponseWriter, r *http.Request)
 			} `json:"references"`
 		} `json:"data"`
 	}
-	generic, ok := iosSigningFakeDecode(w, r, &body, createSigningConfigFields)
-	if !ok {
+	if !iosSigningFakeDecode(w, r, &body) {
 		return
-	}
-
-	// One walk per provisioning_profiles entry, since rejectUnexpectedFields
-	// descends into objects but not arrays.
-	for _, entry := range iosSigningFakeProfileObjects(generic) {
-		if rejectUnexpectedFields(w, entry, createConfigProfileFields) {
-			return
-		}
 	}
 
 	if body.Data.References.Org.ID == "" || body.Data.References.Certificate.ID == "" {
@@ -675,76 +621,121 @@ provider "circleci" {
 `
 }
 
-// TestIOSSigningFakeRejectsUnexpectedFields proves the fake is as strict as the
-// service about request bodies.
+// TestIOSSigningFakeAcceptsUnknownFieldsLikeProduction proves the fake matches
+// what [NET] testing actually measured: POST .../signing/certificates and
+// POST .../signing/configs both answer 201 for a body carrying an unrecognised
+// key, at the top level, inside "attributes", and inside one entry of
+// "provisioning_profiles" -- they do not reject it the way this package's
+// earlier belief (and an earlier version of this very test, then named
+// TestIOSSigningFakeRejectsUnexpectedFields) assumed. That assumption borrowed
+// a claim from the usage-export route's binder (real there, per
+// usage_export_ephemeral_resource_test.go) and generalised it to every v3
+// route without checking, which was exactly backwards for these two: a fake
+// that rejected an unknown field here was stricter than production, not
+// looser, and would have failed a real client-body typo differently from how
+// production actually fails it (silently, not with a 400).
 //
-// The v3 route group these handlers live in binds request bodies with unknown
-// members rejected, answering 400 "Unexpected field '<name>'." for anything left
-// over -- the same binder that makes the usage export fake strict. This fake used
-// to decode with a plain json.Decoder, which silently drops an unrecognised key,
-// so a client that misspelled a field name would have passed every test in this
-// package and 400'd against production. The guard is only sound because the
-// service really does reject: adding one to a fake whose service ignores unknown
-// fields manufactures failures that cannot happen.
+// Per the MEASURED FACTS this review project holds itself to -- "a 200 does
+// not mean the API read what you sent" -- accepting the extra key is not
+// enough on its own: each case also reads the created object back and checks
+// that the field sent under the *correct* name landed unharmed, so a decode
+// bug that let an unknown key clobber a real one would still be caught here,
+// just by the read-back rather than by a 400.
 //
-// The bodies are posted directly rather than through Terraform, because the point
-// is a field name no schema can produce.
-func TestIOSSigningFakeRejectsUnexpectedFields(t *testing.T) {
+// The bodies are posted directly rather than through Terraform, because the
+// point is a field name no schema can produce.
+func TestIOSSigningFakeAcceptsUnknownFieldsLikeProduction(t *testing.T) {
 	api := newIOSSigningFakeAPI(t)
 
-	for name, tc := range map[string]struct {
-		path string
-		body string
-		want string
-	}{
-		"certificate attribute": {
-			path: "/api/v3/signing/certificates",
-			body: `{"data":{"attributes":{"file_name":"a.p12","cert_blob":"YQ==","cert_password":"p",` +
-				`"cert_blob_base64":"YQ=="},"references":{"org":{"id":"` + iosSigningTestOrgID + `"}}}}`,
-			want: "cert_blob_base64",
-		},
-		"certificate reference": {
-			path: "/api/v3/signing/certificates",
-			body: `{"data":{"attributes":{"file_name":"a.p12","cert_blob":"YQ==","cert_password":"p"},` +
-				`"references":{"org":{"id":"` + iosSigningTestOrgID + `"},"organization":{"id":"x"}}}}`,
-			want: "organization",
-		},
-		"config attribute": {
-			path: "/api/v3/signing/configs",
-			body: `{"data":{"attributes":{"name":"a","provisioning_profiles":[],"profiles":[]},` +
-				`"references":{"org":{"id":"` + iosSigningTestOrgID + `"},"signing_certificate":{"id":"x"}}}}`,
-			want: "profiles",
-		},
-		// Inside the array, which rejectUnexpectedFields does not descend into on
-		// its own -- so this is the case a naive guard would miss.
-		"config profile entry": {
-			path: "/api/v3/signing/configs",
-			body: `{"data":{"attributes":{"name":"a","provisioning_profiles":[` +
-				`{"file_name":"a.mobileprovision","blob":"YQ==","content":"YQ=="}]},` +
-				`"references":{"org":{"id":"` + iosSigningTestOrgID + `"},"signing_certificate":{"id":"x"}}}}`,
-			want: "content",
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			resp, err := http.Post(api.URL()+tc.path, "application/json", strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("POST %s: %v", tc.path, err)
-			}
-			defer func() { _ = resp.Body.Close() }()
+	t.Run("certificate attribute and reference", func(t *testing.T) {
+		body := `{"data":{"attributes":{"file_name":"a.p12","cert_blob":"YQ==","cert_password":"p",` +
+			`"cert_blob_base64":"YQ=="},"references":{"org":{"id":"` + iosSigningTestOrgID + `"},"organization":{"id":"x"}}}}`
 
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400 for a body carrying %q", resp.StatusCode, tc.want)
-			}
+		resp, err := http.Post(api.URL()+"/api/v3/signing/certificates", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST signing/certificates: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
 
-			raw, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("reading response: %v", err)
-			}
-			if !strings.Contains(string(raw), tc.want) {
-				t.Errorf("response %s does not name the unexpected field %q", raw, tc.want)
-			}
-		})
-	}
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("status = %d (%s), want 201: production does not reject an unrecognised field here", resp.StatusCode, raw)
+		}
+
+		var created struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &created); err != nil {
+			t.Fatalf("decoding create response %s: %v", raw, err)
+		}
+
+		// Read it back: file_name (sent under its correct name, alongside the
+		// unrecognised cert_blob_base64) must have landed.
+		getResp, err := http.Get(api.URL() + "/api/v3/signing/certificates/" + created.Data.ID)
+		if err != nil {
+			t.Fatalf("GET certificate: %v", err)
+		}
+		defer func() { _ = getResp.Body.Close() }()
+
+		getRaw, _ := io.ReadAll(getResp.Body)
+		if !strings.Contains(string(getRaw), `"file_name":"a.p12"`) {
+			t.Errorf("GET response %s does not show file_name=a.p12 landed", getRaw)
+		}
+	})
+
+	t.Run("config attribute, reference and profile entry", func(t *testing.T) {
+		certBody := `{"data":{"attributes":{"file_name":"cfg-test.p12","cert_blob":"YWJj","cert_password":"p"},` +
+			`"references":{"org":{"id":"` + iosSigningTestOrgID + `"}}}}`
+		certResp, err := http.Post(api.URL()+"/api/v3/signing/certificates", "application/json", strings.NewReader(certBody))
+		if err != nil {
+			t.Fatalf("POST signing/certificates: %v", err)
+		}
+		var cert struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(certResp.Body).Decode(&cert); err != nil {
+			t.Fatalf("decoding certificate create response: %v", err)
+		}
+		_ = certResp.Body.Close()
+
+		body := `{"data":{"attributes":{"name":"unknown-field-config","provisioning_profiles":[` +
+			`{"file_name":"a.mobileprovision","blob":"YQ==","content":"YQ=="}],"profiles":[]},` +
+			`"references":{"org":{"id":"` + iosSigningTestOrgID + `"},"signing_certificate":{"id":"` + cert.Data.ID + `"}},` +
+			`"unexpected_top":"z"}}`
+
+		resp, err := http.Post(api.URL()+"/api/v3/signing/configs", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST signing/configs: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("status = %d (%s), want 201: production does not reject an unrecognised field "+
+				"at the top level, inside attributes, or inside a provisioning_profiles entry", resp.StatusCode, raw)
+		}
+
+		// Read it back via the list (there is no single-entity GET): name and the
+		// profile's file_name, both sent under their correct names alongside
+		// unrecognised siblings, must have landed.
+		listResp, err := http.Get(api.URL() + "/api/v3/signing/configs?filter%5Borg_id%5D=" + iosSigningTestOrgID)
+		if err != nil {
+			t.Fatalf("GET signing/configs: %v", err)
+		}
+		defer func() { _ = listResp.Body.Close() }()
+
+		listRaw, _ := io.ReadAll(listResp.Body)
+		if !strings.Contains(string(listRaw), `"name":"unknown-field-config"`) {
+			t.Errorf("list response %s does not show name=unknown-field-config landed", listRaw)
+		}
+		if !strings.Contains(string(listRaw), `"file_name":"a.mobileprovision"`) {
+			t.Errorf("list response %s does not show the profile's file_name landed", listRaw)
+		}
+	})
 }
 
 // TestIOSSigningFakeAcceptsExactlyTheDocumentedBodies is the counterpart: the

@@ -28,6 +28,11 @@ const (
 // but production actually populates both fields. This fixture follows
 // production, per the project's rule to derive shapes from production source
 // rather than the spec.
+//
+// Each provisioning_profiles entry likewise carries its own "id" alongside
+// "file_name" in production -- [NET] measured; a struct that decoded only
+// file_name used to discard it silently rather than being wrong about it, but
+// it is real data and is captured on SigningProvisioningProfile.ID now.
 const signingConfigListBody = `{
   "data": [
     {
@@ -35,7 +40,7 @@ const signingConfigListBody = `{
       "attributes": {
         "name": "release-config",
         "provisioning_profiles": [
-          {"file_name": "release.mobileprovision"}
+          {"id": "55555555-5555-5555-5555-555555555555", "file_name": "release.mobileprovision"}
         ]
       },
       "references": {
@@ -163,6 +168,11 @@ func TestCreateSigningConfigSendsEnvelopeAndHydratesFromList(t *testing.T) {
 	}
 	if len(cfg.ProvisioningProfiles) != 1 || cfg.ProvisioningProfiles[0].FileName != "release.mobileprovision" {
 		t.Errorf("ProvisioningProfiles = %+v, want one profile named release.mobileprovision", cfg.ProvisioningProfiles)
+	}
+	// The profile's own id, distinct from the signing configuration's id -- see
+	// the [NET] note on SigningProvisioningProfile.ID.
+	if len(cfg.ProvisioningProfiles) == 1 && cfg.ProvisioningProfiles[0].ID != "55555555-5555-5555-5555-555555555555" {
+		t.Errorf("ProvisioningProfiles[0].ID = %q, want %q", cfg.ProvisioningProfiles[0].ID, "55555555-5555-5555-5555-555555555555")
 	}
 }
 
