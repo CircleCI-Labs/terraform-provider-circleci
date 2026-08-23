@@ -167,6 +167,50 @@ specifically needs that integration, regardless of `CIRCLECI_TEST_VCS_TYPE`:
 | `CIRCLE_DEPLOYMENT` | `server` |
 | `CIRCLE_RUNNER_HOST` | Usually the same origin: Server serves the runner API itself |
 
+### Deploy/release fixture data
+
+`circleci_deploy_environment(s)`, `circleci_deploy_component(s)` and
+`circleci_deploy_settings` read `/api/v2/deploy/*`, a family with no create
+route at all (see `internal/circleci/deploy_environment.go`'s header comment):
+deploy environments and components come into existence only when a real
+pipeline job emits a `circleci run release log` (or `release plan` +
+`release update`) marker. Two of the organizations above carry deliberately
+seeded, **permanent** fixture data for this, on a dedicated branch that is not
+cleaned up (there is no delete route to clean it up with, even if that were
+wanted):
+
+| Organization | Project | Branch |
+|---|---|---|
+| `CIRCLECI_TEST_GH_OAUTH_ORG_ID` (gh-oauth-cci-1) | `CIRCLECI_TEST_GH_OAUTH_PROJECT_ID` (project-1) | `deploy-fixture-seed` |
+| `CIRCLECI_TEST_GH_APP_ORG_ID` (gh-app-cci-1) | `CIRCLECI_TEST_GH_APP_PROJECT_ID` (test-repo) | `deploy-fixture-seed` |
+
+Each branch's `.circleci/config.yml` carries one job per marker (a job's
+*second* `release log` call was [NET] observed not to persist — see the
+comments there) and is filtered to only run on that branch, so it never
+affects the `main`-branch pipelines the rest of this suite's fixtures rely on.
+Both organizations end up with environments `tf-fixture-staging` and
+`tf-fixture-production`, components `tf-fixture-widget` (multiple versions,
+both environments), `tf-fixture-widget-plus` (a deliberate substring-match
+sibling of `tf-fixture-widget`) and `tf-fixture-planned` (seeded via the
+`plan`/`update` pair rather than `log`). gh-app-cci-1 additionally carries a
+component named `test-repo` and an environment named `default`, left behind
+by the very first marker either organization ever received — CircleCI
+defaults a marker's component to the project name and its environment to
+`default` when neither flag is given, but ([NET], and easy to miss) only on
+that very first marker; see the config there for the full comment.
+
+No other project or organization in this suite was touched: two organizations
+now have real, populated deploy data, and the rest still answer the same
+empty `{"items":[],"next_page_token":""}` they always did (see
+`deploy_data_sources_test.go`'s `testDeployEmptyOrganizationID` comment, and
+the real-API test file below, for what that does — and does not — reveal
+about "deploys never enabled" versus "enabled but unused").
+
+The real-API counterpart to `deploy_data_sources_test.go` reads this fixture
+data directly; see its header comment for the full inventory and what
+remains unconfirmed even with it (labels, `archived_at`, and the all-zero
+UUID sentinel all still have no producible path).
+
 ## Running them
 
 ```sh
