@@ -21,6 +21,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // These tests back circleci_project (project_resource.go) with an in-process
@@ -551,6 +553,115 @@ func TestProjectResourceUnit_CreateOnAClassicOrgExplainsAMissingRepository(t *te
 	}
 }
 
+// TestProjectResourceUnit_CreateOnAClassicOrgExplainsAnAlreadyAdoptedRepository
+// is TestProjectResourceUnit_CreateOnAClassicOrgExplainsAMissingRepository's
+// counterpart for the OTHER failure a practitioner on a classic organization
+// actually hits: adopting a repository that is already a CircleCI project.
+//
+// The fake models this the same way the real API answers it (see
+// fakeProjectAPI.handleCreate): a second create for a name it already holds a
+// classic project under answers 409 with the API's own message, which says
+// nothing about import. Unlike the 404 case, "ADOPT" alone would not
+// distinguish this diagnostic from the missing-repository one above, so this
+// asserts on "terraform import" instead — the one phrase that is unique to
+// the 409 hint and is also the actual instruction a practitioner needs.
+func TestProjectResourceUnit_CreateOnAClassicOrgExplainsAnAlreadyAdoptedRepository(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+
+	// Two resources naming the SAME repository, with the second depending on
+	// the first, in one apply: Terraform then creates "first" (which succeeds
+	// and adopts the repository), then "second" (which conflicts with it) --
+	// deterministically, rather than leaving the two independent and letting
+	// Terraform choose an order. A second, separate resource.UnitTest call
+	// would not reproduce this at all: resource.UnitTest destroys everything
+	// it created before returning, so a repeat create in a following run
+	// would find the repository unadopted again and simply succeed.
+	config := projectResourceProviderConfig(host) + fmt.Sprintf(`
+resource "circleci_project" "first" {
+  name            = %[1]q
+  organization_id = %[2]q
+}
+
+resource "circleci_project" "second" {
+  name            = %[1]q
+  organization_id = %[2]q
+  depends_on      = [circleci_project.first]
+}
+`, "already-adopted", testProjectResourceOrgID)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				// One word, so terraform's own line-wrapping (which turns an
+				// ordinary space into a newline at a column width it chooses)
+				// cannot split it -- see the comment on the (?s) regex a few
+				// tests down for where a two-word version of exactly this
+				// mistake was caught live. TestProjectCreateFailureDetail
+				// below asserts the whole message.
+				ExpectError: regexp.MustCompile(`\bimport\b`),
+			},
+		},
+	})
+
+	// Exactly one follow call resulted from the whole apply -- from
+	// circleci_project.first's successful adopt. followedCalls is an
+	// append-only history, unlike the fake's live project map, so this is
+	// still observable after resource.UnitTest's own automatic destroy of
+	// whatever ended up in state (circleci_project.first) has already run.
+	// The conflicting circleci_project.second must not have added a second
+	// entry.
+	if followed := api.followedCalls(); len(followed) != 1 {
+		t.Errorf("follow calls = %v, want exactly 1 (from the first, successful adopt)", followed)
+	}
+}
+
+// TestProjectResourceUnit_CreateOrphanedByFollowFailureNamesTheSlug drives BUG
+// P8's fix through the actual resource, not just projectCreateFailureDetail in
+// isolation: a create whose v2 call succeeds but whose v1.1 follow call does
+// not (see the fake's setFailFollowStatus, and followProject's own doc
+// comment in internal/circleci/project.go for the live measurement this
+// models) must fail with a diagnostic that names the project's slug and
+// points at `terraform import`, rather than leaving the practitioner with no
+// way to find the project CircleCI is now tracking.
+func TestProjectResourceUnit_CreateOrphanedByFollowFailureNamesTheSlug(t *testing.T) {
+	api, host := newFakeProjectAPI(t, "classic")
+	api.setFailFollowStatus(http.StatusBadRequest)
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: projectResourceConfig(host, "no-commits-yet", ""),
+				// (?s), and "import" alone rather than the two-word phrase
+				// "terraform import": terraform's own line-wrapping can turn
+				// an ordinary space into a newline (see
+				// TestAccGithubProjectResourceRepoNotFound's own comment on
+				// this, in project_resource_test.go, for where that was
+				// caught live). The slug the fake's v2 create call already
+				// returned, and the instruction to act on it.
+				// TestProjectCreateFailureDetail asserts the whole message.
+				ExpectError: regexp.MustCompile(`(?s)gh/AcmeOrg/no-commits-yet.*\bimport\b`),
+			},
+		},
+	})
+
+	// The v2 create call did happen (that is the whole scenario), but no
+	// follow ever succeeded.
+	api.mu.Lock()
+	projectCount := len(api.projects)
+	api.mu.Unlock()
+
+	if projectCount != 1 {
+		t.Errorf("fake ended up holding %d project(s), want exactly 1 (the v2 create succeeded even "+
+			"though the follow after it did not)", projectCount)
+	}
+	if followed := api.followedCalls(); len(followed) != 0 {
+		t.Errorf("follow calls = %v, want none: every one was made to fail", followed)
+	}
+}
+
 // TestProjectCreateFailureDetail asserts the whole diagnostic, as a pure
 // function, away from Terraform's line wrapping.
 //
@@ -571,7 +682,7 @@ func TestProjectCreateFailureDetail(t *testing.T) {
 			t.Fatal("CreateProject succeeded; the fake was asked to answer 404")
 		}
 
-		detail := projectCreateFailureDetail("no-such-repo", err)
+		detail := projectCreateFailureDetail("no-such-repo", nil, err)
 
 		for _, want := range []string{
 			// The API's own message, which err.Error() alone dropped.
@@ -604,7 +715,7 @@ func TestProjectCreateFailureDetail(t *testing.T) {
 			t.Fatal("GetProjectSettings succeeded; the fake was asked to answer 500")
 		}
 
-		detail := projectCreateFailureDetail("my-repo", err)
+		detail := projectCreateFailureDetail("my-repo", nil, err)
 
 		if strings.Contains(detail, "ADOPT") {
 			t.Errorf("a non-404 error carried the missing-repository hint, which does not apply to "+
@@ -612,6 +723,91 @@ func TestProjectCreateFailureDetail(t *testing.T) {
 		}
 		if !strings.Contains(detail, "forced failure for test") {
 			t.Errorf("the API's own message did not reach the diagnostic; got:\n%s", detail)
+		}
+	})
+
+	t.Run("a 409 explains adopting an already-adopted repository, and points at import", func(t *testing.T) {
+		t.Parallel()
+
+		_, client := newFakeProjectClient(t)
+
+		// First adopt succeeds; the second, of the same name, is the conflict
+		// under test -- see fakeProjectAPI.handleCreate's alreadyAdopted branch.
+		if _, err := client.CreateProject(t.Context(), testProjectResourceOrgID, "already-adopted"); err != nil {
+			t.Fatalf("first CreateProject failed, want it to succeed so the second can conflict: %v", err)
+		}
+
+		_, err := client.CreateProject(t.Context(), testProjectResourceOrgID, "already-adopted")
+		if err == nil {
+			t.Fatal("second CreateProject succeeded; the fake was asked to answer 409 for a repeat name")
+		}
+		if !circleci.IsConflict(err) {
+			t.Fatalf("second CreateProject error = %v, want one satisfying circleci.IsConflict", err)
+		}
+
+		detail := projectCreateFailureDetail("already-adopted", nil, err)
+
+		for _, want := range []string{
+			// The API's own message, which err.Error() alone drops the same way
+			// it did for the 404 case.
+			"Cannot create project since a project with the same name already exists",
+			// The actual instruction, not just an acknowledgement that a
+			// conflict happened.
+			"terraform import",
+			// The name, so the practitioner knows which project's slug to look up.
+			`"already-adopted"`,
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("the diagnostic does not mention %q; got:\n%s", want, detail)
+			}
+		}
+
+		// The 404 hint is about a missing repository, which is the opposite
+		// problem, and must not show up here. "GitHub response: Not Found" is
+		// unique to that hint's lead-in; both hints legitimately say
+		// "ADOPT" on its own, since that is the shared explanation for why
+		// this route behaves the way it does at all.
+		if strings.Contains(detail, "GitHub response: Not Found") {
+			t.Errorf("the 409 diagnostic carried the missing-repository hint, which does not apply to "+
+				"it; got:\n%s", detail)
+		}
+	})
+
+	t.Run("an orphaned create names the project's slug and points at import", func(t *testing.T) {
+		t.Parallel()
+
+		api, client := newFakeProjectClient(t)
+		api.setFailFollowStatus(http.StatusBadRequest)
+
+		project, err := client.CreateProject(t.Context(), testProjectResourceOrgID, "no-commits-yet")
+		if err == nil {
+			t.Fatal("CreateProject succeeded; the fake was asked to fail the follow call")
+		}
+		if project == nil {
+			t.Fatal("CreateProject returned a nil project; TestCreateProjectReturnsTheProjectWhenOnlyFollowFails " +
+				"(internal/circleci) covers this directly, but this test needs it non-nil to render the " +
+				"diagnostic at all")
+		}
+
+		detail := projectCreateFailureDetail("no-commits-yet", project, err)
+
+		for _, want := range []string{
+			// The project's own slug, not just its name: this is the one piece
+			// of information the practitioner cannot reconstruct themselves
+			// without it, on the classic organizations where the slug happens
+			// to be predictable from the name -- and CAN reconstruct it on a
+			// standalone one, where it is not.
+			project.Slug,
+			"terraform import",
+			// Says the project already exists rather than only that
+			// something went wrong, and says why the call answered an error
+			// in the first place.
+			"created this project",
+			"Branch not found",
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("the diagnostic does not mention %q; got:\n%s", want, detail)
+			}
 		}
 	})
 }

@@ -4,9 +4,12 @@
 package provider
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,6 +18,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Organization-class gating for circleci_project's acceptance tests.
@@ -108,28 +113,131 @@ func testRequireStandaloneOrg(t *testing.T, orgSlug string) {
 	recordVCSCoverageRan(name, fmt.Sprintf("%s (standalone org %s, %s)", name, orgSlug, testVCSType(t)))
 }
 
-// testAdoptableRepoName returns the name of a repository that already exists in
-// the classic GitHub OAuth test organization and that the suite is allowed to
-// create and delete a CircleCI project for.
+// testRequireGitHubCLI skips the calling test unless a `gh` binary is on
+// PATH and authenticated. Every test in this file that adopts a repository on
+// a classic organization needs one, via testAdoptableGithubRepo below.
 //
-// This fixture is what makes a create test possible at all on a classic
-// organization, and it cannot be synthesised: a random name — which is what
-// TestAccGithubProjectResource used to pass — has no matching repository, so the
-// create is answered 404 and the test fails every time. It is deliberately a
-// SEPARATE variable from the org and project fixtures, and deliberately
-// documented as "the suite may delete this project", because the test's teardown
-// destroys what it created: pointing it at a repository whose CircleCI project
-// someone cares about would delete that project and its build history.
-//
-// Unset means skip, the same as every other fixture in acctest_test.go. A run
-// without it proves nothing about the classic path and says so rather than
-// passing quietly.
-func testAdoptableRepoName(t *testing.T) string {
+// Skip, not Fatal: exactly the same convention every other unmet fixture in
+// this suite follows (testAccEnv), because a missing `gh` binary or an
+// unauthenticated one says nothing about a regression in this provider — it
+// says this environment cannot run this class of test. Measured while
+// building this file: none of the four jobs in .circleci/config.yml exports a
+// GitHub credential today (only CIRCLE_TOKEN, via the
+// terraform-provider-acc-token context), so this skips there and runs
+// wherever `gh auth login` (or a GH_TOKEN/GITHUB_TOKEN in the environment,
+// which `gh` reads on its own) has already happened — a developer's machine,
+// or an agent session with `gh` configured, such as the one that wrote this.
+func testRequireGitHubCLI(t *testing.T) {
 	t.Helper()
 
-	return testAccEnv(t, "CIRCLECI_TEST_GH_OAUTH_ADOPTABLE_REPO_NAME",
-		"name of a repository that already exists in the GitHub OAuth test organization and "+
-			"whose CircleCI project this suite may create and delete")
+	if _, err := exec.LookPath("gh"); err != nil {
+		t.Skip("gh CLI not found on PATH; this test provisions its own private GitHub repository to " +
+			"exercise circleci_project's classic-organization adopt path, and needs `gh` authenticated " +
+			"with repository create/delete access to the GitHub OAuth test organization")
+	}
+
+	if out, err := exec.Command("gh", "auth", "status").CombinedOutput(); err != nil {
+		t.Skipf("gh CLI is present but not authenticated (%v): %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
+// testAdoptableGithubRepo creates a private GitHub repository with a name
+// unique to this test run (testUniqueName) under owner (a GitHub login, e.g.
+// "gh-oauth-cci-1"), registers its deletion via testRegisterCleanup, and
+// returns its bare name — which is also what circleci_project's "name"
+// attribute must be set to on a classic organization, since the adopt route
+// resolves purely against a GitHub repository of that name.
+//
+// It seeds the repository with a README (`--add-readme`) rather than leaving
+// it truly empty. That is not optional: a v2 create against a repository with
+// no commits at all still answers 200, but CreateProject's v1.1 follow call
+// right after it — the step that makes the project actually runnable, and
+// with no way to opt out of on a classic organization — answers
+// 400 {"message":"Branch not found"}, because there is no default branch for
+// it to follow. This is a correction of an earlier version of this comment
+// (and of this function), which claimed adopting a repository needs no commit
+// at all: that was measured only against the bare v2 create call in
+// isolation, never against CreateProject's real, complete path including
+// follow — and it was wrong. Measured now with a README present: the same
+// v1.1 follow call answers 200.
+//
+// No .circleci/config.yml is added, and that part of the original measurement
+// holds: adopting and following both succeed without one. A project with no
+// config simply cannot run a pipeline, which none of these tests need it to.
+//
+// WHY THIS EXISTS RATHER THAN A HAND-MAINTAINED FIXTURE. Every classic-org
+// test in this file used to read a single repository name from
+// CIRCLECI_TEST_GH_OAUTH_ADOPTABLE_REPO_NAME (gh-oauth-cci-1/tf-acc-adoptable),
+// reused across every run, on the understanding that each run adopts it,
+// exercises it, and unadopts it again before the next run needs it unadopted.
+//
+// That invariant does not hold, and this is not theoretical: it broke live
+// while this file was being written. The fixture repository was found already
+// ADOPTED (project id 045eccd7-…, with real build history) with no test of
+// this suite having run to do it — almost certainly a previous run that died
+// between adopting it and deleting it again, the exact gap
+// testRegisterCleanup's own doc comment (acctest_harness_test.go) names as
+// unrecoverable from inside the process that died. It was unadopted by hand
+// (`DELETE /api/v2/project/gh/gh-oauth-cci-1/tf-acc-adoptable` → 200, then a
+// GET → 404) to get a clean baseline — and within about a minute of that,
+// while this file's own tests were being run against it, a GET on the exact
+// same slug answered 200 again with a DIFFERENT project id (6f928ba4-…).
+// Something else running concurrently against the same organization had
+// adopted it again, and `go test -run TestAccGithubProjectResource` failed
+// immediately with precisely the 409 TestAccGithubProjectResourceAlreadyAdopted
+// below now exists to trigger on purpose.
+//
+// A single, fixed-name repository cannot be made safe against that: there is
+// exactly one of it, so any two processes that both need it adopted, or one
+// that needs it adopted while another needs it not, collide — the same
+// "shared mutable fixture" problem acctest_harness_test.go's testUniqueName
+// exists to close for every other object type this suite creates directly.
+// A repository name is no different, and provisioning one turned out cheap
+// enough that the collision risk is not worth keeping: also measured live
+// while building this file, `gh repo create OWNER/NAME --private --add-readme`
+// followed immediately by adopting and following it answered 200 on both
+// calls on the very next try, in well under the time a `go test` timeout
+// would notice.
+//
+// This does mean these tests need `gh` rather than a pre-made repository —
+// see testRequireGitHubCLI — which is a net loosening, not a tightening: no
+// job in .circleci/config.yml sets CIRCLECI_TEST_GH_OAUTH_ADOPTABLE_REPO_NAME
+// today, so removing it costs that CI config nothing, while a developer or
+// agent with `gh` already authenticated no longer has to hand-create and
+// babysit a fixture repository at all.
+func testAdoptableGithubRepo(t *testing.T, owner string) string {
+	t.Helper()
+
+	testRequireGitHubCLI(t)
+
+	name := testUniqueName(t, "repo")
+	full := owner + "/" + name
+
+	out, err := exec.Command("gh", "repo", "create", full, "--private", "--add-readme",
+		"-d", "Ephemeral fixture for terraform-provider-circleci's circleci_project acceptance "+
+			"tests (see testAdoptableGithubRepo). Safe to delete.",
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("creating GitHub repository %s via gh CLI: %v: %s", full, err, out)
+	}
+
+	testRegisterCleanup(t, "GitHub repository "+full, func() error {
+		out, err := exec.Command("gh", "repo", "delete", full, "--yes").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("gh repo delete %s: %w: %s", full, err, out)
+		}
+
+		return nil
+	})
+
+	return name
+}
+
+// githubOwnerFromSlug extracts the GitHub login from a classic organization
+// slug ("gh/gh-oauth-cci-1" -> "gh-oauth-cci-1"), which is what `gh repo
+// create`/`gh repo delete` need as the OWNER half of OWNER/NAME.
+func githubOwnerFromSlug(orgSlug string) string {
+	return strings.TrimPrefix(orgSlug, "gh/")
 }
 
 // TestProjectOrgClass is a permanent unit test of the slug -> class resolution,
@@ -291,6 +399,23 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 					return slug, nil
 				},
 			},
+			// ImportStateVerify (above) only compares the imported state's
+			// attributes against the state Create produced -- it never runs a
+			// plan, so it cannot by itself catch an import that leaves the
+			// configuration wanting a change. This step does: same Config as
+			// step 1, applied against the just-imported state, with PlanOnly so
+			// the framework's own "no changes" check (every non-import,
+			// non-ExpectNonEmptyPlan step gets one) is what proves the second
+			// plan is empty.
+			{
+				Config: testAccProjectResourceConfig(
+					projectName,
+					organizationID,
+					true,
+					true,
+				),
+				PlanOnly: true,
+			},
 			// Delete testing automatically occurs in TestCase
 		},
 	})
@@ -308,16 +433,18 @@ func TestAccCircleCiProjectResource(t *testing.T) {
 // GitHub-backed organizations — so this test could not pass, ever. That is the
 // other half of BUG P4.
 //
-// It now takes the repository name from a fixture, testAdoptableRepoName, and
-// skips when that fixture is unset. Skipping is the honest outcome there: without
-// a real repository to adopt there is nothing this test could prove, and inventing
-// a name would only reproduce the 404.
+// It now provisions its own repository to adopt, testAdoptableGithubRepo,
+// and skips when `gh` is unavailable or unauthenticated. Skipping is the
+// honest outcome there: without a real repository to adopt there is nothing
+// this test could prove, and inventing a name would only reproduce the 404 —
+// which is exactly what TestAccGithubProjectResourceRepoNotFound below tests
+// on purpose, instead.
 func TestAccGithubProjectResource(t *testing.T) {
 	orgId := testGithubOrgID(t)
 	orgSlug := testGithubOrgSlug(t)
-	// A repository that already exists in the classic organization. Not random:
-	// see the comment above and testAdoptableRepoName.
-	projectName := testAdoptableRepoName(t)
+	// A repository this test creates and adopts itself. Not a fixture, and
+	// not random: see the comment above and testAdoptableGithubRepo.
+	projectName := testAdoptableGithubRepo(t, githubOwnerFromSlug(orgSlug))
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -365,6 +492,19 @@ func TestAccGithubProjectResource(t *testing.T) {
 					}
 					return slug, nil
 				},
+			},
+			// Same reasoning as TestAccCircleCiProjectResource's own PlanOnly
+			// step: ImportStateVerify never runs a plan, so this is what proves
+			// import leaves an empty plan on a CLASSIC organization too, not
+			// only a standalone one.
+			{
+				Config: testAccProjectResourceConfig(
+					projectName,
+					orgId,
+					false,
+					true,
+				),
+				PlanOnly: true,
 			},
 			// Delete testing automatically occurs in TestCase
 		},
@@ -495,13 +635,14 @@ func TestAccCircleCiProjectOrgUpdateResource(t *testing.T) {
 // organization fixture to move between, so an org move is not what this test
 // exercises.
 //
-// It takes the repository name from testAdoptableRepoName for the same reason
-// TestAccGithubProjectResource above does — a random name cannot be adopted, and
-// adoption is the only thing the create route does on a classic organization.
+// It provisions its own repository via testAdoptableGithubRepo for the same
+// reason TestAccGithubProjectResource above does — a random name cannot be
+// adopted, and adoption is the only thing the create route does on a classic
+// organization.
 func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
 	orgId := testGithubOrgID(t)
 	orgSlug := testGithubOrgSlug(t)
-	projectName := testAdoptableRepoName(t)
+	projectName := testAdoptableGithubRepo(t, githubOwnerFromSlug(orgSlug))
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -582,6 +723,174 @@ func TestAccGithubProjectOrgUpdateResource(t *testing.T) {
 			},
 			// Delete testing automatically occurs in TestCase
 		},
+	})
+}
+
+// TestAccGithubProjectResourceRepoNotFound is the classic-organization
+// failure path a practitioner actually hits when the repository they named
+// does not exist: adopting it answers
+// 404 {"message":"GitHub response: Not Found"} (see
+// projectCreateFailureDetail's own doc comment for the network measurement),
+// and the provider is expected to turn that into a diagnostic that names the
+// precondition rather than relaying the API's message alone.
+//
+// No fixture and no self-provisioned repository: testUniqueName's random
+// suffix makes a collision with a real repository in the organization
+// practically impossible, and creating one here would defeat the point —
+// this test exists to prove what happens when the repository genuinely is
+// not there.
+func TestAccGithubProjectResourceRepoNotFound(t *testing.T) {
+	orgId := testGithubOrgID(t)
+
+	projectName := testUniqueName(t, "gone")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccProjectResourceConfig(projectName, orgId, false, true),
+				// (?s) so the message's own newlines cannot break the match, and
+				// bare single tokens on both sides of the .* rather than
+				// multi-word (or even multi-character-with-an-internal-space)
+				// phrases: terraform's own CLI renderer wraps long diagnostic
+				// text at a column width it chooses, which can and did insert a
+				// newline in place of an ordinary space mid-phrase. Caught live
+				// twice while writing this file: first as "GitHub response:
+				// Not\nFound" (splitting a two-word phrase), and again, after
+				// switching to what looked like a single wrap-proof token, as
+				// "(HTTP\n409)" in TestAccGithubProjectResourceAlreadyAdopted
+				// below -- "(HTTP 409)" is not actually one token, since the
+				// space between "HTTP" and "409" is exactly as wrappable as any
+				// other. A regex space does not match a literal newline, so
+				// both matches failed even though the diagnostic was exactly
+				// right — a false negative in the test, not a bug in
+				// projectCreateFailureDetail (which TestProjectCreateFailureDetail
+				// asserts in full, away from any wrapping, as a pure function).
+				// "404" and "ADOPT" are each a single run of characters with no
+				// space for wrapping to land on.
+				ExpectError: regexp.MustCompile(`(?s)\b404\b.*\bADOPT\b`),
+			},
+		},
+	})
+}
+
+// TestAccGithubProjectResourceAlreadyAdopted is the classic-organization
+// failure path for the OTHER thing a practitioner hits: naming a repository
+// that is already a CircleCI project. Measured over the network (see
+// projectCreateFailureDetail): 409, with a message that says a project
+// already exists but nothing about what to do next. This test proves the
+// provider adds the "what to do next" — point at `terraform import` rather
+// than leaving the practitioner to guess or, worse, delete the existing
+// project (and its build history) to make room for a new one.
+//
+// It provisions its own repository (testAdoptableGithubRepo) rather than
+// reusing the one TestAccGithubProjectResource adopts: reusing a shared,
+// already-adopted repository for this would race against every other test in
+// this file that needs its own repository unadopted, which is exactly the
+// hazard that made this suite move away from a single shared fixture in the
+// first place (see testAdoptableGithubRepo's own doc comment). The repository
+// is adopted once here with the raw API client — deliberately not through
+// Terraform, so the conflict this test is about happens on the FIRST
+// Terraform apply, not on a second one racing the first's own state.
+func TestAccGithubProjectResourceAlreadyAdopted(t *testing.T) {
+	testAccPreCheck(t)
+
+	orgId := testGithubOrgID(t)
+	orgSlug := testGithubOrgSlug(t)
+
+	projectName := testAdoptableGithubRepo(t, githubOwnerFromSlug(orgSlug))
+
+	client := testAPIClient(t)
+
+	adopted, err := client.CreateProject(t.Context(), orgId, projectName)
+	if err != nil {
+		t.Fatalf("adopting %s with the raw API client, to set up the conflict this test is about: %v",
+			projectName, err)
+	}
+
+	testRegisterCleanup(t, "project "+adopted.Slug, func() error {
+		if err := client.DeleteProject(context.Background(), adopted.Slug); err != nil && !circleci.IsNotFound(err) {
+			return fmt.Errorf("deleting project %s: %w", adopted.Slug, err)
+		}
+
+		return nil
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccProjectResourceConfig(projectName, orgId, false, true),
+				// Bare "409" and "import", not "(HTTP 409)" or "terraform
+				// import" — see TestAccGithubProjectResourceRepoNotFound's own
+				// comment on this regex for why: this exact test is where
+				// "(HTTP 409)" was caught live coming back as "(HTTP\n409)",
+				// wrapped mid-phrase, on the first run with this fix in place.
+				ExpectError: regexp.MustCompile(`(?s)\b409\b.*\bimport\b`),
+			},
+		},
+	})
+}
+
+// TestAccGithubProjectResourceDestroyUnfollows proves that destroying a
+// circleci_project on a CLASSIC organization really unfollows the
+// repository, by a read that is independent of the route Delete itself
+// calls: re-adopting the SAME repository name with the raw API client after
+// Terraform's own destroy has run. A repository that is still followed
+// answers exactly the 409 TestAccGithubProjectResourceAlreadyAdopted above
+// exists to test; only a genuinely unfollowed one can be adopted again. A
+// second GET on the project's old slug would only show that DeleteProject's
+// own belief about itself is consistent, not that CircleCI agrees — this
+// asks CircleCI a question whose answer depends on the real state, through a
+// second, independent call to the very route this whole family of tests is
+// about.
+func TestAccGithubProjectResourceDestroyUnfollows(t *testing.T) {
+	testAccPreCheck(t)
+
+	orgId := testGithubOrgID(t)
+	orgSlug := testGithubOrgSlug(t)
+
+	projectName := testAdoptableGithubRepo(t, githubOwnerFromSlug(orgSlug))
+
+	client := testAPIClient(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccProjectResourceConfig(projectName, orgId, false, true),
+				Check:  resource.TestCheckResourceAttr("circleci_project.test_project", "name", projectName),
+			},
+			// Delete testing automatically occurs when resource.Test's own
+			// TestCase teardown runs, after this function returns from
+			// resource.Test below. The independent proof happens after that.
+		},
+	})
+
+	// INDEPENDENT PROOF: adopt the same repository again with the raw API
+	// client. A project that destroy left genuinely unfollowed can be
+	// adopted again (200); one that is still followed answers 409. This is
+	// the measurement projectCreateFailureDetail's own doc comment records,
+	// used here as an assertion rather than a diagnostic to explain.
+	reAdopted, err := client.CreateProject(t.Context(), orgId, projectName)
+	if err != nil {
+		t.Fatalf("destroy did not really unfollow %s: adopting it again failed: %v -- a still-followed "+
+			"project answers 409 (\"already exists\") here, which is exactly what this test exists to "+
+			"rule out", projectName, err)
+	}
+
+	// Clean up this assertion's OWN re-adopt -- registered only now, because
+	// only now does it exist. testRegisterCleanup's t.Cleanup runs LIFO, so
+	// this runs before testAdoptableGithubRepo's GitHub-repository deletion
+	// above: the CircleCI project is unfollowed first, then the repository
+	// itself is deleted.
+	testRegisterCleanup(t, "project "+reAdopted.Slug+" (this test's own re-adopt check)", func() error {
+		if err := client.DeleteProject(context.Background(), reAdopted.Slug); err != nil && !circleci.IsNotFound(err) {
+			return fmt.Errorf("deleting project %s: %w", reAdopted.Slug, err)
+		}
+
+		return nil
 	})
 }
 

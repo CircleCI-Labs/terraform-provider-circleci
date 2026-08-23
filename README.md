@@ -325,6 +325,20 @@ Authentication:
 | --- | --- |
 | `CIRCLE_TOKEN` | CircleCI personal access token. Tests skip without it. |
 
+A few `circleci_project` tests also need the [`gh` CLI](https://cli.github.com/),
+authenticated with repository create/delete access to the GitHub OAuth test
+organization (`gh auth login`, or a `GH_TOKEN`/`GITHUB_TOKEN` in the
+environment, which `gh` reads on its own): `TestAccGithubProjectResource`,
+`TestAccGithubProjectOrgUpdateResource`,
+`TestAccGithubProjectResourceAlreadyAdopted` and
+`TestAccGithubProjectResourceDestroyUnfollows` each provision their own
+private, throwaway repository to adopt (see `testAdoptableGithubRepo` in
+`internal/provider/project_resource_test.go`) rather than depending on a
+hand-maintained one, and skip cleanly — the same as any other unmet fixture —
+when `gh` is missing or unauthenticated. No job in `.circleci/config.yml`
+exports a GitHub credential today, so these skip there; they run wherever
+`gh` is already set up, such as a developer machine.
+
 ### Fixture identifiers
 
 `CIRCLECI_TEST_VCS_TYPE` picks which integration is active for this run: one
@@ -397,7 +411,6 @@ matter what else is configured:
 | --- | --- |
 | `CIRCLECI_TEST_GH_OAUTH_ORG_ID` | UUID of a GitHub OAuth-backed organization. |
 | `CIRCLECI_TEST_GH_OAUTH_ORG_SLUG` | Slug of that organization, e.g. `gh/<org>`. |
-| `CIRCLECI_TEST_GH_OAUTH_ADOPTABLE_REPO_NAME` | Name of a repository that **already exists** in that GitHub OAuth organization, and whose CircleCI project the suite may **create and delete**. `circleci_project` cannot create a project on a classic, VCS-backed organization — it only adopts an existing repository, and any other name is answered `404 GitHub response: Not Found` — so `TestAccGithubProjectResource` and `TestAccGithubProjectOrgUpdateResource` skip without this. Point it at a repository nobody minds losing the build history of: those tests destroy the project they create. |
 | `CIRCLECI_TEST_GH_APP_REPO_EXTERNAL_ID` | External ID of a repository reachable via the GitHub App integration. |
 | `CIRCLECI_TEST_GH_APP_REPO_NAME` | Full name (`owner/repo`) of that repository. |
 | `CIRCLECI_TEST_GH_SERVER_PROJECT_ID` | UUID of a GitHub Server backed project. |

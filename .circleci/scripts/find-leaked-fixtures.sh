@@ -53,6 +53,25 @@
 # maintainer suspecting an organization leak has to search the CircleCI org
 # picker UI for a "tf-acc-org-..." name by hand; this script cannot enumerate
 # that surface.
+#
+# A BLIND SPOT IN THE "projects" CHECK ABOVE, found live while building
+# internal/provider/project_resource_test.go's classic-organization coverage:
+# GET /api/v1.1/projects -- what the "projects" check above is built on --
+# only lists projects that have been FOLLOWED. A project whose v2
+# organization/{id}/project create succeeded but whose v1.1 follow call right
+# after it did not (see followProject's doc comment in
+# internal/circleci/project.go; it needs a commit on the repository's default
+# branch) is real, billed against nothing, runs nothing, but is invisible
+# here -- confirmed by creating one on gh-oauth-cci-1 and observing it absent
+# from this same GET /api/v1.1/projects response. There is no route that
+# lists it either (same 404s as the "projects" section above already
+# documents). If this script ever reports zero project leaks right after a
+# run that DID hit a follow failure, that is this blind spot, not a clean
+# result -- check the acceptance log for "Branch not found" or "following
+# project" and, if found, locate the orphan by its slug from the log (or from
+# a surviving terraform-plugin-testing working directory's generated .tf
+# file, if the process is still around) and delete it by hand:
+# DELETE /api/v2/project/<vcs-type>/<org-name>/<name>.
 
 set -euo pipefail
 

@@ -92,6 +92,15 @@ type fakeProjectAPI struct {
 	// setFailSettingsStatus.
 	failSettingsStatus int
 
+	// failFollowStatus, when non-zero, makes the v1.1 follow call answer with
+	// that status instead of 200, without affecting the v2 create that
+	// precedes it — modelling the measured 400 "Branch not found" a
+	// repository with no commits answers there (see followProject's own doc
+	// comment in internal/circleci/project.go, and BUG P8). It exists to test
+	// that CreateProject returns the created project alongside that error
+	// rather than discarding it — see setFailFollowStatus.
+	failFollowStatus int
+
 	// forceSlug, when non-empty, overrides the slug Create responds with,
 	// regardless of orgKind. It exists to test the provider's handling of a
 	// malformed slug coming back from the API, which orgKind's normal shapes
@@ -257,6 +266,19 @@ func (a *fakeProjectAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	a.mu.Lock()
 	missingRepository := a.missingRepository && a.orgKind != "standalone"
+	// alreadyAdopted models adopting a repository a SECOND time, on a classic
+	// organization: no new field is needed for this, because that is exactly
+	// what a create with a name this fake already holds a classic project
+	// under IS. Gated to non-standalone the same way missingRepository is:
+	// this fake's standalone branch always answers with the one fixed
+	// fakeStandaloneProjectFragment slug regardless of name, so keying this
+	// check off that slug would fire on every second standalone create
+	// instead of only a genuine repeat name, which is not what was measured
+	// and not what any test here exercises.
+	var alreadyAdopted bool
+	if a.orgKind != "standalone" {
+		_, alreadyAdopted = a.projects["gh/AcmeOrg/"+body.Name]
+	}
 	a.mu.Unlock()
 
 	if missingRepository {
@@ -264,6 +286,19 @@ func (a *fakeProjectAPI) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// the fact that adoption is the only thing on offer, which is why
 		// projectCreateFailureDetail adds that.
 		a.write(w, http.StatusNotFound, map[string]any{"message": "GitHub response: Not Found"})
+
+		return
+	}
+
+	if alreadyAdopted {
+		// The API's own message, verbatim -- measured over the network by
+		// adopting the same repository (gh-oauth-cci-1/tf-acc-adoptable) a
+		// second time: 409, with no mention of import or any other way out,
+		// which is why projectCreateFailureDetail adds one. See
+		// TestProjectResourceUnit_CreateOnAClassicOrgExplainsAnAlreadyAdoptedRepository.
+		a.write(w, http.StatusConflict, map[string]any{
+			"message": "Cannot create project since a project with the same name already exists in this organization",
+		})
 
 		return
 	}
@@ -319,8 +354,17 @@ func (a *fakeProjectAPI) handleFollow(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1.1/project/"), "/follow")
 
 	a.mu.Lock()
-	a.followed = append(a.followed, rest)
+	status := a.failFollowStatus
+	if status == 0 {
+		a.followed = append(a.followed, rest)
+	}
 	a.mu.Unlock()
+
+	if status != 0 {
+		a.write(w, status, map[string]any{"message": "Branch not found"})
+
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -817,6 +861,15 @@ func (a *fakeProjectAPI) setFailSettingsStatus(status int) {
 	defer a.mu.Unlock()
 
 	a.failSettingsStatus = status
+}
+
+// setFailFollowStatus makes the v1.1 follow call answer with status instead
+// of 200, leaving the v2 create it follows unaffected. See failFollowStatus.
+func (a *fakeProjectAPI) setFailFollowStatus(status int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.failFollowStatus = status
 }
 
 func (a *fakeProjectAPI) recordedRequests() []string {

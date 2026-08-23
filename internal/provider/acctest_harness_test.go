@@ -409,9 +409,10 @@ func testAssertProjectGone(t *testing.T, client *circleci.Client, slug string) {
 //
 // Only works on a standalone organization: a classic, VCS-backed organization
 // has no route that creates a project, only one that adopts a pre-existing
-// repository (see testAdoptableRepoName in project_resource_test.go), and a
-// repository to adopt cannot be synthesised per test. Callers on a classic
-// organization should use testAdoptableRepoName's fixture instead, not this.
+// repository. Callers on a classic organization should use
+// testAdoptableGithubRepo (project_resource_test.go) instead, not this — it
+// provisions the repository to adopt via the `gh` CLI rather than depending
+// on one already existing.
 func testCreateStandaloneProject(t *testing.T, client *circleci.Client, orgID string) *circleci.Project {
 	t.Helper()
 
