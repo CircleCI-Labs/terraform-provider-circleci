@@ -300,15 +300,14 @@ something.
 
 **Serial groups.** Two runs against the same organization corrupt each other:
 these tests create and delete projects, flip org-wide settings and replace
-policy bundles. Each job therefore declares a `serial-group`, and the grouping
-follows the organizations rather than the jobs — one group per organization,
-except that `acceptance-gh-oauth` and `acceptance-gh-hybrid` share one, because
-the OAuth job's org-move test moves a project into the hybrid job's
-organization. Four separate groups would serialize nothing that needs it and
-one shared group would serialize everything, turning four ~40-minute jobs into
-a ~160-minute nightly for no safety gained. The config comment explains what
-would change that: a test writing something account-wide rather than
-org-scoped.
+policy bundles. Each job therefore declares a `serial-group`, one per
+organization — four groups for four jobs, since no two of these jobs write to
+the same organization (see "Parallel-safe acceptance fixtures" below for how
+that was confirmed, including for the one pair that used to share a group).
+Four separate groups serialize nothing that does not need it; the config
+comment explains what would put two jobs back in one group: a test writing
+something account-wide rather than org-scoped, or a test that once again
+points one job's fixtures at another job's organization.
 
 **What each job stores.** `test-reports/` goes up as an artifact, including:
 
@@ -338,6 +337,164 @@ static `GH_APP_REPO_*` pair are deliberately absent rather than guessed: an
 absent variable skips with its own name in the message, while a wrong one fails
 against a nonsense identifier in a way that reads exactly like a regression. So
 the artifact of a green run doubles as the to-do list for the next one.
+
+## Parallel-safe acceptance fixtures
+
+The four acceptance jobs used to need three serial groups rather than four
+(see the config comment), because two of them wrote into the same
+organization. The acceptance-test harness in `internal/provider` (naming,
+cleanup and verification helpers, all prefixed `test`) is a small,
+general-purpose harness that removes the need for that kind of coordination
+going forward: any test can create its own private fixture object, name it so
+it cannot collide with a concurrent run of anything else, and prove it is
+really gone afterward, instead of reading and writing the shared
+`testProjectID`/`testContextID`/... fixtures every other test also depends
+on.
+
+**Naming.** `testUniqueName(t, kind)` returns `tf-acc-<kind>-<test-slug>-
+<MMDD-HHMM-ci>-<random>` — for example
+`tf-acc-ctx-harnesscon-0822-1517-local-owaoc2`. Two sources of uniqueness, not
+one: a coarse timestamp plus the CI job identifier (`CIRCLE_WORKFLOW_ID`,
+falling back to `CIRCLE_BUILD_NUM`, then `"local"`) states roughly when and
+(in CI) which job made an object, readable by a human with no decoding; a
+random suffix is what actually guarantees no collision, including between two
+runs that started in the same minute with no CI id at all. Neither alone
+would do the job — a bare timestamp collides, a bare random string tells
+nobody anything when they find it later.
+
+**Cleanup.** `testRegisterCleanup(t, description, del)` wraps `t.Cleanup` so a
+delete that itself fails is a loud test failure (`t.Error`, naming the object
+and pointing at the leak detector below) rather than a silently leaked
+object — which is exactly how two real leaks were found in this project
+before this file existed. `t.Cleanup` funcs run after `t.Fatal`/`t.FailNow`
+and after a recovered panic in a subtest; they do **not** run if the process
+itself dies (a genuine unrecovered panic, a SIGKILL from CircleCI's
+no-output timeout, an interrupted `go test`) — stated as a limit, not
+papered over, because nothing running inside that same process can fix it.
+Proved live: a temporary test that created a context, registered its
+cleanup, and then called `t.Fatal` immediately afterward still had the
+context deleted — confirmed independently afterward with a fresh
+`GET /api/v2/context?owner-id=...` listing that no longer contained it —
+even though the test itself is reported failed.
+
+**Verification.** A single status code lies about absence, and differently
+per service (see "Why the organizations must be dedicated and disposable"
+above and the measurements in `internal/circleci/context.go`,
+`group.go`, `budget.go`): a deleted context or group answers 403, not 404,
+and a budget's own delete answers 500 regardless of whether it worked.
+`testAssertAbsent` and its typed wrappers (`testAssertContextGone`,
+`testAssertGroupGone`, `testAssertResourceClassGone`) settle it by
+re-listing the collection and checking for absence instead — the one signal
+every one of these services answers unambiguously. `testAssertProjectGone`
+is the one exception: a deleted project's slug is documented to answer a
+real 404, and there is no list-projects route to check against instead (see
+its doc comment), so `GetProject` really is the right check there.
+
+A related gotcha lives on the delete side, not the check side: a cleanup
+that calls `DeleteContext` (or a group delete) directly must treat a 403
+(`circleci.IsUnauthorized`), not only a 404 (`circleci.IsNotFound`), as
+"already gone" — both routes answer 403 for an object that no longer
+exists. Getting this backwards does not silently pass; it fails loudly with
+the *right* verdict for the *wrong* reason (a cleanup that runs after the
+test's own explicit delete already succeeded reports the object as
+undeletable). This was caught exactly this way, live, the first time the
+demonstration test below ran against a real organization — see
+`TestAccHarnessContextLifecycle`'s own comment for what that looked like.
+
+**No shared mutable fixture.** The harness's own demonstration tests in
+`internal/provider`, alongside the harness itself, show the whole thing end
+to end, live, against three resource types:
+`TestAccHarnessContextLifecycle` creates its own context in the active
+organization (any organization, any class — context creation does not
+require a standalone org); `TestAccHarnessProjectLifecycle` creates its own
+project via `testCreateStandaloneProject`; `TestAccHarnessGroupLifecycle`
+creates its own group. The latter two are gated to a standalone org, the
+same as `TestAccCircleCiProjectResource`, since groups and a genuine project
+create both require that class (see "Accounts required" above). None of the
+three reads `testContextID`/`testProjectID`/a shared group fixture.
+
+The group test is also where the 403-not-404 measurement was confirmed for
+groups specifically, live: deleting a group, then repeating the delete and
+separately reading it back, both answered `403 {"message":"Permission
+denied."}` — not 404 — against gh-app-cci-1. `internal/circleci/group.go`'s
+own `Get` doc comment ("a missing group is reported as an error satisfying
+IsNotFound") does not describe this: `IsNotFound` only recognizes 404 and the
+`ErrNotFound` sentinel, neither of which this measurement produced. Left as
+found — fixing that comment (and whatever call site relies on it) is a
+separate change with its own test, outside this harness's scope — but it is
+exactly the kind of gap `testAssertGroupGone`'s list-based check exists to be
+correct regardless of.
+
+**Proving isolation.** Two things were run concurrently against the real
+API, not merely reasoned about:
+
+1. Three concurrent processes ran `TestAccHarnessContextLifecycle` against
+   the *same* organization (gh-app-cci-1) at the same instant. All three
+   passed, each creating and deleting a context with a distinct name.
+2. `acceptance-gh-oauth`'s and `acceptance-gh-hybrid`'s exact
+   `.circleci/config.yml` fixtures were run concurrently — one process per
+   job, each running `TestAccHarnessContextLifecycle` against its own
+   primary organization. Both passed, writing to gh-oauth-cci-1 and
+   gh-oauth-cci-2 respectively.
+
+`.circleci/scripts/find-leaked-fixtures.sh` (below) found nothing left over
+by any of this.
+
+**The serial group these two jobs used to share.** It existed because
+`TestAccCircleCiProjectOrgUpdateResource`, run under `acceptance-gh-oauth`,
+moves a project into `CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID` — set to
+gh-oauth-cci-2, `acceptance-gh-hybrid`'s own primary organization. That test
+was re-gated onto organization class (`testRequireStandaloneOrg`, the BUG P4
+fix) after the shared group was introduced, and `acceptance-gh-oauth`'s
+primary organization (gh-oauth-cci-1) is classic, not standalone — so the
+gate now skips the move before it would ever reach the alt organization.
+Reproduced directly, no network call needed since the gate fires first:
+
+```sh
+CIRCLECI_TEST_VCS_TYPE=github_oauth CIRCLECI_TEST_GH_OAUTH_ORG_SLUG=gh/gh-oauth-cci-1 \
+  TF_ACC=1 go test ./internal/provider/ -run TestAccCircleCiProjectOrgUpdateResource -v
+# --- SKIP: ... "needs a standalone organization, got the classic org gh/gh-oauth-cci-1"
+```
+
+and no other test reads `CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID`/`_ALT_ORG_SLUG`
+(confirmed by grepping every `_test.go` file in this package). So today these
+two jobs write to disjoint organizations and `.circleci/config.yml` gives
+each its own serial group. **This is contingent, not permanent**: it holds
+because no runnable test currently points one job's fixtures at another
+job's organization and no test mutates anything account-wide. Either
+changing would put two jobs back in one group — see the config comment for
+exactly which.
+
+**What still needs a serial group, and why this doesn't remove them
+entirely.** Two runs of the *same* job still contend: they use the same
+primary organization, and a resource with no per-test unique name yet (org
+settings, policy bundles, OIDC claims — see "Why the organizations must be
+dedicated and disposable" above) is still one shared, mutable, org-wide
+object regardless of how many concurrent runs there are. The harness makes a
+*newly written* test safe to run alongside anything else; it does not
+retroactively make every existing test's fixture private. Each job's serial
+group is what still protects those.
+
+**The leak detector.** `.circleci/scripts/find-leaked-fixtures.sh` lists every
+context, group, runner resource class and project across the four
+organizations whose name matches the harness's naming scheme
+(`^tf-acc-.+-[0-9]{4}-[0-9]{4}-` — the run-stamp's two four-digit groups, not
+merely the `tf-acc-` prefix: this repository already has *permanent* fixtures
+named `tf-acc-fixture` and `tf-acc-adoptable`, predating this harness and
+chosen by a human, which the bare prefix wrongly flagged the first time this
+script ran). Run it with an admin `CIRCLE_TOKEN` for all four organizations:
+
+```sh
+CIRCLE_TOKEN=... .circleci/scripts/find-leaked-fixtures.sh
+```
+
+It exits nonzero when it finds anything, so it can run as a CI step after the
+acceptance suite, distinct from and not swallowed by whether the tests
+themselves passed. It does not check spend budgets (no name field to match
+against) or organizations (no list-all-organizations route exists; a leaked
+`circleci_organization` test is a fifth organization with no fixed id to
+start from, and has to be found by hand in the org picker). As of this
+writing it reports nothing across all four organizations.
 
 ## What a run covers, and how to tell
 

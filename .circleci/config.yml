@@ -472,28 +472,47 @@ workflows:
   # case that matters most, because it is the one where the failure is
   # attributable.
   #
-  # WHY THREE SERIAL GROUPS FOR FOUR JOBS, RATHER THAN ONE OR FOUR. A serial
-  # group serializes pipelines against shared state, so the question is what
-  # state is actually shared. It is per organization: every fixture variable set
-  # on these jobs names one organization, and the destructive resources — org
+  # WHY ONE SERIAL GROUP PER JOB, RATHER THAN ONE OR FOUR. A serial group
+  # serializes pipelines against shared state, so the question is what state
+  # is actually shared. It is per organization: every fixture variable set on
+  # these jobs names one organization, and the destructive resources — org
   # settings, policy bundles, OIDC claims, groups, projects, runner resource
   # classes — are all org-scoped. Two runs of the *same* job would fight over
-  # one organization and must not overlap; acceptance-gh-app and
-  # acceptance-gl-cloud share nothing, and collapsing them into one group would
-  # serialize four ~40-minute jobs into a ~160-minute nightly for no safety
-  # gained.
+  # one organization and must not overlap; no two of these four jobs share an
+  # organization, and collapsing any of them into one group would serialize
+  # four ~40-minute jobs into a slower nightly for no safety gained.
   #
-  # Hence one group per organization — with the two GitHub jobs that share
-  # organizations sharing a group. acceptance-gh-oauth's org-move test moves a
-  # project into gh-oauth-cci-2, which is acceptance-gh-hybrid's primary
-  # organization: two jobs writing to one org is exactly the overlap a serial
-  # group is for, even though only one of them owns it.
+  # acceptance-gh-oauth and acceptance-gh-hybrid used to share a group here,
+  # because acceptance-gh-oauth's org-move test (TestAccCircleCiProjectOrgUpdateResource)
+  # moves a project into CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID, which is set to
+  # gh-oauth-cci-2 — acceptance-gh-hybrid's own primary organization. That
+  # stopped being true once the test was re-gated onto organization CLASS
+  # (testRequireStandaloneOrg in project_resource_test.go, the BUG P4 fix):
+  # the move only runs when BOTH the primary and the alt organization are
+  # standalone, and acceptance-gh-oauth's primary organization
+  # (gh-oauth-cci-1, slug gh/gh-oauth-cci-1) is classic. Reproduced directly —
+  # no network call, no CIRCLE_TOKEN needed, since the gate skips before
+  # either would be reached — by running the test with exactly this job's
+  # environment block:
   #
-  # Collapse all four into one group the moment a test starts writing something
-  # account-wide rather than org-scoped — a shared VCS account, the token's own
-  # user, anything not addressed by an org id. Nothing here does today; the
-  # deliberate omission of CIRCLECI_TEST_GH_OAUTH_ORG_ID from the non-OAuth
-  # jobs (see the note above those jobs) is what keeps that true.
+  #   CIRCLECI_TEST_VCS_TYPE=github_oauth CIRCLECI_TEST_GH_OAUTH_ORG_SLUG=gh/gh-oauth-cci-1 \
+  #     TF_ACC=1 go test ./internal/provider/ -run TestAccCircleCiProjectOrgUpdateResource -v
+  #   -> SKIP: ... "needs a standalone organization, got the classic org gh/gh-oauth-cci-1"
+  #
+  # and confirmed no other test reads CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID/_SLUG
+  # (`grep -rl testAltOrgID\|testAltOrgSlug internal/provider/*_test.go` names
+  # only that one test and its own fixture helper). So today
+  # acceptance-gh-oauth writes only to gh-oauth-cci-1 and acceptance-gh-hybrid
+  # writes only to gh-oauth-cci-2 — as disjoint as every other pair of jobs
+  # here — and running both at once, concurrently, against their real
+  # fixtures showed no interference (see TESTING.md's "Parallel-safe
+  # acceptance fixtures" section for that run).
+  #
+  # Collapse any two of these back into one group the moment a test starts
+  # writing something account-wide rather than org-scoped — a shared VCS
+  # account, the token's own user, anything not addressed by an org id — or
+  # the moment CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID again points a runnable test
+  # at another job's organization. Nothing here does either today.
   acceptance:
     when: << pipeline.parameters.run-acceptance-tests >>
     jobs:
@@ -513,14 +532,13 @@ workflows:
           filters:
             branches:
               only: labs
-          # Shared with acceptance-gh-hybrid on purpose — see above.
-          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth-pair
+          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth
       - acceptance-gh-hybrid:
           context: terraform-provider-acc-token
           filters:
             branches:
               only: labs
-          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth-pair
+          serial-group: << pipeline.project.slug >>/acceptance-gh-hybrid
       - acceptance-gl-cloud:
           context: terraform-provider-acc-token
           filters:
