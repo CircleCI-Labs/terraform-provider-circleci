@@ -23,7 +23,8 @@ radius, and the tests exercise all of them:
 | `circleci_config_policy_bundle` | `POST .../policy-bundle` **replaces the entire bundle**. Against an org with real governance rules, a test run deletes them. Destroy uploads an *empty* bundle. |
 | `circleci_oidc_custom_claims` | Destroy resets the org's OIDC claims, changing what cloud providers will accept. |
 | `circleci_orb_version` | **Publishing an orb version is irreversible** — there is no delete endpoint. Test runs permanently add versions to a namespace. |
-| `circleci_orb_namespace` | Deleting a namespace destroys every orb under it. Organizations are normally limited to one namespace. |
+| `circleci_orb` | **Creating an orb is irreversible** — `DELETE /orb/packages/{id}` is a router-level 404, the route does not exist. Test runs permanently add orbs to whatever namespace they use. |
+| `circleci_orb_namespace` | Despite the name, deleting a namespace has never actually removed one: every attempt this project has tested, across two separate investigations and several accounts, answered `403 Forbidden` and changed nothing — see that resource's own documentation. Organizations are normally limited to one namespace, which is the real constraint a test run runs into. |
 | `circleci_group`, `circleci_project_group` | Creates and deletes groups and re-writes their full project role grants — i.e. permissions. |
 | `circleci_project`, `circleci_checkout_key` | Creates and deletes projects and their deploy/user keys. |
 | `circleci_runner_resource_class` | Deletes resource classes, with `force` cascading to their tokens. |

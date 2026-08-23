@@ -35,18 +35,25 @@ import (
 // testAccPreCheck-gated tests (search this package for "is [NET]" for the
 // full list) — so treat any claim resting solely on a fake-backed TestAcc* in
 // this family as UNVALIDATED against a real CircleCI installation, including
-// ones this comment does not call out individually. One claim that fake
-// coverage got wrong before real testing caught it: namespace rename and
-// delete used to look safe and successful here, but answer 403 Forbidden
-// unconditionally on every live account tested — see Namespace's doc comment
-// in internal/circleci/namespace.go. renameNamespace and deleteNamespace below
-// are now fixed to match that finding rather than to model a route that
-// succeeds: this fake has no code path left that lets either report success,
-// so there is nothing left here for a "TestAcc*" name to overclaim about them.
-// A second claim the same investigation found wrong: the collection shape
-// modelled here (orbSummary) undersells what a real listing returns, by
-// omitting usage counts that are genuinely present; see orbPackageListWire's
-// comment in internal/circleci/orb.go.
+// ones this comment does not call out individually. Three claims that fake
+// coverage got wrong before real testing caught them.
+//
+// First: namespace rename and delete used to look safe and successful here, but
+// answer 403 Forbidden unconditionally on every live account tested — see
+// Namespace's doc comment in internal/circleci/namespace.go. renameNamespace and
+// deleteNamespace below are now fixed to match that finding rather than to model
+// a route that succeeds: this fake has no code path left that lets either report
+// success, so there is nothing left here for a "TestAcc*" name to overclaim.
+//
+// Second: the collection shape modelled here (orbSummary) undersells what a real
+// listing returns, by omitting usage counts that are genuinely present; see
+// orbPackageListWire's comment in internal/circleci/orb.go.
+//
+// Third, and the worst of them: createOrb used to accept and echo back any orb
+// name at all, including a namespace-qualified one. That is exactly what let the
+// real create route reject every single name this provider ever sent it. The fake
+// could not have caught its own resource's core bug, because it did not model the
+// one validation that mattered. See createOrb's own comment.
 
 // orbFakeRequest is one request the fake received.
 type orbFakeRequest struct {
@@ -538,6 +545,17 @@ func (a *orbFakeAPI) listOrbs(w http.ResponseWriter, r *http.Request) {
 	orbFakeWriteJSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
+// createOrb models POST /orb/packages.
+//
+// [NET]: this route wants the BARE orb name and rejects anything containing
+// "/" — including the fully qualified form every read route reports — with a
+// generic 400 that reads exactly like a name-format or quota problem
+// regardless of what was actually sent; see CreateOrbPackage's doc comment in
+// internal/circleci/orb.go for how that was tracked down. This fake used to
+// accept whatever name it was given verbatim and echo it straight back,
+// which is what let orb_resource.go send the qualified "<namespace>/<orb>"
+// form for as long as it did without a single test noticing: the fake never
+// modeled the one behavior that would have caught it.
 func (a *orbFakeAPI) createOrb(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Data struct {
@@ -559,8 +577,27 @@ func (a *orbFakeAPI) createOrb(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	name := body.Data.Attributes.Name
+	if strings.Contains(name, "/") {
+		orbFakeWriteError(w, http.StatusBadRequest, "Bad Request",
+			fmt.Sprintf("Cannot create an Orb named '%s': this name is invalid. See the "+
+				"documentation for more information about the restrictions on Orb names.", name))
+
+		return
+	}
+
+	ns, ok := a.namespaces[body.Data.References.Namespace.ID]
+	if !ok {
+		orbFakeWriteError(w, http.StatusNotFound, "Not Found.", "")
+
+		return
+	}
+
+	// The stored/reported name is namespace-qualified, matching every read
+	// route, even though the request that created it was not.
+	qualified := ns.Name + "/" + name
 	for _, orb := range a.orbs {
-		if orb.Name == body.Data.Attributes.Name {
+		if orb.Name == qualified {
 			orbFakeWriteError(w, http.StatusBadRequest, "Bad Request", "orb already exists")
 
 			return
@@ -569,7 +606,7 @@ func (a *orbFakeAPI) createOrb(w http.ResponseWriter, r *http.Request) {
 
 	orb := &orbFakeOrb{
 		ID:          a.mintID(),
-		Name:        body.Data.Attributes.Name,
+		Name:        qualified,
 		NamespaceID: body.Data.References.Namespace.ID,
 		IsPrivate:   body.Data.Attributes.IsPrivate,
 		// CircleCI lists a new public orb and hides a private one.

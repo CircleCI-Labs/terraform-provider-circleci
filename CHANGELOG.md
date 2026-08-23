@@ -146,7 +146,65 @@
   collaborations list on `vcs_type` (the example in the data source's own documentation)
   matched nothing before this fix.
 
+* **`circleci_orb` could never actually create an orb.** `Create` sent the fully
+  qualified `"<namespace>/<orb>"` name in the create request's `attributes.name`,
+  which is what every *other* orb route accepts and reports. Measured against two
+  live, correctly entitled accounts: `POST /orb/packages` rejects that form for
+  every name tried — a fresh name, a literal duplicate of an existing orb, a
+  namespace created fresh for this investigation with every orb setting explicitly
+  turned on — with an identical generic `400 "this name is invalid"`, which is what
+  made it look like an undocumented quota rather than a wire-format bug (a real
+  duplicate-name rejection reads "an Orb with that name already exists," not "this
+  name is invalid"). This route alone wants the BARE name; sending it succeeds, and
+  the response still comes back namespace-qualified regardless. `circleci_orb`'s
+  fake used to accept and echo back whatever name it was given, including a
+  qualified one, which is why 900+ passing tests never caught this — the fake never
+  modeled the one validation that mattered. See `CreateOrbPackage`'s doc comment in
+  `internal/circleci/orb.go`.
+
+* **`circleci_orb`'s documentation and destroy warning claimed deleting the
+  `circleci_orb_namespace` that owns an orb "deletes its orbs too."** This was
+  never demonstrated and is not true: destroying `circleci_orb_namespace` does not
+  delete the namespace at CircleCI (see that resource's own documentation), so
+  there was never a working path from there to the orb. Separately, [NET]
+  confirms `DELETE /orb/packages/{id}` answers a router-level `404 "Route Not
+  Found"` — the route does not exist at all. Both the destroy warning and the
+  resource documentation now say only what is actually true: an orb cannot be
+  removed, ever, once created, by any path.
+
 ### NOTES
+
+* **The claim that an orb's embedded version list is capped at 50 by the detail
+  route, and uncapped by `filter[name]`, is now confirmed rather than a one-sample
+  guess.** Measured freshly against a real certified public orb with 63 published
+  versions: `GET /orb/packages/{id}` embeds 50 of them; `GET
+  /orb/packages?filter[name]=...` for the identical package embeds all 63;
+  `ListOrbVersions` (which pages `GET /orb/versions?filter[orb_id]=...` until
+  exhausted) also reports 63 in a single, uncursored page. A caller that needs the
+  complete version history should always use `ListOrbVersions`, never
+  `OrbPackage.LatestVersion` or a raw `references.orb_versions`. Separately, and not
+  previously documented at all: an ordinary `ListOrbPackages` call with no
+  `filter[name]` embeds only ONE version reference per package — "the latest" — not
+  50; three different routes give three different counts for the same package. See
+  `OrbPackage.LatestVersion`'s doc comment in `internal/circleci/orb.go`.
+
+* **An orb hidden with `is_listed = false` disappears from `circleci_orbs` and from
+  `ListOrbPackages` entirely, not only from CircleCI's own public registry search.**
+  [NET]: an ordinary `filter[namespace_id]` listing with no `filter[visibility]`
+  silently excludes it, even though the orb is public (not private) and reads back
+  fine by id or by name. This is not a bug fix — no code changed — but is worth
+  knowing before concluding an orb "isn't there."
+
+* **`PromoteOrbVersion`'s doc comment overstated how cleanly a promotion is
+  reflected.** It said the promoted version is new and the dev version untouched.
+  [NET]: the response reuses the SAME id the dev version had, with its `version`
+  changed to the promoted one, and a same-moment `GetOrbVersion` by that id agrees —
+  but `ListOrbVersions` filtered to the dev channel kept listing that same id under
+  its original `dev:<label>` string for several seconds afterward, disagreeing with
+  the by-id read taken at the same time. Confirm a promotion by reading the returned
+  id back with `GetOrbVersion`, not by re-listing either channel. The label itself
+  is not consumed either way: `dev:<label>` can be republished immediately after
+  promoting it, minting a new id.
 
 * **`circleci_usage_export`'s `download_urls` can be an empty list even when `state`
   is `"completed"`.** Measured against a live organization: a job whose window held

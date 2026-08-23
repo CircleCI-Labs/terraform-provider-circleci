@@ -241,7 +241,7 @@ reasoning.
 | Additional project SSH keys | v1.1 only | Not served on CircleCI Server. Checkout keys are the supported mechanism, and GitLab projects ship a pre-existing key that must not be deleted |
 | 7 of 10 insights endpoints | v2 | Unbounded row counts that would churn state on every refresh. Two are deprecated. Three *are* implemented |
 | Reporting and search | v3 `analysis/*`, `metric/*`, `runs/search`, `jobs/{id}/tests` | Same reasoning. Under discussion — see the tracking issue |
-| Orb promotion | v3 `orb/versions/{id}/promote` | Creates a *new* version rather than mutating one, so it has no idempotent Terraform shape. The client method exists and is tested |
+| Orb promotion | v3 `orb/versions/{id}/promote` | A one-shot imperative action on a mutable dev label, not a convergent desired state — there is nothing for a plan to compare against. The client method exists and is tested |
 | Docker layer cache purge | v3 `DELETE /projects/{id}/dlc` | A one-shot side effect with nothing to read back. Terraform has no primitive for "run this once" |
 | Run/workflow cancel, rerun, approve | v2, v3 | Runtime actions, not desired state |
 | Orb and namespace import | v3 `*/import` | One-shot migration between installations |
