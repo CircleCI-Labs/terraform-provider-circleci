@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"regexp"
 	"strings"
 
@@ -41,29 +40,68 @@ var orbUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA
 // orbIsUUID reports whether s looks like a UUID.
 func orbIsUUID(s string) bool { return orbUUIDPattern.MatchString(s) }
 
-// namespaceForbiddenDetail annotates a namespace rename or delete failure with
-// why retrying will not help, the same shape orb_version_resource.go's
-// publishFailureDetail follows for a different immutable-by-design failure.
+// orbNamespaceSupportTicketURL is CircleCI's own documentation of the process
+// for a namespace rename or transfer. No equivalent self-service process is
+// documented for deletion at all — see orbNamespaceNameImmutable and Delete
+// below, both of which link here.
+const orbNamespaceSupportTicketURL = "https://support.circleci.com/hc/en-us/articles/21518826780827"
+
+// orbNamespaceNameImmutable blocks a plan that would change name on a
+// namespace already in state.
 //
-// [NET]: every rename and every delete this provider's author attempted
-// against a live account answered 403 Forbidden — on a namespace the calling
-// organization had just created, and on one belonging to an unrelated
-// organization — and left the namespace unchanged. CircleCI's support
-// documentation (https://support.circleci.com/hc/en-us/articles/21518826780827,
-// "Transferring and Renaming Namespaces") says a rename or transfer requires a
-// support ticket, and no equivalent self-service delete exists at all. This
-// investigation found no account permission that changed the answer, so a 403
-// here is treated as permanent rather than as a transient authorization gap.
-func namespaceForbiddenDetail(err error) string {
-	detail := circleci.Detail(err)
-	if !circleci.HasStatus(err, http.StatusForbidden) {
-		return detail
+// This is deliberately not stringplanmodifier.RequiresReplace. Replacing this
+// resource means destroying the old namespace before creating the new one,
+// and [NET, measured against a live organization-admin token] CircleCI's
+// delete route answers 403 Forbidden unconditionally — see Namespace's doc
+// comment in internal/circleci/namespace.go — so Delete below does not even
+// attempt it any more. A RequiresReplace plan here would promise a
+// destroy-then-create that can never finish cleanly: the destroy cannot
+// actually remove the old namespace, so the create that follows would try to
+// claim a name CircleCI still considers taken. Refusing the rename outright,
+// before either half of that plan is attempted, is the only shape that cannot
+// leave a namespace half-migrated or a practitioner staring at a plan that
+// applies but does not do what it says.
+type orbNamespaceNameImmutable struct{}
+
+func (orbNamespaceNameImmutable) Description(_ context.Context) string {
+	return "Namespace names cannot be changed once created; renaming requires a CircleCI support ticket."
+}
+
+func (m orbNamespaceNameImmutable) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (orbNamespaceNameImmutable) PlanModifyString(
+	_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse,
+) {
+	// A null state value means this is Create: there is no prior name to
+	// protect yet. An unknown plan value means it depends on something else
+	// in this plan not yet resolved; Terraform re-plans before apply once it
+	// is, and this modifier runs again then.
+	if req.StateValue.IsNull() || req.PlanValue.IsUnknown() {
+		return
 	}
 
-	return detail + "\n\nCircleCI does not offer this as a self-service API call: every account this " +
-		"provider has been able to test received the same 403 response. Renaming or deleting an orb " +
-		"namespace requires a CircleCI support ticket; see " +
-		"https://support.circleci.com/hc/en-us/articles/21518826780827. The namespace was not changed."
+	if req.PlanValue.Equal(req.StateValue) {
+		return
+	}
+
+	resp.Diagnostics.AddAttributeError(
+		req.Path,
+		"CircleCI orb namespace names cannot be changed",
+		fmt.Sprintf(
+			"A namespace name is a permanent, global, one-per-organization claim: %q cannot become "+
+				"%q through Terraform. CircleCI's namespace rename route answers 403 Forbidden "+
+				"unconditionally — measured on a namespace the calling organization had just created, "+
+				"on one belonging to an unrelated organization, and even on a no-op rename of a "+
+				"namespace to its own existing name — so this provider no longer attempts the call.\n\n"+
+				"Renaming a namespace requires a CircleCI support ticket (%s). Revert `name` to %q "+
+				"in this configuration; once support has actually renamed the namespace, update `name` "+
+				"here to match and this attribute will plan as unchanged.",
+			req.StateValue.ValueString(), req.PlanValue.ValueString(), orbNamespaceSupportTicketURL,
+			req.StateValue.ValueString(),
+		),
+	)
 }
 
 // orbNamespaceResourceModel maps the resource schema.
@@ -99,14 +137,20 @@ func (r *orbNamespaceResource) Schema(_ context.Context, _ resource.SchemaReques
 			"A namespace is also what a self-hosted runner resource class is named after: a " +
 			"resource class is `<namespace>/<class>`, so this resource is how you create the " +
 			"namespace that `circleci_runner_resource_class` needs.\n\n" +
-			"!> **Renaming and deleting a namespace are not self-service.** Every account this " +
-			"provider's author was able to test received a 403 Forbidden response when attempting " +
-			"either through the API, on namespaces both inside and outside the calling account's " +
-			"organization. CircleCI's support documentation describes renaming or transferring a " +
-			"namespace as a support-ticket process, not an API call, and no equivalent process is " +
-			"documented for deleting one at all. Practically: treat `name` as permanent once " +
-			"applied, and expect `terraform destroy` on this resource to fail rather than remove " +
-			"the namespace — it does not silently report a removal that did not happen.\n\n" +
+			"!> **Creating a namespace is permanent.** A namespace name is a global, " +
+			"one-per-organization claim with no self-service way to undo it: measured against a " +
+			"live organization-admin token, CircleCI's rename and delete routes both answer " +
+			"`403 Forbidden` unconditionally — including a no-op rename of a namespace to its own " +
+			"existing name, and a namespace whose owning organization has since been deleted. This " +
+			"resource does not call either route. Changing `name` fails at `terraform plan`, " +
+			"before anything is attempted, with a diagnostic explaining why. `terraform destroy` " +
+			"succeeds — the resource comes out of Terraform state — but the namespace itself, and " +
+			"every orb in it, keeps existing in CircleCI; every destroy raises a WARNING naming the " +
+			"namespace and saying that a CircleCI support ticket is the only way to actually rename " +
+			"or remove it. That is a deliberate, announced version of `terraform destroy` reporting " +
+			"success on an object that survives — the honest alternative to the one this resource " +
+			"used to offer, a destroy that errors forever on every namespace ever created, with no " +
+			"path forward at all.\n\n" +
 			"~> **CircleCI Cloud only.** Namespaces are served by the CircleCI v3 API, which " +
 			"CircleCI Server does not route. Using this resource against a provider configured " +
 			"with `deployment = \"server\"` fails with an explicit error.",
@@ -119,12 +163,11 @@ func (r *orbNamespaceResource) Schema(_ context.Context, _ resource.SchemaReques
 				},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "The namespace name, unique across all of CircleCI. " +
-					"Changing this attempts to rename the namespace in place rather than replacing " +
-					"it: if the API ever accepts the rename, the namespace keeps its id and its " +
-					"orbs. In practice every account tested against received 403 Forbidden for this " +
-					"call — see the resource description — so plan on this attribute being " +
-					"effectively immutable once applied, not on the rename succeeding.",
+				MarkdownDescription: "The namespace name, unique across all of CircleCI. This is " +
+					"permanent once created: CircleCI's rename route answers 403 Forbidden " +
+					"unconditionally (see the resource description), so changing this value fails at " +
+					"`terraform plan`, with a diagnostic explaining why, rather than being attempted " +
+					"against the API.",
 				Required: true,
 				Validators: []validator.String{
 					stringvalidator.LengthAtLeast(1),
@@ -132,6 +175,9 @@ func (r *orbNamespaceResource) Schema(_ context.Context, _ resource.SchemaReques
 						regexp.MustCompile(`^[^/\s]+$`),
 						"must not contain a slash or whitespace; it is the prefix of `<namespace>/<orb>`",
 					),
+				},
+				PlanModifiers: []planmodifier.String{
+					orbNamespaceNameImmutable{},
 				},
 			},
 			// See org_id_deprecation.go for why these are Optional+Computed and why
@@ -244,19 +290,12 @@ func (r *orbNamespaceResource) Read(ctx context.Context, req resource.ReadReques
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// Update renames the namespace in place.
-//
-// The rename route's shape is a real update: a namespace it succeeds against
-// keeps its id and its orbs, so name is not marked RequiresReplace — and must
-// not be, because RequiresReplace would mean Terraform destroying the old
-// namespace before creating the new one, which is the one outcome this
-// resource must never risk. organization_id is the only other attribute and it
-// does force replacement, so a rename is all that can reach here.
-//
-// [NET]: this investigation never observed the route accept a rename — every
-// attempt against a live account answered 403. See namespaceForbiddenDetail.
-// name staying non-replacing is what keeps that 403 a clean, no-op failure
-// instead of a destroyed namespace.
+// Update exists only to satisfy resource.Resource; nothing about a namespace
+// can genuinely reach it any more. name is blocked from ever planning a
+// change by orbNamespaceNameImmutable above, and organization_id forces
+// replacement instead of an in-place Update (see org_id_deprecation.go). If
+// either guard has a bug, refusing here outright is safer than silently
+// calling an API this package no longer even exposes a client method for.
 func (r *orbNamespaceResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	if !requireCloud(r.client, orbNamespaceTypeName, &resp.Diagnostics) {
 		return
@@ -269,71 +308,67 @@ func (r *orbNamespaceResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	plan.Id = state.Id
-	setOrgIDs(&plan.OrganizationId, &plan.OrgId, effectiveOrgID(plan.OrganizationId, plan.OrgId))
-
-	if plan.Name.ValueString() == state.Name.ValueString() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-
-		return
-	}
-
-	ns, err := r.client.RenameNamespace(ctx, state.Id.ValueString(), plan.Name.ValueString())
-	if err != nil {
+	if plan.Name.ValueString() != state.Name.ValueString() {
 		resp.Diagnostics.AddError(
-			fmt.Sprintf("Unable to rename CircleCI orb namespace %s to %s",
-				state.Name.ValueString(), plan.Name.ValueString()),
-			namespaceForbiddenDetail(err),
+			"CircleCI orb namespace rename reached Update unexpectedly",
+			"The name plan modifier should have blocked this change during terraform plan, before "+
+				"apply ever called Update. Refusing to call an API route that answers 403 Forbidden on "+
+				"every account this provider has been able to test; this is a bug in the provider, not "+
+				"something your configuration can work around.",
 		)
 
 		return
 	}
 
-	resp.Diagnostics.AddWarning(
-		"CircleCI orb namespace renamed",
-		fmt.Sprintf(
-			"The namespace %q is now %q. Orbs in it are reachable only under the new name, so "+
-				"any configuration that still references %q or a runner resource class named "+
-				"%q will no longer resolve.",
-			state.Name.ValueString(), ns.Name,
-			state.Name.ValueString()+"/<orb>",
-			state.Name.ValueString()+"/<class>",
-		),
-	)
-
-	plan.Id = types.StringValue(ns.ID)
-	plan.Name = types.StringValue(ns.Name)
+	plan.Id = state.Id
+	setOrgIDs(&plan.OrganizationId, &plan.OrgId, effectiveOrgID(plan.OrganizationId, plan.OrgId))
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Delete asks the API to delete the namespace, and with it every orb it owns
-// — if the API agrees, which [NET] this investigation never saw it do; see
-// DeleteNamespace and namespaceForbiddenDetail. Terraform leaves a resource in
-// state whenever Delete reports an error, so a 403 here correctly fails
-// `terraform destroy` rather than reporting a removal that did not happen.
+// Delete removes the namespace from Terraform state without calling the API.
+//
+// [NET, measured against a live organization-admin token]: CircleCI's delete
+// route answers 403 Forbidden unconditionally — on a namespace this
+// investigation had just created, on one belonging to an unrelated
+// organization, and even on a namespace whose owning organization had since
+// been deleted. No account permission or namespace state changed the answer,
+// and no self-service alternative is documented anywhere. This resource used
+// to call the route and surface that 403 as a failed `terraform destroy`; the
+// result was an honest failure with no path forward, on every namespace ever
+// created, forever. That is worse than the alternative implemented here,
+// which follows circleci_project_group's pattern for its own unrouted revoke:
+// succeed, and say plainly, in an unmissable warning, exactly what is left
+// behind and where to actually act on it. A destroy that reports success
+// while the object survives is the same shape as the silent lies this
+// project has spent weeks hunting down elsewhere — what makes this one
+// acceptable is that it is announced here rather than inferred by a caller
+// who never gets told otherwise.
+//
+// Deliberately not gated on requireCloud: a namespace stranded in state by a
+// later switch to `deployment = "server"` must stay removable from Terraform,
+// the same reasoning storageRetentionResource.Delete and
+// projectGroupResource.Delete both give for skipping that gate on their own
+// no-API-call deletes.
 func (r *orbNamespaceResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	if !requireCloud(r.client, orbNamespaceTypeName, &resp.Diagnostics) {
-		return
-	}
-
 	var state orbNamespaceResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	err := r.client.DeleteNamespace(ctx, state.Id.ValueString())
-	if circleci.IsNotFound(err) {
-		// Already gone; deleting is still a success.
-		return
-	}
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Unable to delete CircleCI orb namespace "+state.Name.ValueString(),
-			namespaceForbiddenDetail(err),
-		)
-	}
+	resp.Diagnostics.AddWarning(
+		"CircleCI orb namespace left in place",
+		fmt.Sprintf(
+			"Namespace %q (id %s) still exists in CircleCI, still owns every orb in it, and still "+
+				"holds its name globally. Deleting a namespace is not self-service: CircleCI's delete "+
+				"route answers 403 Forbidden unconditionally, so this has only been removed from "+
+				"Terraform state, not from CircleCI.\n\n"+
+				"Open a CircleCI support ticket (%s) to actually delete the namespace, or to free its "+
+				"name for reuse elsewhere.",
+			state.Name.ValueString(), state.Id.ValueString(), orbNamespaceSupportTicketURL,
+		),
+	)
 }
 
 // ImportState imports an existing namespace.

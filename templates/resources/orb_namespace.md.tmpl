@@ -13,7 +13,7 @@ A namespace is the globally unique prefix that owns a set of orbs, as in `<names
 
 A namespace is also what a self-hosted runner resource class is named after: a resource class is always `<namespace>/<class>`. That makes this resource the way to create the namespace a `circleci_runner_resource_class` needs.
 
-!> **Renaming and deleting a namespace are not self-service, in practice.** The v3 API has routes for both (`POST .../rename`, `DELETE ...`), and the provider calls them, but every account this provider's author was able to test — including an organization-admin token on an organization it had just created — received `403 Forbidden` from both, on namespaces both inside and outside the calling account's own organization. CircleCI's support documentation describes a namespace rename or transfer as a support-ticket process, not an API call, and this investigation found no equivalent process documented for deletion at all. Deleting the *organization* that owns a namespace does not delete the namespace either: it is orphaned, keeps existing, and keeps the name claimed with no owner able to act on it again. Treat `name` as permanent once applied, and expect `terraform destroy` on this resource to fail rather than remove anything.
+!> **Creating a namespace is permanent.** A namespace name is a global, one-per-organization claim with no self-service way to undo it. Read the whole page before applying this resource for the first time: there is no `terraform destroy` that removes a namespace from CircleCI, and no `name` you can change your mind about later.
 
 ## Availability
 
@@ -21,7 +21,7 @@ A namespace is also what a self-hosted runner resource class is named after: a r
 | --- | --- |
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | No — served by the CircleCI v3 API, which a Server installation does not route to its public API service. Using this with `deployment = "server"` reports an explicit error at plan time rather than the confusing HTTP 404 the request would otherwise produce. |
-| **API** | `POST /api/v3/namespaces`, `GET /api/v3/namespaces/{id}`, `POST /api/v3/namespaces/{id}/rename` (403 for every account tested; see above), `DELETE /api/v3/namespaces/{id}` (same) |
+| **API** | `POST /api/v3/namespaces`, `GET /api/v3/namespaces/{id}` — this resource calls no other route. The v3 API also routes `POST /api/v3/namespaces/{id}/rename` and `DELETE /api/v3/namespaces/{id}`, but both answer `403 Forbidden` unconditionally (see "Renaming" and "Deleting" below), so this provider does not call either. |
 | **Organization type** | Any. An organization is normally limited to one namespace. |
 | **Token** | A personal API token belonging to an organization admin. |
 
@@ -31,11 +31,19 @@ A namespace is also what a self-hosted runner resource class is named after: a r
 
 ## Renaming
 
-`name` is **not** a replace-forcing attribute: the v3 API's rename route has the shape of a genuine in-place update (a namespace it succeeds against keeps its id and its orbs), so a `RequiresReplace` here would risk Terraform destroying an organization's only namespace just to satisfy a rename. `name` is left as a plain, non-replacing update instead, specifically so that the outcome measured below is a clean failed apply rather than data loss.
+Changing `name` on a namespace already applied fails at `terraform plan`, before Terraform attempts anything, with a diagnostic explaining why: a namespace name is a permanent, global, one-per-organization claim, and CircleCI's rename route answers `403 Forbidden` unconditionally — measured against a live organization-admin token, including a no-op rename of a namespace to its own existing name. CircleCI's support documentation describes renaming or transferring a namespace as a support-ticket process, not an API call, and this investigation found no account permission that produced a different answer.
 
-**In practice, expect the rename to fail.** Every attempt this provider's author made against a live account — regardless of which organization owned the namespace or issued the request — answered `403 Forbidden`, and left the namespace's name unchanged. CircleCI's support documentation describes renaming or transferring a namespace as something to request via a support ticket rather than this API call. The error surfaced by Terraform says as much and links to that documentation; a retry with the same configuration will not succeed.
+This is deliberately not `RequiresReplace`. Replacing this resource means destroying the old namespace before creating the new one, and destroying a namespace cannot actually happen (see "Deleting" below) — so a `RequiresReplace` plan would promise a destroy-then-create that can never finish: the destroy leaves the old namespace in place, and the create that follows then tries to claim a name CircleCI still considers taken. Refusing the rename outright, before either half of that plan runs, is the only shape that cannot leave a namespace half-migrated.
 
-`organization_id` cannot change: a namespace cannot be moved between organizations, so changing it forces a new namespace to be planned. Given the above, do not expect that plan to succeed either, and do not rely on the old namespace being destroyed — see the deletion note at the top of this page.
+If a namespace really has been renamed by CircleCI support, update `name` in this configuration to match the new name and run `terraform apply` (or `-refresh-only`) — once `name` agrees with what CircleCI reports, the attribute plans as unchanged.
+
+`organization_id` also cannot change in practice: CircleCI has no route that moves a namespace between organizations, so changing it plans a replacement. Given the paragraph above, expect that replacement's create half to fail with "namespace already exists" rather than to succeed — the destroy half leaves the old namespace behind exactly as `terraform destroy` does (see "Deleting" below), so the name is never actually freed for the new organization to claim.
+
+## Deleting
+
+`terraform destroy` on this resource succeeds — it removes the resource from Terraform state — but the namespace itself, and every orb in it, keeps existing in CircleCI. Every destroy raises a warning that names the namespace and its id and says that removing it is not self-service: CircleCI's delete route answers `403 Forbidden` unconditionally, measured against a live organization-admin token, on a namespace the calling organization had just created, on one belonging to an unrelated organization, and even on a namespace whose owning organization had since been deleted. A CircleCI support ticket is the only way to actually remove one, or to free its name for reuse.
+
+This is a deliberate, announced version of `terraform destroy` reporting success on an object that survives it — not an oversight. The alternative this resource used to implement was to call the delete route and surface its `403` as a failed destroy: an honest failure, but one with no path forward, on every namespace ever created, forever, since the API answer never changes. Between a destroy that silently lies about what happened and one that errors forever with nothing a practitioner can do about it, this resource takes a third option: succeed, and say plainly, every time, exactly what is left behind and where to actually act on it.
 
 {{ .SchemaMarkdown | trimspace }}
 

@@ -6,17 +6,28 @@ package provider
 import (
 	"crypto/rand"
 	"fmt"
-	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 const orbTestOrgID = "22222222-2222-2222-2222-222222222222"
 
-// orbCaptureAttr stores an attribute value so a later step can compare against it.
+// orbCaptureAttr stores an attribute value so a later step can compare against
+// it. Kept here for other resources in this package that share the "orb"
+// helper prefix (see notification_channel_config_resource_test.go); this file
+// no longer needs it now that renaming is blocked before it can leave the id
+// unchanged for a later step to check.
 func orbCaptureAttr(address, key string, into *string) resource.TestCheckFunc {
 	return func(state *terraform.State) error {
 		res, ok := state.RootModule().Resources[address]
@@ -30,6 +41,7 @@ func orbCaptureAttr(address, key string, into *string) resource.TestCheckFunc {
 }
 
 // orbExpectAttr asserts an attribute still holds a previously captured value.
+// See orbCaptureAttr.
 func orbExpectAttr(address, key string, want *string) resource.TestCheckFunc {
 	return func(state *terraform.State) error {
 		res, ok := state.RootModule().Resources[address]
@@ -44,42 +56,57 @@ func orbExpectAttr(address, key string, want *string) resource.TestCheckFunc {
 	}
 }
 
-// TestAccOrbNamespaceResource covers the create/read/delete cycle and, in the
-// second step, that renaming is a genuine in-place update: the rename route is
-// called and the namespace keeps its id, rather than the namespace being
-// destroyed and recreated.
-func TestAccOrbNamespaceResource(t *testing.T) {
+// orbNamespaceSchema returns the resource's schema, for building tfsdk.State
+// values directly in the unit tests below that call Delete without going
+// through resource.UnitTest.
+func orbNamespaceSchema(t *testing.T) rschema.Schema {
+	t.Helper()
+
+	resp := &fwresource.SchemaResponse{}
+	NewOrbNamespaceResource().Schema(t.Context(), fwresource.SchemaRequest{}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Schema method diagnostics: %+v", resp.Diagnostics)
+	}
+
+	return resp.Schema
+}
+
+// orbNamespaceState builds a state value holding model.
+func orbNamespaceState(t *testing.T, schema rschema.Schema, model orbNamespaceResourceModel) tfsdk.State {
+	t.Helper()
+
+	state := tfsdk.State{Schema: schema}
+	if diags := state.Set(t.Context(), model); diags.HasError() {
+		t.Fatalf("could not build a state value: %+v", diags)
+	}
+
+	return state
+}
+
+// TestAccOrbNamespaceResource_CreateReadImport covers the create/read cycle
+// and importing by name, then lets the TestCase's own final destroy run.
+// Renaming is exercised separately below, because it is now blocked before
+// Update is ever reached rather than being a genuine in-place update.
+func TestAccOrbNamespaceResource_CreateReadImport(t *testing.T) {
 	api := newOrbFakeAPI(t)
 
-	var createdID string
-
-	config := func(name string) string {
-		return orbProviderConfig(api.URL()) + fmt.Sprintf(`
+	config := orbProviderConfig(api.URL()) + fmt.Sprintf(`
 resource "circleci_orb_namespace" "test" {
-  name            = %q
+  name            = "acme"
   organization_id = %q
 }
-`, name, orbTestOrgID)
-	}
+`, orbTestOrgID)
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: config("acme"),
+				Config: config,
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("circleci_orb_namespace.test", "name", "acme"),
 					resource.TestCheckResourceAttr("circleci_orb_namespace.test", "organization_id", orbTestOrgID),
 					resource.TestCheckResourceAttrSet("circleci_orb_namespace.test", "id"),
-					orbCaptureAttr("circleci_orb_namespace.test", "id", &createdID),
-				),
-			},
-			{
-				Config: config("acme-renamed"),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("circleci_orb_namespace.test", "name", "acme-renamed"),
-					// The same namespace, renamed: name must not be RequiresReplace.
-					orbExpectAttr("circleci_orb_namespace.test", "id", &createdID),
 				),
 			},
 			{
@@ -87,18 +114,18 @@ resource "circleci_orb_namespace" "test" {
 				ImportState:  true,
 				// The organization is part of the import id because the API never
 				// reports which organization owns a namespace.
-				ImportStateId:     orbTestOrgID + "/acme-renamed",
+				ImportStateId:     orbTestOrgID + "/acme",
 				ImportStateVerify: true,
 			},
 		},
 	})
 
-	if got := api.requestsFor("POST", "/rename"); len(got) != 1 {
-		t.Errorf("rename requests = %d, want 1: renaming must use POST /namespaces/{id}/rename", len(got))
-	}
-	// A replacement would have deleted the namespace, taking its orbs with it.
-	if got := api.requestsFor("DELETE", "/api/v3/namespaces/"); len(got) != 1 {
-		t.Errorf("namespace deletes = %d, want 1 (only the final destroy), got %v", len(got), got)
+	// The TestCase's own final destroy must not have called the delete route
+	// at all — see TestAccOrbNamespaceResource_DestroyLeavesNamespaceInPlace,
+	// which asserts that directly. This only guards against the create/read/
+	// import cycle above making an unexpected rename or delete call of its own.
+	if got := api.requestsFor("POST", "/rename"); len(got) != 0 {
+		t.Errorf("rename requests = %d, want 0: nothing in this test renames the namespace", len(got))
 	}
 }
 
@@ -217,15 +244,53 @@ resource "circleci_orb_namespace" "test" {
 	})
 }
 
-// TestAccOrbNamespaceResource_RenameForbiddenGivesSupportTicketGuidance drives
-// a rename through the exact response [NET] shows a real account gets — 403
-// Forbidden — and requires the diagnostic to say why retrying will not help,
-// rather than reading as a generic, retryable API error.
-//
-// Without namespaceForbiddenDetail, the diagnostic is only circleci.Detail's
-// passthrough of the API body ("Forbidden."), which does not mention a support
-// ticket and would fail this test's ExpectError.
-func TestAccOrbNamespaceResource_RenameForbiddenGivesSupportTicketGuidance(t *testing.T) {
+// TestOrbNamespaceNameImmutable_PlanModifyString unit-tests the plan modifier
+// in isolation: it must error only when a prior name exists and the planned
+// value genuinely differs from it, and must not error on Create (null state),
+// on an unresolved value (unknown plan), or when nothing actually changed.
+func TestOrbNamespaceNameImmutable_PlanModifyString(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		stateValue types.String
+		planValue  types.String
+		wantError  bool
+	}{
+		{"create has no prior state", types.StringNull(), types.StringValue("acme"), false},
+		{"unchanged name", types.StringValue("acme"), types.StringValue("acme"), false},
+		{"plan value not yet known", types.StringValue("acme"), types.StringUnknown(), false},
+		{"genuine rename", types.StringValue("acme"), types.StringValue("acme-two"), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := planmodifier.StringRequest{
+				StateValue: tc.stateValue,
+				PlanValue:  tc.planValue,
+			}
+			resp := &planmodifier.StringResponse{PlanValue: tc.planValue}
+
+			orbNamespaceNameImmutable{}.PlanModifyString(t.Context(), req, resp)
+
+			if got := resp.Diagnostics.HasError(); got != tc.wantError {
+				t.Errorf("HasError = %v, want %v (diagnostics: %+v)", got, tc.wantError, resp.Diagnostics)
+			}
+		})
+	}
+}
+
+// TestAccOrbNamespaceResource_RenameBlockedAtPlanTime proves the rename is
+// refused before Terraform ever reaches Update, not merely that
+// orbNamespaceNameImmutable itself returns an error when called directly
+// (TestOrbNamespaceNameImmutable_PlanModifyString covers that in isolation).
+// Asserting zero rename requests reached the fake is what a RequiresReplace
+// plan modifier or an apply-time-only check would not guarantee: either of
+// those would still let the plan proceed to apply, and RequiresReplace would
+// additionally try to destroy the namespace first.
+func TestAccOrbNamespaceResource_RenameBlockedAtPlanTime(t *testing.T) {
 	api := newOrbFakeAPI(t)
 
 	config := func(name string) string {
@@ -242,34 +307,80 @@ resource "circleci_orb_namespace" "test" {
 		Steps: []resource.TestStep{
 			{Config: config("acme")},
 			{
-				PreConfig: func() { api.setFailRenameNamespaceStatus(http.StatusForbidden) },
-				Config:    config("acme-renamed"),
+				Config: config("acme-renamed"),
+				// The diagnostic has to say the claim is permanent, global and
+				// one-per-organization, and point at a support ticket rather than
+				// reading as a generic, retryable validation error.
 				ExpectError: regexp.MustCompile(
-					`(?s)Forbidden.*support ticket.*support\.circleci\.com`,
+					`(?s)cannot be changed.*permanent.*global.*one-per-organization.*support ticket`,
 				),
 			},
 		},
 	})
 
-	// The rename was attempted — this is not a validator short-circuiting
-	// before any request — but it must not have been retried.
-	if got := api.requestsFor("POST", "/rename"); len(got) != 1 {
-		t.Errorf("rename requests = %d, want exactly 1", len(got))
+	if got := api.requestsFor("POST", "/rename"); len(got) != 0 {
+		t.Errorf("rename requests = %d, want 0: a plan-time-blocked rename must never reach the API", len(got))
 	}
-	// And the namespace itself must be untouched: a 403 from the API, wrapped
-	// in a better message, is not license to guess at a different outcome.
 	for _, ns := range api.namespaces {
 		if ns.Name != "acme" {
-			t.Errorf("namespace name = %q, want %q: a failed rename must not change it", ns.Name, "acme")
+			t.Errorf("namespace name = %q, want %q: a blocked plan must not change it", ns.Name, "acme")
 		}
 	}
 }
 
-// TestAccOrbNamespaceResource_DeleteForbiddenFailsDestroy drives a destroy
-// through the same 403 [NET] shows a real delete gets, and requires
-// `terraform destroy` to fail loudly with the support-ticket guidance rather
-// than reporting a removal that did not happen.
-func TestAccOrbNamespaceResource_DeleteForbiddenFailsDestroy(t *testing.T) {
+// TestOrbNamespaceResourceUnit_DeleteWarnsAndDoesNotCallAPI asserts the
+// documented destroy behavior directly against Delete, the same way
+// TestStorageRetentionResourceUnit_DeleteMakesNoAPICallAndWarns does for
+// circleci_storage_retention: removing the resource from Terraform state
+// must not reset anything in CircleCI (there is no route that would let it),
+// and the warning must actually be present — not just the absence of an
+// error — naming the namespace and pointing at a support ticket.
+//
+// The client is pointed at an address nothing listens on, deliberately: if
+// Delete is ever changed to call the API again, this test fails with a
+// connection error rather than silently passing.
+func TestOrbNamespaceResourceUnit_DeleteWarnsAndDoesNotCallAPI(t *testing.T) {
+	t.Parallel()
+
+	client := circleci.New(circleci.Config{Host: "http://127.0.0.1:1", Token: "fake"})
+	r := &orbNamespaceResource{client: client}
+
+	schema := orbNamespaceSchema(t)
+	model := orbNamespaceResourceModel{
+		Id:             types.StringValue("11111111-1111-1111-1111-111111111111"),
+		Name:           types.StringValue("acme"),
+		OrganizationId: types.StringValue(orbTestOrgID),
+		OrgId:          types.StringValue(orbTestOrgID),
+	}
+
+	resp := &fwresource.DeleteResponse{}
+	r.Delete(t.Context(), fwresource.DeleteRequest{
+		State: orbNamespaceState(t, schema, model),
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Delete diagnostics: %+v", resp.Diagnostics)
+	}
+
+	if resp.Diagnostics.WarningsCount() != 1 {
+		t.Fatalf("expected exactly 1 warning, got %+v", resp.Diagnostics)
+	}
+
+	detail := resp.Diagnostics.Warnings()[0].Detail()
+	for _, want := range []string{"acme", "11111111-1111-1111-1111-111111111111", "support ticket", "not self-service"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("Delete warning does not mention %q: %s", want, detail)
+		}
+	}
+}
+
+// TestAccOrbNamespaceResource_DestroyLeavesNamespaceInPlace drives a destroy
+// through the full plan/apply pipeline (unlike the Delete-only unit test
+// above, which never touches ModifyPlan, Terraform's diffing, or state
+// removal) and asserts the namespace survives it: destroy must succeed
+// without ever calling DELETE, and the fake must still hold the namespace
+// afterward.
+func TestAccOrbNamespaceResource_DestroyLeavesNamespaceInPlace(t *testing.T) {
 	api := newOrbFakeAPI(t)
 
 	config := orbProviderConfig(api.URL()) + fmt.Sprintf(`
@@ -284,24 +395,24 @@ resource "circleci_orb_namespace" "test" {
 		Steps: []resource.TestStep{
 			{Config: config},
 			{
-				PreConfig: func() { api.setFailDeleteNamespaceStatus(http.StatusForbidden) },
-				Config:    config,
-				Destroy:   true,
-				ExpectError: regexp.MustCompile(
-					`(?s)Forbidden.*support ticket.*support\.circleci\.com`,
-				),
-			},
-			{
-				// Confirms the namespace survived the failed destroy above: if
-				// Delete had wrongly dropped it from state, this step would plan
-				// to recreate it instead of finding nothing to do. Also lets the
-				// TestCase's own final destroy succeed.
-				PreConfig: func() { api.setFailDeleteNamespaceStatus(0) },
-				Config:    config,
-				PlanOnly:  true,
+				Config:  config,
+				Destroy: true,
 			},
 		},
 	})
+
+	if got := api.requestsFor("DELETE", "/api/v3/namespaces/"); len(got) != 0 {
+		t.Errorf("namespace deletes = %d, want 0: destroy must not call the API", len(got))
+	}
+	if len(api.namespaces) != 1 {
+		t.Fatalf("namespaces remaining = %d, want 1: the namespace must survive `terraform destroy`",
+			len(api.namespaces))
+	}
+	for _, ns := range api.namespaces {
+		if ns.Name != "acme" {
+			t.Errorf("surviving namespace name = %q, want %q", ns.Name, "acme")
+		}
+	}
 }
 
 // TestAccOrbNamespaceResource_SecondCreateNamesTheExistingNamespace is [NET]:
