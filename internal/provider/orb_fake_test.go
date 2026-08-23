@@ -20,9 +20,8 @@ import (
 // and applies without a CircleCI account.
 //
 // The fake keeps real state rather than replaying canned responses, because the
-// interesting behaviour of these resources is stateful: renaming a namespace must
-// preserve its id, publishing a version twice must fail, and destroying an orb
-// version must not call the API at all.
+// interesting behaviour of these resources is stateful: publishing a version
+// twice must fail, and destroying an orb version must not call the API at all.
 //
 // [FAKE], not [NET] — read this before trusting a "TestAcc*" name in this
 // family. Every "TestAcc*" test in orb_namespace_resource_test.go,
@@ -36,14 +35,18 @@ import (
 // testAccPreCheck-gated tests (search this package for "is [NET]" for the
 // full list) — so treat any claim resting solely on a fake-backed TestAcc* in
 // this family as UNVALIDATED against a real CircleCI installation, including
-// ones this comment does not call out individually. Two claims that fake
-// coverage got wrong before real testing caught them: namespace rename and
-// delete looked safe and successful here (see renameNamespace and
-// deleteNamespace below) but answer 403 Forbidden on every live account
-// tested — see namespaceForbiddenDetail in orb_namespace_resource.go — and
-// the collection shape modelled here (orbSummary) undersells what a real
-// listing returns, by omitting usage counts that are genuinely present; see
-// orbPackageListWire's comment in internal/circleci/orb.go.
+// ones this comment does not call out individually. One claim that fake
+// coverage got wrong before real testing caught it: namespace rename and
+// delete used to look safe and successful here, but answer 403 Forbidden
+// unconditionally on every live account tested — see Namespace's doc comment
+// in internal/circleci/namespace.go. renameNamespace and deleteNamespace below
+// are now fixed to match that finding rather than to model a route that
+// succeeds: this fake has no code path left that lets either report success,
+// so there is nothing left here for a "TestAcc*" name to overclaim about them.
+// A second claim the same investigation found wrong: the collection shape
+// modelled here (orbSummary) undersells what a real listing returns, by
+// omitting usage counts that are genuinely present; see orbPackageListWire's
+// comment in internal/circleci/orb.go.
 
 // orbFakeRequest is one request the fake received.
 type orbFakeRequest struct {
@@ -97,16 +100,6 @@ type orbFakeAPI struct {
 	// setFailGetOrbSourceStatus.
 	failSetOrbListedStatus int
 	failGetOrbSourceStatus int
-	// failRenameNamespaceStatus and failDeleteNamespaceStatus, when non-zero,
-	// make every rename/delete answer with that status and body instead of
-	// succeeding. Unlike the two fields above, this is not a hypothetical: [NET]
-	// this is what a real account actually receives (403) for both routes, every
-	// time — see RenameNamespace and DeleteNamespace in internal/circleci. The
-	// fake defaults to succeeding anyway, because the mechanics of "id stays the
-	// same" and "no other request happens" are still worth proving; tests that
-	// care about the real, permanent failure set this explicitly.
-	failRenameNamespaceStatus int
-	failDeleteNamespaceStatus int
 }
 
 // orbFakeCategories is the fixed category set CircleCI publishes.
@@ -188,26 +181,6 @@ func (a *orbFakeAPI) setFailGetOrbSourceStatus(status int) {
 	defer a.mu.Unlock()
 
 	a.failGetOrbSourceStatus = status
-}
-
-// setFailRenameNamespaceStatus makes every namespace rename answer with
-// status and a bare Forbidden-shaped body instead of succeeding, so a test
-// can drive the resource through the response [NET] shows a real account
-// actually gets.
-func (a *orbFakeAPI) setFailRenameNamespaceStatus(status int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.failRenameNamespaceStatus = status
-}
-
-// setFailDeleteNamespaceStatus is setFailRenameNamespaceStatus's counterpart
-// for delete.
-func (a *orbFakeAPI) setFailDeleteNamespaceStatus(status int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	a.failDeleteNamespaceStatus = status
 }
 
 // requestsFor returns every recorded request whose method matches and whose path
@@ -377,56 +350,40 @@ func (a *orbFakeAPI) getNamespace(w http.ResponseWriter, r *http.Request) {
 	orbFakeWriteJSON(w, http.StatusOK, a.namespaceEntity(ns))
 }
 
-func (a *orbFakeAPI) renameNamespace(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if !orbFakeDecode(w, r, &body) {
-		return
-	}
+// renameNamespace and deleteNamespace are unreachable from the provider: no
+// client method calls either route any more (see internal/circleci/namespace.go
+// and orb_namespace_resource.go's Update and Delete). They stay registered and
+// modelled here — rather than being deleted along with the toggles that used
+// to make their success conditional — so that a future regression which
+// mistakenly wires a call back in hits the same wall [NET] measurement found
+// on a live account: 403 Forbidden, unconditionally, on a namespace that
+// exists, and 404 on one that does not. There is no code path left in this
+// fake that lets either route report success.
 
+func (a *orbFakeAPI) renameNamespace(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if status := a.failRenameNamespaceStatus; status != 0 {
-		orbFakeWriteError(w, status, "Forbidden.", "")
-
-		return
-	}
-
-	ns, ok := a.namespaces[r.PathValue("id")]
-	if !ok {
+	if _, ok := a.namespaces[r.PathValue("id")]; !ok {
 		orbFakeWriteError(w, http.StatusNotFound, "Not Found", "namespace not found")
 
 		return
 	}
 
-	// Renaming keeps the id and the orbs, which is what makes it an update rather
-	// than a replacement.
-	ns.Name = body.Name
-
-	orbFakeWriteJSON(w, http.StatusOK, a.namespaceEntity(ns))
+	orbFakeWriteError(w, http.StatusForbidden, "Forbidden.", "")
 }
 
 func (a *orbFakeAPI) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if status := a.failDeleteNamespaceStatus; status != 0 {
-		orbFakeWriteError(w, status, "Forbidden.", "")
-
-		return
-	}
-
-	id := r.PathValue("id")
-	if _, ok := a.namespaces[id]; !ok {
+	if _, ok := a.namespaces[r.PathValue("id")]; !ok {
 		orbFakeWriteError(w, http.StatusNotFound, "Not Found", "namespace not found")
 
 		return
 	}
 
-	delete(a.namespaces, id)
-	w.WriteHeader(http.StatusNoContent)
+	orbFakeWriteError(w, http.StatusForbidden, "Forbidden.", "")
 }
 
 // --- orbs ---

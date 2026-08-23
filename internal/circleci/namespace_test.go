@@ -119,58 +119,9 @@ func TestCreateNamespaceSendsFlatBody(t *testing.T) {
 	}
 }
 
-// TestRenameNamespace is a [FAKE] test of the request/response mechanics
-// only: it proves the client sends the right verb, path and body and decodes
-// a 200 correctly. It is not evidence that a real rename ever answers 200 —
-// see RenameNamespace's doc comment for the [NET] finding that it does not.
-func TestRenameNamespace(t *testing.T) {
-	t.Parallel()
-
-	client, rec := newOrbClient(t,
-		orbJSON(`{"data":{"id":"11111111-1111-1111-1111-111111111111","attributes":{"name":"acme-two"}}}`))
-
-	ns, err := client.RenameNamespace(context.Background(), "11111111-1111-1111-1111-111111111111", "acme-two")
-	if err != nil {
-		t.Fatalf("RenameNamespace returned error: %v", err)
-	}
-
-	got := rec.last(t)
-	if got.method != http.MethodPost {
-		t.Errorf("method = %q, want POST", got.method)
-	}
-	if want := "/api/v3/namespaces/11111111-1111-1111-1111-111111111111/rename"; got.path != want {
-		t.Errorf("path = %q, want %q", got.path, want)
-	}
-	if want := `{"name":"acme-two"}`; got.body != want {
-		t.Errorf("body = %s, want %s", got.body, want)
-	}
-
-	// Renaming keeps the id: it is an update, not a replacement.
-	if ns.ID != "11111111-1111-1111-1111-111111111111" {
-		t.Errorf("id = %q, want it unchanged", ns.ID)
-	}
-	if ns.Name != "acme-two" {
-		t.Errorf("name = %q, want %q", ns.Name, "acme-two")
-	}
-}
-
-// TestDeleteNamespace is a [FAKE] test of the request mechanics only, same
-// caveat as TestRenameNamespace: see DeleteNamespace's doc comment for the
-// [NET] finding that a real delete answers 403, not 204.
-func TestDeleteNamespace(t *testing.T) {
-	t.Parallel()
-
-	client, rec := newOrbClient(t, orbStatus(http.StatusNoContent, ``))
-
-	if err := client.DeleteNamespace(context.Background(), "11111111-1111-1111-1111-111111111111"); err != nil {
-		t.Fatalf("DeleteNamespace returned error: %v", err)
-	}
-
-	got := rec.last(t)
-	if got.method != http.MethodDelete {
-		t.Errorf("method = %q, want DELETE", got.method)
-	}
-	if want := "/api/v3/namespaces/11111111-1111-1111-1111-111111111111"; got.path != want {
-		t.Errorf("path = %q, want %q", got.path, want)
-	}
-}
+// There is no TestRenameNamespace or TestDeleteNamespace: this client
+// exposes no RenameNamespace or DeleteNamespace method. See Namespace's doc
+// comment for the [NET] measurement (both routes answer 403 Forbidden
+// unconditionally) and internal/provider/orb_namespace_resource.go for what
+// the resource does instead — block a rename at plan time, and let a destroy
+// remove Terraform's own state without calling the API at all.
