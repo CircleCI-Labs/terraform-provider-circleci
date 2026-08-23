@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // Trigger routes.
@@ -198,14 +199,40 @@ type TriggerSchedule struct {
 	AttributionActor TriggerAttributionActor `json:"attribution_actor"`
 }
 
+// TriggerWebhookURLRedacted is the literal text a webhook trigger's
+// event_source.webhook.url carries in its secret query parameter's VALUE, in
+// place of the real secret, on every route except the one that mints it —
+// e.g. "https://.../secret=**REDACTED**". The URL's host and path are real
+// either way; only the secret parameter's value is replaced. GET and PATCH
+// both do this, even to the very token that had just created the trigger.
+// Confirmed against circleci.com 2026-08-22 (an earlier probe recorded here,
+// on 2026-08-21, said the whole field read back as this literal string
+// verbatim — that was imprecise: the query parameter's value is what does,
+// not the URL as a whole, which is why URLIsRedacted below checks for it as a
+// substring rather than by equality). See CreateTrigger's doc comment for the
+// full transcript. Only a create response's URL ever carries the real secret.
+const TriggerWebhookURLRedacted = "**REDACTED**"
+
 // TriggerWebhook is the inbound endpoint of a "webhook" provider trigger.
 //
 // URL contains the trigger's secret as a query parameter when the caller is
-// allowed to see it, and the literal string "**REDACTED**" in place of the
-// secret otherwise, so it must be treated as sensitive.
+// allowed to see it, and TriggerWebhookURLRedacted in the secret parameter's
+// place otherwise, so it must be treated as sensitive.
 type TriggerWebhook struct {
 	URL    string `json:"url"`
 	Sender string `json:"sender"`
+}
+
+// URLIsRedacted reports whether URL carries the placeholder every read
+// answers with in place of the real secret, rather than the real signed URL a
+// create response carries. It is a substring check, not an equality check:
+// URL's host and path stay real even when the secret is redacted, so the
+// placeholder never occupies the whole field — only its query parameter's
+// value does. A caller that wants to keep a previously-seen real URL in
+// place — rather than overwriting it with one whose secret is redacted —
+// should check this first.
+func (w TriggerWebhook) URLIsRedacted() bool {
+	return strings.Contains(w.URL, TriggerWebhookURLRedacted)
 }
 
 // TriggerEventSource says what makes a trigger fire. Exactly one of Repo,
@@ -378,9 +405,11 @@ type CreateTriggerInput struct {
 // measured.
 //
 // The read-back is not interchangeable with this response in the other
-// direction either: GET and PATCH both return event_source.webhook.url as the
-// literal "**REDACTED**" (observed above with the creating token), while this
-// response carries the real signed URL.
+// direction either: GET and PATCH both return event_source.webhook.url with
+// its secret query parameter's value replaced by TriggerWebhookURLRedacted
+// (observed above with the creating token, and reconfirmed 2026-08-22 against
+// a live acceptance run — see URLIsRedacted's own comment for the correction
+// that run produced), while this response carries the real signed URL.
 //
 // CircleCI Cloud only. See triggersRoute.
 func (c *Client) CreateTrigger(ctx context.Context, projectID, pipelineDefinitionID string, input CreateTriggerInput) (*Trigger, error) {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-testing/compare"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
@@ -100,6 +101,16 @@ func TestAccTriggerResourceWebhook(t *testing.T) {
 	projectID := testProjectID(t)
 	pipelineID := testPipelineID(t)
 	webhookTriggerName := rand.Text()
+
+	// GET redacts event_source_web_hook_url on the real API (see the
+	// attribute's own MarkdownDescription in trigger_resource.go), so the step
+	// below that re-applies the identical configuration forces a real refresh
+	// through that redaction — proving, against the live API rather than only
+	// TestTriggerResourceUnit_WebhookURLSurvivesRefreshAndUpdate's fake, that an
+	// ordinary refresh does not clobber the real, working URL captured at
+	// create time with the placeholder.
+	urlSurvivesRefresh := statecheck.CompareValue(compare.ValuesSame())
+
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -118,6 +129,21 @@ func TestAccTriggerResourceWebhook(t *testing.T) {
 						tfjsonpath.New("pipeline_id"),
 						knownvalue.StringExact(pipelineID),
 					),
+					urlSurvivesRefresh.AddStateValue(
+						"circleci_trigger.test_trigger_webhook",
+						tfjsonpath.New("event_source_web_hook_url"),
+					),
+				},
+			},
+			// Refresh testing: an identical re-apply, so the only thing that
+			// happens between the two urlSurvivesRefresh checks is a real GET.
+			{
+				Config: testAccTriggerResourceWebhookConfig(webhookTriggerName, projectID, pipelineID, nil),
+				ConfigStateChecks: []statecheck.StateCheck{
+					urlSurvivesRefresh.AddStateValue(
+						"circleci_trigger.test_trigger_webhook",
+						tfjsonpath.New("event_source_web_hook_url"),
+					),
 				},
 			},
 			// ImportState testing
@@ -125,16 +151,11 @@ func TestAccTriggerResourceWebhook(t *testing.T) {
 				ResourceName:      "circleci_trigger.test_trigger_webhook",
 				ImportState:       true,
 				ImportStateVerify: true,
-				// event_source_web_hook_url only: the same GET this step's Read runs
-				// against the real API can answer with the literal string
-				// "**REDACTED**" in place of the secret when the token importing is
-				// not the one allowed to see it (see the attribute's own
-				// MarkdownDescription in trigger_resource.go). The fake this
-				// provider's other webhook trigger test runs against
-				// (TestTriggerResourceUnit_WebhookCRUD) always returns the real
-				// value regardless of token, so it carries no such ignore — this one
-				// is a hedge against real API behaviour the fake cannot reproduce,
-				// not evidence of a client-side bug.
+				// event_source_web_hook_url only: a fresh import has no prior state to
+				// preserve the real URL in, and GET always redacts it (proved by the
+				// refresh step above, against this same live API) — so import leaves
+				// this attribute null rather than the value the earlier steps hold.
+				// See the attribute's own MarkdownDescription in trigger_resource.go.
 				ImportStateVerifyIgnore: []string{"event_source_web_hook_url"},
 				ImportStateIdFunc:       triggerAccImportID("circleci_trigger.test_trigger_webhook"),
 			},
