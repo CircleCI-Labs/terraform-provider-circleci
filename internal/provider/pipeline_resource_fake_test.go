@@ -205,16 +205,32 @@ func resolveFullName(externalID string) string {
 	return "acme-org/repo-" + externalID
 }
 
+// circleciConfigSourceAllowedFilePathPrefix is the one file_path namespace the
+// real create endpoint accepts for config_source.provider "circleci": [NET]
+// confirmed by creating (and deleting) real definitions against two CircleCI
+// Cloud organizations. A path under this prefix (with something after it)
+// succeeds; every other path — a customer's ".circleci/config.yml", a bare
+// "config.yml", a nested path outside the prefix, or the prefix alone with
+// nothing after it — answers 400 "Invalid config file path.", and an empty
+// file_path answers 400 "Unable to parse JSON body." This is CircleCI's own
+// internal task-config namespace (visible on pre-existing definitions in
+// CircleCI's own production projects), not a path any customer configuration
+// would plausibly use — which is why circleci.PipelineConfigSourceProviders no
+// longer offers "circleci" as something to create.
+const circleciConfigSourceAllowedFilePathPrefix = "circleci-agents/"
+
 // rejectInvalidPipelineDefinitionCreate answers HTTP 400 for the create bodies
 // the real API refuses, and reports whether it did.
-//
-// Both rules are enforced by the API's config_source oneOf schema, which runs
-// ahead of the handler:
 //
 //   - a repo on the "circleci" branch of config_source. That branch is
 //     `additionalProperties: false` over only provider and file_path, so a repo
 //     there does not fall back to the VCS branch either — it fails the oneOf
 //     outright, reported as a schema-validation error naming the offending path.
+//     Enforced ahead of the file_path check below: a "circleci" body with both
+//     a repo and a disallowed file_path still gets the oneOf error, because the
+//     real API validates its schema before running any handler logic.
+//   - a "circleci" config source whose file_path is not under
+//     circleciConfigSourceAllowedFilePathPrefix.
 //   - a repository external id that is not a number, for any provider that takes a
 //     repository at all (config_source's github_app/github_server, and
 //     checkout_source, which always takes one). Confirmed at the client layer by
@@ -237,6 +253,15 @@ func rejectInvalidPipelineDefinitionCreate(w http.ResponseWriter, body map[strin
 			return fail(`OpenAPI validation error: request body has an error: doesn't match schema ` +
 				`./schemas.yaml#/createPipelineDefinitionRequest: Error at "/config_source/repo": ` +
 				`unexpected property`)
+		}
+
+		filePath, _ := configSource["file_path"].(string)
+		if filePath == "" {
+			return fail("Unable to parse JSON body.")
+		}
+		if !strings.HasPrefix(filePath, circleciConfigSourceAllowedFilePathPrefix) ||
+			filePath == circleciConfigSourceAllowedFilePathPrefix {
+			return fail("Invalid config file path.")
 		}
 	} else if hasConfigRepo {
 		if !isNumericExternalID(configRepo["external_id"]) {
@@ -451,6 +476,17 @@ func (a *fakePipelineDefAPI) delete(w http.ResponseWriter, projectID, pipelineID
 	_, _ = io.WriteString(w, `{"message":"Pipeline definition deleted."}`)
 }
 
+// seed inserts a definition record directly, bypassing create() so a test can
+// control its id and created_at exactly — the shape ImportState-refusal tests
+// need, since create() always sets created_at and never generates a v5 id.
+func (a *fakePipelineDefAPI) seed(projectID string, record map[string]any) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	id, _ := record["id"].(string)
+	a.definitions[projectID+"/"+id] = record
+}
+
 func (a *fakePipelineDefAPI) setMissing(projectID, pipelineID string, missing bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -646,6 +682,86 @@ func TestPipelineResourceUnit_CRUD(t *testing.T) {
 	updateCheckoutRepo, _ := updateCheckoutSource["repo"].(map[string]any)
 	if updateCheckoutRepo["external_id"] != "100003" {
 		t.Errorf("update checkout_source.repo.external_id = %v, want 100003", updateCheckoutRepo["external_id"])
+	}
+}
+
+// TestPipelineResourceUnit_RefusesToImportImplicitDefinition proves the fix for
+// the trap the decision this pins is about: an OAuth-based project's implicit
+// pipeline definition answers GET with 200 — it looks importable — but [NET]
+// PATCH answers 400 and DELETE answers 500 and the definition survives, so
+// importing one would build a resource `terraform destroy` can never actually
+// destroy. The seeded record here has no created_at and a version-5 id, the
+// shape circleci.PipelineDefinitionIsImplicit was measured against; see its doc
+// comment.
+func TestPipelineResourceUnit_RefusesToImportImplicitDefinition(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	const implicitID = "99999999-9999-5999-8999-999999999999"
+
+	api.seed(fakePipelineProjectID, map[string]any{
+		"id":          implicitID,
+		"name":        "auto-runner",
+		"description": "Implicit pipeline definition associated with an OAuth-based project.",
+		// created_at deliberately absent.
+		"config_source": map[string]any{
+			"provider":  "github_oauth",
+			"file_path": ".circleci/config.yml",
+			"repo": map[string]any{
+				"full_name": "acme-org/auto-runner", "external_id": "100001",
+			},
+		},
+		"checkout_source": map[string]any{
+			"provider": "github_oauth",
+			"repo": map[string]any{
+				"full_name": "acme-org/auto-runner", "external_id": "100001",
+			},
+		},
+	})
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// A real resource must exist at this address for Terraform to know
+				// which resource type to import into; its own id is irrelevant to
+				// the import attempt in the next step.
+				Config: pipelineConfig(host, `
+  config_source_provider           = "github_app"
+  config_source_file_path          = ".circleci/config.yml"
+  config_source_repo_external_id   = "100002"
+  checkout_source_provider         = "github_app"
+  checkout_source_repo_external_id = "100003"
+`),
+			},
+			{
+				ResourceName:  "circleci_pipeline_definition.test",
+				ImportState:   true,
+				ImportStateId: fakePipelineProjectID + "/" + implicitID,
+				ExpectError: regexp.MustCompile(
+					`(?s)Cannot Import Implicit Pipeline Definition.*OAuth-based.*cannot be managed`,
+				),
+			},
+		},
+	})
+
+	// The step 1 resource is real and gets torn down by the test framework's own
+	// cleanup regardless of what step 2 does, so only requests naming the
+	// implicit definition's own path are relevant here.
+	implicitPath := "/api/v2/projects/" + fakePipelineProjectID + "/pipeline-definitions/" + implicitID
+	sawGet := false
+	for _, req := range api.recorded() {
+		if req.Path != implicitPath {
+			continue
+		}
+		switch req.Method {
+		case "GET":
+			sawGet = true
+		case "PATCH", "DELETE":
+			t.Errorf("a refused import must not touch the implicit definition beyond GET, got %s %s", req.Method, req.Path)
+		}
+	}
+	if !sawGet {
+		t.Errorf("expected a GET for the implicit definition before refusing, requests: %+v", api.recorded())
 	}
 }
 
@@ -1114,6 +1230,26 @@ func TestFakePipelineDefAPIRefusesWhatTheRealAPIRefuses(t *testing.T) {
 			}`,
 			wantMessage: "bad request",
 		},
+		// circleci.PipelineConfigSourceProviders no longer offers "circleci" for
+		// this exact reason: the create endpoint refuses it for every
+		// customer-plausible file_path, not only the one the resource's schema
+		// used to let through with no repo.
+		"a customer-plausible file path for a circleci-hosted config source": {
+			body: `{
+				"name": "pipe-1", "description": "d",
+				"config_source": {"provider": "circleci", "file_path": ".circleci/config.yml"},
+				"checkout_source": {"provider": "github_app", "repo": {"external_id": "123456"}}
+			}`,
+			wantMessage: "Invalid config file path.",
+		},
+		"a circleci-hosted config source with no file path": {
+			body: `{
+				"name": "pipe-1", "description": "d",
+				"config_source": {"provider": "circleci"},
+				"checkout_source": {"provider": "github_app", "repo": {"external_id": "123456"}}
+			}`,
+			wantMessage: "Unable to parse JSON body.",
+		},
 	}
 
 	for name, testCase := range cases {
@@ -1131,6 +1267,42 @@ func TestFakePipelineDefAPIRefusesWhatTheRealAPIRefuses(t *testing.T) {
 
 	if stored := len(api.definitions); stored != 0 {
 		t.Errorf("the fake stored %d definitions, want 0: a rejected request must not create one", stored)
+	}
+}
+
+// TestFakePipelineDefAPIAcceptsCircleCIConfigSourceUnderReservedPrefix pins the
+// one file_path shape the real create endpoint accepts for config_source.provider
+// "circleci" — see circleciConfigSourceAllowedFilePathPrefix — so the fake does not
+// drift into rejecting everything with that provider, which would be just as
+// wrong as the old fake accepting everything with it. This is CircleCI's own
+// internal namespace; nothing in circleci_pipeline_definition's schema can reach
+// it, since circleci.PipelineConfigSourceProviders no longer offers "circleci".
+func TestFakePipelineDefAPIAcceptsCircleCIConfigSourceUnderReservedPrefix(t *testing.T) {
+	api, host := newFakePipelineDefAPI(t)
+
+	createPath := "/api/v2/projects/" + fakePipelineProjectID + "/pipeline-definitions"
+
+	got := postJSON(t, host+createPath, `{
+		"name": "internal-task", "description": "d",
+		"config_source": {"provider": "circleci",
+		                   "file_path": "circleci-agents/configs/example/config.yml"},
+		"checkout_source": {"provider": "github_app", "repo": {"external_id": "123456"}}
+	}`)
+
+	if got.status != http.StatusOK {
+		t.Fatalf("answered %d, want 200: %s", got.status, got.body)
+	}
+
+	configSource, _ := got.decoded["config_source"].(map[string]any)
+	if configSource["provider"] != "circleci" {
+		t.Errorf("config_source.provider = %v, want circleci", configSource["provider"])
+	}
+	if _, present := configSource["repo"]; present {
+		t.Errorf("config_source carries repo = %v for a circleci-hosted config source, want it omitted", configSource["repo"])
+	}
+
+	if stored := len(api.definitions); stored != 1 {
+		t.Errorf("the fake stored %d definitions, want 1", stored)
 	}
 }
 

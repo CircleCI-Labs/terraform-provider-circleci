@@ -225,9 +225,19 @@ func TestCreatePipelineDefinitionRequest(t *testing.T) {
 	}
 }
 
-// TestCreatePipelineDefinitionRequestCircleCIConfigSource pins the fix for a
-// pipeline definition whose configuration is hosted by CircleCI itself rather than
-// a VCS repository.
+// TestCreatePipelineDefinitionRequestCircleCIConfigSource pins the client's wire
+// shape for config_source.provider "circleci" — that it omits repo entirely
+// rather than sending one with an empty external_id — against a stub that
+// answers whatever it is given. It does NOT claim this creates successfully
+// against the real API: [NET] measurement found the create endpoint accepts
+// "circleci" only when file_path starts with its own internal
+// "circleci-agents/" prefix, rejecting every customer-plausible path with 400
+// "Invalid config file path." (see PipelineConfigSourceProviderCircleCI). That is
+// exactly why "circleci" is not in PipelineConfigSourceProviders, and this test
+// exists only to keep the marshaling of the "circleci" branch — which the API's
+// schema still documents, and which existing CircleCI-created definitions still
+// carry — from silently regressing to sending a repo, since nothing else in this
+// package exercises that branch once the provider stops offering it.
 //
 // The API's config_source oneOf has a "circleci" branch that is
 // `additionalProperties: false` over only provider and file_path — no repo
@@ -562,6 +572,62 @@ func TestDeletePipelineDefinitionStillToleratesAbsence(t *testing.T) {
 	err := client.DeletePipelineDefinition(context.Background(), testDefinitionProjectID, "nope")
 	if !circleci.IsNotFound(err) {
 		t.Errorf("DeletePipelineDefinition error = %v, want a not found error", err)
+	}
+}
+
+// TestPipelineDefinitionIsImplicit tables the two structural signals
+// PipelineDefinitionIsImplicit checks. The ids below are illustrative, not real
+// definitions — v4/v5 is set on the third hyphen-separated group's first
+// character, matching the shape [NET] observations actually had (e.g. a real
+// implicit id's third group was "5058"; a real explicit one's was "47e9").
+func TestPipelineDefinitionIsImplicit(t *testing.T) {
+	t.Parallel()
+
+	const (
+		v4ID = "11111111-1111-4111-8111-111111111111" // random-looking (version 4)
+		v5ID = "22222222-2222-5222-8222-222222222222" // name-based (version 5)
+	)
+
+	cases := map[string]struct {
+		definition circleci.PipelineDefinition
+		want       bool
+	}{
+		"created_at absent and a v5 id: the shape every implicit definition observed had": {
+			definition: circleci.PipelineDefinition{ID: v5ID, CreatedAt: ""},
+			want:       true,
+		},
+		"created_at present and a v4 id: the shape every explicit definition observed had": {
+			definition: circleci.PipelineDefinition{ID: v4ID, CreatedAt: "2024-05-01T10:00:00Z"},
+			want:       false,
+		},
+		// Neither signal was ever seen alone in this project's samples, but the
+		// function is defined to refuse on either firing — see its doc comment on
+		// why a false refusal is the safer of the two possible mistakes here.
+		"created_at present but a v5 id": {
+			definition: circleci.PipelineDefinition{ID: v5ID, CreatedAt: "2024-05-01T10:00:00Z"},
+			want:       true,
+		},
+		"created_at absent but a v4 id": {
+			definition: circleci.PipelineDefinition{ID: v4ID, CreatedAt: ""},
+			want:       true,
+		},
+		// An id the API never actually sends malformed, but PipelineDefinitionIsImplicit
+		// must not panic or misreport on one: the uuid check should simply not fire,
+		// leaving the created_at check as the only signal.
+		"created_at present and an unparseable id": {
+			definition: circleci.PipelineDefinition{ID: "not-a-uuid", CreatedAt: "2024-05-01T10:00:00Z"},
+			want:       false,
+		},
+	}
+
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := circleci.PipelineDefinitionIsImplicit(testCase.definition); got != testCase.want {
+				t.Errorf("PipelineDefinitionIsImplicit(%+v) = %v, want %v", testCase.definition, got, testCase.want)
+			}
+		})
 	}
 }
 

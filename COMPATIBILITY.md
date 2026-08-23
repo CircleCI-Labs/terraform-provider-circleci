@@ -129,18 +129,23 @@ what "group" means — see "CircleCI has two unrelated concepts called a group" 
 ### GitHub OAuth, GitLab and Bitbucket Cloud have no stored pipeline definition
 
 For these three integrations there is no stored pipeline-definition entity: CircleCI
-generates a synthetic UUID from the project ID instead. `circleci_pipeline_definition`
-can read that synthetic definition but never create or update it.
+synthesizes an *implicit* definition from the project id instead — deterministically,
+so the same id comes back on every read. `GET` answers 200 for it, so it reads like a
+normal definition, but `PATCH` and `DELETE` both fail on it (400 and 500
+respectively, and the definition survives the DELETE). `circleci_pipeline_definition`
+therefore refuses to import one at all, with a diagnostic explaining why, rather than
+let a practitioner build a state file around a resource this provider can never update
+or destroy.
 
 ### The getting started guide skips the pipeline definition step where there is nothing to create
 
 Framed for the getting-started guide specifically: GitHub OAuth, GitLab and Bitbucket
 Cloud projects have no stored pipeline-definition object for `circleci_pipeline_definition`
-to create — CircleCI derives a synthetic one from the project's ID, the same fact as
+to create — CircleCI derives an implicit one from the project's ID, the same fact as
 "GitHub OAuth, GitLab and Bitbucket Cloud have no stored pipeline definition" above. The
 project builds from the `.circleci/config.yml` in the branch that was pushed, exactly as
-it did before Terraform was involved, and `circleci_pipeline_definition` can still read
-the synthetic definition.
+it did before Terraform was involved. There is nothing to import here either, by design
+— see that section for why.
 
 ### GitHub OAuth triggers use the same endpoint under a narrower contract
 

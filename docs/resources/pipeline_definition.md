@@ -24,16 +24,17 @@ covers the move.
 | **CircleCI Cloud** | Yes |
 | **CircleCI Server** | No — and **not** for the v3 reason that covers orbs and organization settings. `pipeline-definitions` is a **v2** path, but a Server installation's gateway does not forward it to the backend that owns it. v3 arriving on Server would therefore not make this work. `deployment = "server"` is refused at plan time. Define workflows in `.circleci/config.yml` on Server instead. |
 | **API** | `GET` and `POST /api/v2/projects/{project_id}/pipeline-definitions`, `GET`, `PATCH` and `DELETE .../pipeline-definitions/{id}` |
-| **Organization type** | Any for **read**. **Create, update and delete require a GitHub App or GitHub Enterprise Server config source**: on a pure GitHub OAuth, GitLab or Bitbucket Cloud organization CircleCI synthesises a definition from the project id rather than storing one, so there is nothing to write. A GitHub OAuth organization that *also* has a GitHub App installation is the exception — its projects still take `gh/<org>` slugs, but an explicit `github_app` definition creates, updates and deletes there exactly as it does on a GitHub App organization, alongside the implicit one CircleCI keeps for OAuth. See the compatibility table in the README. |
+| **Organization type** | Any for **read**. **Create, update and delete require a GitHub App or GitHub Enterprise Server config source**: on a pure GitHub OAuth, GitLab or Bitbucket Cloud organization CircleCI synthesises an *implicit* definition from the project id rather than storing one, so there is nothing to write — and, per the warning below, nothing importable either. A GitHub OAuth organization that *also* has a GitHub App installation is the exception: its projects still take `gh/<org>` slugs, but an explicit `github_app` definition creates, updates and deletes there exactly as it does on a GitHub App organization, alongside the implicit one CircleCI keeps for OAuth. See the compatibility table in the README. |
 | **Token** | A personal API token belonging to an organization admin. |
 
+!> **Do not import an OAuth-based project's implicit pipeline definition.** `GET`
+answers 200 for it, so `terraform import` appears to succeed — but it can never be
+updated (`PATCH` answers 400) or destroyed (`DELETE` answers 500 and the definition
+survives). This provider detects it and refuses the import with an explanatory
+error; if you hit that error, there is no explicit definition to manage here, and
+none is needed — CircleCI runs the project's `.circleci/config.yml` without one.
+
 ## Example Usage
-
-`config_source_provider` has a second branch beyond the two VCS-backed ones: a
-CircleCI-hosted configuration, with no repository at all. Each is shown separately
-below.
-
-### VCS-backed configuration
 
 ```terraform
 # A definition is keyed by project UUID, which is not something CircleCI shows you
@@ -76,34 +77,41 @@ moved {
 }
 ```
 
-### CircleCI-hosted configuration
+### GitHub Enterprise Server configuration
 
 ```terraform
-# A definition whose configuration is hosted by CircleCI itself, rather than read
-# from a VCS repository. config_source_repo_external_id must be omitted here — the
-# API rejects a repo on this branch outright — but checkout_source still needs a
-# real repository: checkout_source has no CircleCI-hosted option, so a definition
-# always checks out code from somewhere even when its configuration does not come
-# from a repository.
-data "circleci_project" "circleci_hosted_example" {
-  slug = "github/acme/api"
+# The second accepted config_source_provider / checkout_source_provider value:
+# GitHub Enterprise Server, alongside the github_app example above. It behaves
+# identically — same required attributes — but its repository ids belong to your
+# own GitHub Enterprise Server installation rather than to github.com, so they
+# are small integers allocated per installation, not github_app's ids, and the
+# two cannot be mixed.
+#
+# There used to be a third config_source_provider here: "circleci", a
+# CircleCI-hosted configuration with no repository at all. It is not an accepted
+# value — every create attempt against a customer-plausible file path answers
+# HTTP 400 "Invalid config file path." — so there is no working example to show.
+data "circleci_project" "github_server_example" {
+  slug = "github/acme-internal/payments"
 }
 
-data "circleci_github_app_repository" "circleci_hosted_example" {
-  org_id    = data.circleci_project.circleci_hosted_example.org_id
-  full_name = "acme/api"
+locals {
+  # The repository id on the GitHub Server installation. These are small
+  # integers allocated per installation, not github.com ids.
+  github_server_example_repo_external_id = "2259"
 }
 
-resource "circleci_pipeline_definition" "circleci_hosted_example" {
-  project_id  = data.circleci_project.circleci_hosted_example.id
-  name        = "my-circleci-hosted-pipeline"
-  description = "Pipeline whose configuration is hosted by CircleCI"
+resource "circleci_pipeline_definition" "github_server_example" {
+  project_id  = data.circleci_project.github_server_example.id
+  name        = "build"
+  description = "Build and test on every push"
 
-  config_source_provider  = "circleci"
-  config_source_file_path = ".circleci/some-pipeline.yml"
+  config_source_provider         = "github_server"
+  config_source_file_path        = ".circleci/config.yml"
+  config_source_repo_external_id = local.github_server_example_repo_external_id
 
-  checkout_source_provider         = "github_app"
-  checkout_source_repo_external_id = data.circleci_github_app_repository.circleci_hosted_example.external_id
+  checkout_source_provider         = "github_server"
+  checkout_source_repo_external_id = local.github_server_example_repo_external_id
 }
 ```
 
@@ -130,10 +138,12 @@ route, which reports correctly on every integration, before concluding anything:
 
 ### Required
 
-- `checkout_source_provider` (String) The VCS provider for the pipeline's checkout source: `github_app` or `github_server`. Unlike config_source_provider, this has no `circleci` (repo-less) option: the API requires a real repository unconditionally, even when the pipeline's configuration is hosted by CircleCI itself — a definition always checks out code from somewhere.
+- `checkout_source_provider` (String) The VCS provider for the pipeline's checkout source: `github_app` or `github_server`. checkout_source has no repo-less option at all — the API requires a real repository unconditionally, even for a definition whose configuration is hosted by CircleCI itself — so, unlike config_source_provider, there is nothing here that was ever removed.
 - `checkout_source_repo_external_id` (String) The external ID of the repository to check out code from: the VCS provider's own numeric repository id, not its name. Always required — checkout_source has no repo-less provider.
-- `config_source_file_path` (String) The path to the pipeline configuration file. Required for every config_source_provider, including `circleci`, which still requires `file_path` even though it has no repository to be relative to.
-- `config_source_provider` (String) Where the pipeline's configuration is read from: `github_app`, `github_server` or `circleci`. `github_app` and `github_server` read configuration from a VCS repository, named by `config_source_repo_external_id`. `circleci` is a CircleCI-hosted configuration: there is no repository, and `config_source_repo_external_id` must be omitted — the API rejects a repo on this branch outright rather than ignoring it.
+- `config_source_file_path` (String) The path to the pipeline configuration file, relative to the repository named by `config_source_repo_external_id`. Required for every accepted config_source_provider.
+- `config_source_provider` (String) Where the pipeline's configuration is read from: `github_app` or `github_server`, both of which read configuration from a VCS repository named by `config_source_repo_external_id`.
+
+~> **`circleci` is not an accepted value here.** It names a CircleCI-internal, repo-less configuration source that this provider has never been able to create: the create endpoint 400s on it for every file path a customer configuration would plausibly use. A configuration written before this restriction was made explicit gets a plan-time error explaining why, rather than a plain "must be one of".
 
 ~> **Changing this value forces a new resource to be created.** The update endpoint's `config_source` accepts only `file_path`; provider is immutable after creation.
 - `description` (String) A description of the pipeline.
@@ -142,20 +152,22 @@ route, which reports correctly on every integration, before concluding anything:
 
 ### Optional
 
-- `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration: the VCS provider's own numeric repository id, not its name. Required when config_source_provider is `github_app` or `github_server`; must be omitted when it is `circleci`, which has no repository.
+- `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration: the VCS provider's own numeric repository id, not its name. Required for both accepted config_source_provider values.
 
 ~> **Changing this value forces a new resource to be created.**
 
 ### Read-Only
 
 - `checkout_source_repo_full_name` (String) The full name of the repository used for code checkout.
-- `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration. Empty when config_source_provider is `circleci`, which has no repository.
+- `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration.
 - `created_at` (String) The timestamp when the pipeline was created. Empty for an **implicit** pipeline definition — one CircleCI creates automatically for an OAuth-backed project rather than through this resource's create route — which the API never assigns a creation timestamp to. This resource can only create explicit definitions (always timestamped), but an implicit one can still end up here through `terraform import`, since the singular pipeline-definition route serves it.
 - `id` (String) The unique identifier of the pipeline.
 
 ## Import
 
-Import is supported using `project_id/pipeline_definition_id`:
+Import is supported using `project_id/pipeline_definition_id`, for an explicit
+definition — one created through this resource or the CircleCI UI on a GitHub App
+or GitHub Enterprise Server project:
 
 ```shell
 terraform import circleci_pipeline_definition.example "<project_id>/<pipeline_definition_id>"

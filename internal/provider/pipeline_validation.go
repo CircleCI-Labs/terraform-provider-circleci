@@ -17,9 +17,12 @@ import (
 // Cross-attribute validation for `circleci_pipeline_definition`, run at plan time
 // rather than left to surface as an apply-time API error — the same reasoning as
 // trigger_validation.go, and for a schema that has the same shape of problem:
-// config_source_provider selects between two contracts (a VCS-backed one and a
-// repo-less "circleci" one), and no single attribute's own validator can express
-// what that selection requires or forbids of another attribute.
+// config_source_provider selects a contract (each accepted value needs a
+// repository) that no single attribute's own validator can express as a
+// requirement on another attribute. It also carries the one value the schema's
+// own OneOf validator cannot explain: "circleci", removed from
+// circleci.PipelineConfigSourceProviders because the create endpoint has never
+// accepted it for a customer-plausible file path.
 //
 // checkout_source has no such split: every checkout_source_provider needs a
 // repository (see circleci.PipelineCheckoutSourceProviders), so
@@ -72,8 +75,8 @@ func validatePipelineResourceConfig(config pipelineResourceModel, diags *diag.Di
 
 // validatePipelineConfigSource applies config_source_provider's split: a
 // github_app or github_server config source requires config_source_repo_external_id
-// (and it must be numeric); a circleci-hosted one forbids it outright, because the
-// API's config_source oneOf has no repo property at all on that branch.
+// (and it must be numeric); "circleci" is refused outright, with an explanatory
+// message, because circleci.PipelineConfigSourceProviders no longer offers it.
 func validatePipelineConfigSource(config pipelineResourceModel, diags *diag.Diagnostics) {
 	// Nothing below can be decided without knowing the provider. When it is
 	// unknown — set from a variable or another resource — Terraform re-plans once
@@ -84,30 +87,31 @@ func validatePipelineConfigSource(config pipelineResourceModel, diags *diag.Diag
 
 	provider := config.ConfigSourceProvider.ValueString()
 
-	if !circleci.PipelineConfigSourceProviderNeedsRepo(provider) {
-		// The "circleci" branch: a repo is not merely unneeded, it is rejected by the
-		// API outright. Presence is `!IsNull()` per trigger_validation.go's
-		// reasoning: an Optional attribute left out of the configuration is null
-		// here, and an unknown value is configured but unreadable, so it cannot be
-		// judged "present with a value" yet — but it is still configured, and this
-		// rule is about presence, not value, so unknown must be rejected too, or a
-		// repo id that resolves once applied would reach the API on the one branch
-		// that cannot accept it.
-		if !config.ConfigSourceRepoExternalId.IsNull() {
-			diags.AddAttributeError(
-				path.Root("config_source_repo_external_id"),
-				pipelineInvalidConfigSummary,
-				"CircleCI pipeline definition with config_source_provider \"circleci\" must not set "+
-					"config_source_repo_external_id: a circleci-hosted configuration has no repository, "+
-					"and the API rejects a repo on this branch outright rather than ignoring it",
-			)
-		}
+	if provider == circleci.PipelineConfigSourceProviderCircleCI {
+		// The schema's stringvalidator.OneOf already rejects this value with its
+		// own generic "must be one of" diagnostic (circleci.PipelineConfigSourceProviders
+		// no longer lists it) — this adds the explanation that message cannot carry,
+		// for the practitioner who already has config_source_provider = "circleci" in
+		// a configuration written before this restriction existed: it names a
+		// CircleCI-internal, repo-less configuration source that the create endpoint
+		// has never accepted for a customer-plausible file path (see
+		// circleci.PipelineConfigSourceProviderCircleCI), not a capability this
+		// release took away.
+		diags.AddAttributeError(
+			path.Root("config_source_provider"),
+			pipelineInvalidConfigSummary,
+			"CircleCI pipeline definition with config_source_provider \"circleci\" is not accepted: "+
+				"it names a CircleCI-internal, repo-less configuration source that the create endpoint "+
+				"rejects for any customer-plausible config_source_file_path (HTTP 400 \"Invalid config "+
+				"file path.\"). Use \"github_app\" or \"github_server\" instead, both of which require "+
+				"config_source_repo_external_id.",
+		)
 
 		return
 	}
 
-	// github_app or github_server: the same repository-id rule
-	// event_source_repo_external_id enforces for a trigger.
+	// github_app or github_server — the only two remaining values — need the same
+	// repository-id rule event_source_repo_external_id enforces for a trigger.
 	if config.ConfigSourceRepoExternalId.IsNull() ||
 		(!config.ConfigSourceRepoExternalId.IsUnknown() && config.ConfigSourceRepoExternalId.ValueString() == "") {
 		diags.AddAttributeError(

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"terraform-provider-circleci/internal/httpcl"
 )
 
@@ -99,33 +101,61 @@ const (
 	// PipelineConfigSourceProviderGitHubServer is a GitHub Enterprise Server
 	// installation.
 	PipelineConfigSourceProviderGitHubServer = "github_server"
-	// PipelineConfigSourceProviderCircleCI is a CircleCI-hosted configuration: the
-	// pipeline's configuration is not read from a VCS repository at all, so this is
-	// the one config_source provider with no repo.
+	// PipelineConfigSourceProviderCircleCI is a CircleCI-internal, repo-less
+	// configuration source: the pipeline's configuration is not read from a VCS
+	// repository at all, so this is the one config_source provider with no repo.
 	//
 	// The schema's "circleci" branch is `additionalProperties: false` and lists only
 	// `provider` and `file_path` (both `required`) — no `repo` property at all — so a
 	// repo on this branch fails the oneOf outright; it is not merely ignored.
+	//
+	// [NET] It is deliberately absent from PipelineConfigSourceProviders(): the create
+	// endpoint accepts it only when file_path starts with the literal prefix
+	// "circleci-agents/" — every other path, including every plausible customer
+	// config path tried (".circleci/config.yml", "config.yml", a made-up nested
+	// path), answers 400 "Invalid config file path.", and omitting file_path
+	// answers 400 "Unable to parse JSON body." Confirmed by creating (and cleaning
+	// up) real definitions against two CircleCI Cloud organizations. "circleci-agents/"
+	// is CircleCI's own internal task-config namespace — visible on pre-existing
+	// definitions in CircleCI's own production projects — not a path any customer
+	// pipeline would plausibly use, so in practice this branch has never been a
+	// usable capability for anyone outside CircleCI. See
+	// PipelineDefinitionIsImplicit for the unrelated (and much more commonly hit)
+	// "circleci" that shows up as an implicit definition's config_source_provider —
+	// spelled "github_oauth" there, never "circleci".
 	PipelineConfigSourceProviderCircleCI = "circleci"
 )
 
-// PipelineConfigSourceProviders returns every provider config_source_provider
-// accepts.
+// PipelineConfigSourceProviders returns every config_source_provider value this
+// provider will let a practitioner create or import.
 //
 // It exists so that the resource's schema validator, its attribute description and
 // this client cannot drift from one another — the same reason
 // TriggerEventSourceProviders exists.
+//
+// PipelineConfigSourceProviderCircleCI is deliberately excluded — see its doc
+// comment — even though the API still accepts it (for its own reserved path
+// prefix) and existing CircleCI-created definitions carry it. A configuration
+// that already has config_source_provider = "circleci" is rejected at plan time
+// with an explanatory diagnostic rather than the bare "must be one of" this list
+// would otherwise produce; see pipeline_validation.go.
 func PipelineConfigSourceProviders() []string {
 	return []string{
 		PipelineConfigSourceProviderGitHubApp,
 		PipelineConfigSourceProviderGitHubServer,
-		PipelineConfigSourceProviderCircleCI,
 	}
 }
 
 // PipelineConfigSourceProviderNeedsRepo reports whether a config_source provider
 // takes a repository. Every provider does except circleci, whose configuration is
 // hosted by CircleCI itself rather than checked out from anywhere.
+//
+// The resource's plan-time validation now refuses "circleci" before Create ever
+// runs (see pipeline_validation.go), so pipelineConfigSourceRepoInput's use of this
+// function is unreachable with "circleci" in practice. It stays: this describes a
+// real, still-current fact about the API's config_source oneOf, not a Terraform
+// policy, and pipelineConfigSourceRepoInput is the one place a caller building a
+// create body still needs to know it.
 func PipelineConfigSourceProviderNeedsRepo(provider string) bool {
 	return provider != PipelineConfigSourceProviderCircleCI
 }
@@ -177,6 +207,61 @@ type PipelineDefinition struct {
 	CreatedAt      string                 `json:"created_at"`
 	ConfigSource   PipelineConfigSource   `json:"config_source"`
 	CheckoutSource PipelineCheckoutSource `json:"checkout_source"`
+}
+
+// PipelineDefinitionIsImplicit reports whether d is the implicit pipeline
+// definition CircleCI synthesizes for an OAuth-based (github_oauth) project,
+// rather than one a practitioner created explicitly.
+//
+// This matters because GET answers 200 for an implicit definition — it is
+// importable in the sense that the API will hand one back — but PATCH and
+// DELETE both fail on it: [NET] PATCH answers 400 "Failed to update pipeline
+// definition.", and DELETE answers 500 "Internal server error" and the
+// definition survives. Importing one produces a Terraform resource that can
+// never be updated or destroyed; `terraform destroy` errors forever.
+//
+// There is no field the API documents as "this is implicit" — the description
+// text ("Implicit pipeline definition associated with an OAuth-based
+// project.") is the closest thing, but matching prose is not a contract, and
+// this needs to survive a wording change. Two structural signals were measured
+// instead, [NET] against real definitions on real CircleCI Cloud
+// organizations:
+//
+//   - created_at: absent on every implicit definition observed, present on
+//     every explicit one. 10 implicit samples across 9 organizations; 14
+//     explicit samples across 6 organizations, including explicit definitions
+//     on github_oauth-backed projects themselves (config_source_provider
+//     "github_app" or "circleci" alongside an implicit sibling reporting
+//     "github_oauth" on the very same project) — so this is not simply "the
+//     project's VCS type."
+//   - the id's RFC 4122 version nibble: 5 (name-based, deterministic) on every
+//     implicit definition observed, 4 (random) on every explicit one — the
+//     same 10-vs-14 samples. Consistent with an implicit definition being
+//     synthesized from the project on each read rather than stored: there is
+//     no row to give it a creation time or a random id.
+//
+// Neither signal is documented by CircleCI as a stable contract, and this
+// package's own comment on CreatedAt above notes the API omits it "for
+// definitions created before the timestamp was recorded" — a real explicit
+// definition old enough to predate that could fail the created_at check alone.
+// No such definition was found in this project's samples (the oldest explicit
+// one dated to 2024), but the samples are not exhaustive. This function
+// therefore treats a definition as implicit if EITHER signal fires, not only
+// if both agree: the two failure modes are not symmetric. A false refusal
+// here costs a practitioner a support ticket and a recoverable "try importing
+// it another way." A false acceptance would let `terraform import` build a
+// state file around a resource the API will never let this provider update or
+// destroy — the exact trap this function exists to close.
+func PipelineDefinitionIsImplicit(d PipelineDefinition) bool {
+	if d.CreatedAt == "" {
+		return true
+	}
+
+	if id, err := uuid.Parse(d.ID); err == nil && id.Version() == 5 {
+		return true
+	}
+
+	return false
 }
 
 // ListPipelineDefinitions returns every pipeline definition on a project.

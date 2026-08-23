@@ -68,10 +68,12 @@ route, which reports correctly on every integration, before concluding anything:
 
 ### Required
 
-- `checkout_source_provider` (String) The VCS provider for the pipeline's checkout source: `github_app` or `github_server`. Unlike config_source_provider, this has no `circleci` (repo-less) option: the API requires a real repository unconditionally, even when the pipeline's configuration is hosted by CircleCI itself — a definition always checks out code from somewhere.
+- `checkout_source_provider` (String) The VCS provider for the pipeline's checkout source: `github_app` or `github_server`. checkout_source has no repo-less option at all — the API requires a real repository unconditionally, even for a definition whose configuration is hosted by CircleCI itself — so, unlike config_source_provider, there is nothing here that was ever removed.
 - `checkout_source_repo_external_id` (String) The external ID of the repository to check out code from: the VCS provider's own numeric repository id, not its name. Always required — checkout_source has no repo-less provider.
-- `config_source_file_path` (String) The path to the pipeline configuration file. Required for every config_source_provider, including `circleci`, which still requires `file_path` even though it has no repository to be relative to.
-- `config_source_provider` (String) Where the pipeline's configuration is read from: `github_app`, `github_server` or `circleci`. `github_app` and `github_server` read configuration from a VCS repository, named by `config_source_repo_external_id`. `circleci` is a CircleCI-hosted configuration: there is no repository, and `config_source_repo_external_id` must be omitted — the API rejects a repo on this branch outright rather than ignoring it.
+- `config_source_file_path` (String) The path to the pipeline configuration file, relative to the repository named by `config_source_repo_external_id`. Required for every accepted config_source_provider.
+- `config_source_provider` (String) Where the pipeline's configuration is read from: `github_app` or `github_server`, both of which read configuration from a VCS repository named by `config_source_repo_external_id`.
+
+~> **`circleci` is not an accepted value here.** It names a CircleCI-internal, repo-less configuration source that this provider has never been able to create: the create endpoint 400s on it for every file path a customer configuration would plausibly use. A configuration written before this restriction was made explicit gets a plan-time error explaining why, rather than a plain "must be one of".
 
 ~> **Changing this value forces a new resource to be created.** The update endpoint's `config_source` accepts only `file_path`; provider is immutable after creation.
 - `description` (String) A description of the pipeline.
@@ -80,13 +82,13 @@ route, which reports correctly on every integration, before concluding anything:
 
 ### Optional
 
-- `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration: the VCS provider's own numeric repository id, not its name. Required when config_source_provider is `github_app` or `github_server`; must be omitted when it is `circleci`, which has no repository.
+- `config_source_repo_external_id` (String) The external ID of the repository containing the pipeline configuration: the VCS provider's own numeric repository id, not its name. Required for both accepted config_source_provider values.
 
 ~> **Changing this value forces a new resource to be created.**
 
 ### Read-Only
 
 - `checkout_source_repo_full_name` (String) The full name of the repository used for code checkout.
-- `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration. Empty when config_source_provider is `circleci`, which has no repository.
+- `config_source_repo_full_name` (String) The full name of the repository containing the pipeline configuration.
 - `created_at` (String) The timestamp when the pipeline was created. Empty for an **implicit** pipeline definition — one CircleCI creates automatically for an OAuth-backed project rather than through this resource's create route — which the API never assigns a creation timestamp to. This resource can only create explicit definitions (always timestamped), but an implicit one can still end up here through `terraform import`, since the singular pipeline-definition route serves it.
 - `id` (String) The unique identifier of the pipeline.
