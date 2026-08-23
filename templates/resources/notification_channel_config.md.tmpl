@@ -25,9 +25,14 @@ There is no way to address another user's channel configs through this API. `sco
 
 A `scope = "project"` config additionally requires `project_id`. `org_id` is required for both scopes: even a user-scoped config is tied to one organization.
 
-## Slack configs need an active integration
+## Slack configs and the notification integration
 
-A Slack channel config requires an active `circleci_notification_integrations` Slack installation for the organization, and `target` must be a channel ID the installed app can already post to — invite `@circleci` to the channel first. CircleCI resolves `channel_name` from `target` for a project-scoped Slack config; it stays null otherwise.
+CircleCI enforces this differently depending on `scope`, verified against the real API:
+
+- **`scope = "project"`**: requires an active `circleci_notification_integrations` Slack installation for the organization. Creating one with none installed is rejected outright — a 404, not a validation error naming the missing integration.
+- **`scope = "user"`**: CircleCI does **not** check this at all. A user-scoped Slack config is accepted with no Slack integration installed for the organization, and even with a `target` that is not a real channel ID — there is no server-side validation to reject it. This provider adds a same-apply `Warning` diagnostic in that situation, because CircleCI's own response gives no other sign that the config it just accepted cannot deliver anything yet.
+
+Either way, once an integration exists, `target` must be a channel ID the installed app can already post to — invite `@circleci` to the channel first. CircleCI resolves `channel_name` from `target` for a project-scoped Slack config; it stays null otherwise.
 
 ## Example Usage
 

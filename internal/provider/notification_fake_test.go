@@ -305,6 +305,22 @@ func (a *notificationFakeAPI) createChannelConfig(w http.ResponseWriter, r *http
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// [NET] measured, and the asymmetry this whole family's write path was
+	// found to have: a project-scoped Slack channel config is rejected
+	// outright when the organization has no active Slack integration
+	// installed -- the real API answers exactly this 404, not a 400 naming
+	// the missing integration -- while a user-scoped one (below, no check at
+	// all) is accepted regardless, even naming a channel ID CircleCI never
+	// validated. See notificationChannelConfigWarnIfSlackUnintegrated in
+	// notification_channel_config_resource.go for how the provider responds
+	// to the user-scoped half of that asymmetry.
+	if body.Data.Attributes.Scope == "project" && body.Data.Attributes.ChannelType == "slack" &&
+		!a.hasActiveSlackIntegrationLocked(body.Data.References.Org.ID) {
+		notificationFakeWriteError(w, http.StatusNotFound, "Resource does not exist or unauthorized")
+
+		return
+	}
+
 	cc := &notificationFakeChannelConfig{
 		ID:          a.mintID(),
 		Scope:       body.Data.Attributes.Scope,
@@ -562,6 +578,18 @@ func (a *notificationFakeAPI) updatePreferences(w http.ResponseWriter, r *http.R
 }
 
 // --- integrations ---
+
+// hasActiveSlackIntegrationLocked reports whether orgID has an active Slack
+// integration installed. Callers must already hold a.mu.
+func (a *notificationFakeAPI) hasActiveSlackIntegrationLocked(orgID string) bool {
+	for _, i := range a.integrations {
+		if i.OrgID == orgID && i.Type == "slack" && i.Status == "active" {
+			return true
+		}
+	}
+
+	return false
+}
 
 // seedIntegration adds an installed integration directly, standing in for the
 // OAuth install flow this API has no route for.

@@ -5,8 +5,10 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -70,9 +72,20 @@ func (r *notificationChannelConfigResource) Schema(_ context.Context, _ resource
 			"~> **A user-scoped config always belongs to the API token's own user.** There is no way " +
 			"to address another user's channel configs through this API; `scope = \"user\"` manages the " +
 			"configuration of whoever the provider authenticates as.\n\n" +
-			"A Slack channel config requires an active `circleci_notification_integrations` Slack " +
-			"installation for the organization, and `target` must be a channel ID the installed app " +
-			"can already post to.",
+			"## Slack configs and the notification integration\n\n" +
+			"CircleCI enforces this differently depending on `scope`, verified against the real " +
+			"API:\n\n" +
+			"- **`scope = \"project\"`**: requires an active `circleci_notification_integrations` " +
+			"Slack installation for the organization. Creating one with none installed is rejected " +
+			"outright -- a 404, not a validation error naming the missing integration.\n" +
+			"- **`scope = \"user\"`**: CircleCI does **not** check this at all. A user-scoped Slack " +
+			"config is accepted with no Slack integration installed for the organization, and even " +
+			"with a `target` that is not a real channel ID -- there is no server-side validation to " +
+			"reject it. This provider adds a same-apply `Warning` diagnostic in that situation (see " +
+			"the resource's Create and Update), because CircleCI's own response gives no other sign " +
+			"that the config it just accepted cannot deliver anything yet.\n\n" +
+			"Either way, once an integration exists, `target` must be a channel ID the installed app " +
+			"can already post to (invite `@circleci` to the channel first).",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the channel config.",
@@ -203,6 +216,8 @@ func (r *notificationChannelConfigResource) Create(ctx context.Context, req reso
 		return
 	}
 
+	notificationChannelConfigWarnIfSlackUnintegrated(ctx, r.client, cc, &resp.Diagnostics)
+
 	applyNotificationChannelConfig(&plan, cc)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -265,6 +280,8 @@ func (r *notificationChannelConfigResource) Update(ctx context.Context, req reso
 		return
 	}
 
+	notificationChannelConfigWarnIfSlackUnintegrated(ctx, r.client, cc, &resp.Diagnostics)
+
 	plan.ID = state.ID
 	applyNotificationChannelConfig(&plan, cc)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -315,6 +332,63 @@ func (r *notificationChannelConfigResource) ModifyPlan(_ context.Context, req re
 	}
 
 	requireCloud(r.client, notificationChannelConfigTypeName, &resp.Diagnostics)
+}
+
+// notificationChannelConfigWarnIfSlackUnintegrated adds a Warning diagnostic
+// when cc is a user-scoped Slack channel config and the organization has no
+// active Slack notification integration.
+//
+// This exists for one specific, [NET]-measured asymmetry: a project-scoped
+// Slack channel config with no active integration is rejected outright (a
+// 404 -- see this resource's Schema doc), but a user-scoped one is accepted
+// unconditionally. CircleCI performs no server-side check at all on that
+// path -- not that an integration exists, not that target is a real,
+// reachable Slack channel ID -- so a config that will never deliver anything
+// still comes back a plain success with nothing to distinguish it from one
+// that will. Rather than silently mirroring that gap, the provider adds a
+// warning of its own; it does not become an error, because CircleCI itself
+// does not treat this as one, and an integration installed moments later
+// (or one this check merely failed to see) would make the config work fine.
+//
+// The integration lookup is best-effort: any error listing integrations
+// (a transient network error, a permissions edge case) is swallowed rather
+// than surfaced, because this call exists only to add an advisory warning to
+// an apply that has already succeeded -- it must never turn that success
+// into a failure.
+func notificationChannelConfigWarnIfSlackUnintegrated(
+	ctx context.Context, client *circleci.Client, cc *circleci.NotificationChannelConfig, diags *diag.Diagnostics,
+) {
+	if cc.Scope != circleci.NotificationScopeUser || cc.ChannelType != circleci.NotificationChannelTypeSlack {
+		return
+	}
+
+	integrations, err := client.ListNotificationIntegrations(ctx, circleci.ListNotificationIntegrationsOptions{
+		OrgID: cc.OrgID,
+		Type:  circleci.NotificationIntegrationTypeSlack,
+	})
+	if err != nil {
+		return
+	}
+
+	for _, integration := range integrations {
+		if integration.Status == circleci.NotificationIntegrationStatusActive {
+			return
+		}
+	}
+
+	diags.AddWarning(
+		"CircleCI notification channel config: Slack delivery not verified",
+		fmt.Sprintf(
+			"Organization %s has no active Slack notification integration. Unlike a project-scoped "+
+				"Slack channel config, CircleCI accepts a user-scoped one unconditionally: it does not "+
+				"check that an integration exists, or that %q is a real channel ID an installed Slack "+
+				"app can post to. This channel config was created (or updated) successfully, but "+
+				"notifications through it will not be delivered until a Slack workspace is installed "+
+				"for this organization (see the circleci_notification_integrations data source) and "+
+				"%q names a channel the installed app can already post to.",
+			cc.OrgID, cc.Target, cc.Target,
+		),
+	)
 }
 
 // applyNotificationChannelConfig copies an API channel config into the model.

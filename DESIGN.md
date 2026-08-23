@@ -110,6 +110,37 @@ The same logic drives the several resources whose `Delete` makes no API call:
 settings objects cannot be deleted, orb versions cannot be unpublished, and a
 project-group grant has no revoke route.
 
+### A certificate rotation relies on Terraform's own destroy ordering, not a lifecycle hint
+
+`circleci_ios_signing_certificate` and `circleci_ios_signing_config` are both
+entirely `RequiresReplace` — there is no update route for either — so rotating a
+certificate that a config still references replaces *both* in one apply:
+`certificate_id` on the config changes too, because it now names a different
+certificate's id. `DeleteSigningCertificate` answers `409` while any config still
+references the certificate (verified [NET]; see the doc comment on that method),
+so the order those two destroys happen in is not incidental.
+
+It works with no `lifecycle` block and no extra code, because `certificate_id`
+is what makes the config depend on the certificate in Terraform's graph, and
+Terraform's default (non-`create_before_destroy`) replace ordering destroys a
+dependent resource before the resource it depends on. The config is destroyed
+before the certificate, so the `409` is never reached.
+`TestAccIOSSigningCertificateRotation_RealAPI` is the [NET] proof this actually
+holds against the real API, not merely a description of the ordering; a second
+test, `TestAccIOSSigningCertificateDeleteWhileReferenced_RealAPI`, drives
+`circleci.Client` directly to turn the `409` itself — previously only "verified
+by hand" per a comment in `ios_signing_realapi_test.go` — into an automated
+regression check.
+
+The one thing to remember before ever reaching for a `create_before_destroy`
+lifecycle block on `circleci_ios_signing_certificate`: it would *break* this.
+Creating the new certificate before the old one is destroyed is fine on its
+own, but the old config (still pointing at the old certificate) would then be
+destroyed *after* the new certificate exists, in the ordinary case, or the old
+certificate's destroy could be reached before the old config's — reintroducing
+exactly the `409` the default ordering avoids. Leave both resources on the
+default replace behavior.
+
 ### Cloud-only gating happens at plan time, not apply time
 
 `requireCloud` in CRUD alone let `terraform plan` succeed and the apply fail. For
@@ -204,6 +235,30 @@ not a wrong field name or envelope, and it is not one struct doing two jobs.
 It is one specific combination of two enum values where the same route drops
 a field every other combination returns, discovered only by probing all four
 combinations against the real API rather than one.
+
+### A user-scoped Slack channel config gets a provider-side warning a project-scoped one does not need
+
+Probing a Slack channel config against an organization with no Slack
+integration installed found an asymmetry CircleCI's API does not mention
+anywhere: `scope = "project"` is rejected outright — a `404` — while
+`scope = "user"` is accepted unconditionally, even with a `target` that is not
+a real Slack channel ID. There is no server-side check on that path at all.
+
+The options were to leave it (CircleCI's own inconsistency, not this
+provider's to fix) or to add something. Leaving it silently would mean a
+practitioner's `terraform apply` reports a plain success for a user-scoped
+Slack config that can never deliver anything, with nothing in CircleCI's
+response to suggest that — the exact shape of bug this provider exists to
+catch on CircleCI's behalf elsewhere (see the write-only and preserve/null
+patterns throughout this file). So `notificationChannelConfigWarnIfSlackUnintegrated`
+adds a same-apply `Warning` — not an `Error` — when a user-scoped Slack config's
+organization has no active integration: a warning because CircleCI itself does
+not treat this as a failure, and because an integration installed moments
+later (or one the lookup simply failed to see, since the check is
+deliberately best-effort) would make the config work fine regardless. The
+check is not extended to `scope = "project"`, because CircleCI already
+enforces that half itself; a second warning there would just repeat what the
+`404` already said louder.
 
 ### Notification channel configs carry no secret to mark `Sensitive`
 
