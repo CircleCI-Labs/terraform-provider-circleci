@@ -78,6 +78,20 @@ func (s *GroupService) Get(ctx context.Context, orgID, groupID string) (*Group, 
 // means that if the route ever starts returning a token without honouring the
 // one it is given, this fails loudly instead of looping.
 //
+// [NET, 2026-08-22] The "always null" claim above was previously only ever
+// checked against fixtures of four groups or fewer — one page's worth on any
+// plausible page size, so it never actually exercised draining past a first
+// page. Live-tested by creating groups one at a time on a standalone
+// organization (gh-app-cci-1) up through 30, then 100: at every count the
+// response stayed a single {"items": [...30 or 100 groups...],
+// "next_page_token": null} with no page boundary ever appearing, including
+// with an explicit ?limit=2 query parameter added to the request (silently
+// ignored, same as the page-token). The 101st create answered
+// 409 "Exceeded max number of groups in org: 100." — an organization-wide cap,
+// not a page size — so this route cannot be observed to paginate at any group
+// count the API will accept in the first place. All 100 groups were deleted
+// after the probe.
+//
 // The membership list (formerly group_membership.go, removed — see
 // CHANGELOG.md) had the same advertised-but-unimplemented pagination, but for a
 // different reason it could not stay in this package: those routes 404 on the
