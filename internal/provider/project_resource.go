@@ -236,9 +236,17 @@ func (r *projectResource) Create(ctx context.Context, req resource.CreateRequest
 	// Create new context
 	newCreatedProject, err := r.client.CreateProject(ctx, effectiveOrgID(plan.OrganizationId, plan.OrgId), plan.Name.ValueString())
 	if err != nil {
+		// newCreatedProject is non-nil here on exactly one path: the v2 create
+		// succeeded and only the v1.1 follow call after it failed (see BUG P8
+		// in CreateProject's own doc comment). This provider does not write
+		// state for it — the settings this resource also needs to resolve
+		// were never attempted, so there is nothing complete to write — but
+		// projectCreateFailureDetail uses it to tell the practitioner the
+		// project exists rather than leaving them to discover that only by a
+		// 409 on their next apply.
 		resp.Diagnostics.AddError(
 			"Error creating CircleCI project",
-			projectCreateFailureDetail(plan.Name.ValueString(), err),
+			projectCreateFailureDetail(plan.Name.ValueString(), newCreatedProject, err),
 		)
 		return
 	}
@@ -812,35 +820,95 @@ func projectSettingImport(importing bool, prior types.Bool, reported *bool) type
 //     POST /api/v2/organization/{uuid}/project  {"name":"no-such-repo"}
 //     → 404  {"message":"GitHub response: Not Found"}
 //
+//     And, because adoption can happen at most once, adopting a repository that
+//     is ALREADY a CircleCI project — someone else's `circleci_project`, one
+//     adopted by hand in the web app, or this resource's own state having been
+//     lost — is the other failure a practitioner on a classic organization
+//     actually hits. Also measured over the network, adopting the same
+//     repository this suite's TestAccGithubProjectResource itself uses a second
+//     time while it was already adopted:
+//
+//     POST /api/v2/organization/{uuid}/project  {"name":"tf-acc-adoptable"}
+//     → 409  {"message":"Cannot create project since a project with the same
+//     name already exists in this organization"}
+//
 // The practitioner used to get neither of those facts, nor even the API's own
 // message: Create passed err.Error() straight through, so the whole diagnostic
 // was `POST /api/v2/organization/<uuid>/project: 404 Not Found`. circleci.Detail
 // recovers the body's message, and on a 404 the precondition is spelled out,
 // because a missing repository is by far the likeliest cause and is not
-// guessable from the response.
+// guessable from the response. The 409 case gets its own hint below, because
+// the API's message says a project already exists but not what to do about
+// it, and "delete the existing project and try again" would destroy whatever
+// that project's build history is for no reason: the right move is almost
+// always to manage the existing one instead, with `terraform import`.
 //
-// The hint is attached on 404 only, and it names both possibilities rather than
-// asserting one: the organization ID alone does not say which class the
-// organization is, and finding out would cost a second request on an error path.
-func projectCreateFailureDetail(name string, err error) string {
+// Neither hint asserts which class the organization is: the organization ID
+// alone does not say, and finding out would cost a second request on an error
+// path. Both name the possibilities instead.
+//
+// orphaned is CreateProject's project return value, which is non-nil on
+// exactly one failure: the v2 create succeeded but the v1.1 follow call
+// right after it (classic organizations only) did not — see BUG P8 in
+// CreateProject's own doc comment. That failure is handled first and
+// separately from the switch below, because it needs the practitioner told
+// something the other two branches do not: CircleCI already has this
+// project, under this exact name, whether or not anything ever explains why
+// the call answered an error.
+func projectCreateFailureDetail(name string, orphaned *circleci.Project, err error) string {
 	detail := "Could not create CircleCI project, unexpected error: " + circleci.Detail(err)
 
-	if !circleci.IsNotFound(err) {
-		return detail
+	if orphaned != nil {
+		return detail + fmt.Sprintf(
+			"\n\nCircleCI created this project — slug %q — before this error happened; it is not "+
+				"gone, and creating it again will answer 409 \"already exists\" (see below). This "+
+				"answers 400 \"Branch not found\" when the repository has no commits on its default "+
+				"branch yet: CircleCI can adopt an empty repository, but cannot follow it, and an "+
+				"unfollowed project cannot run.\n\n"+
+				"Push a commit to the repository's default branch, then bring the project this create "+
+				"already made under this configuration rather than trying to create another one:\n\n"+
+				"    terraform import <this resource's address> %[1]q\n\n"+
+				"See the resource documentation's Import section.",
+			orphaned.Slug,
+		)
 	}
 
-	return detail + fmt.Sprintf(
-		"\n\nThis route behaves differently depending on the organization:\n\n"+
-			"  * On a standalone (CircleCI-native, \"circleci/…\") organization it creates a new, "+
-			"repository-less project.\n"+
-			"  * On a classic, VCS-backed (\"gh/…\", \"bb/…\") organization it can only ADOPT a "+
-			"repository that already exists — it never creates one.\n\n"+
-			"So on a classic organization this 404 most likely means CircleCI could not find a "+
-			"repository named %q in that organization. Create the repository on the VCS first, and "+
-			"check that the token's VCS account can see it. Otherwise, check that the organization "+
-			"ID is correct and that this token can reach that organization.",
-		name,
-	)
+	switch {
+	case circleci.IsNotFound(err):
+		return detail + fmt.Sprintf(
+			"\n\nThis route behaves differently depending on the organization:\n\n"+
+				"  * On a standalone (CircleCI-native, \"circleci/…\") organization it creates a new, "+
+				"repository-less project.\n"+
+				"  * On a classic, VCS-backed (\"gh/…\", \"bb/…\") organization it can only ADOPT a "+
+				"repository that already exists — it never creates one.\n\n"+
+				"So on a classic organization this 404 most likely means CircleCI could not find a "+
+				"repository named %q in that organization. Create the repository on the VCS first, and "+
+				"check that the token's VCS account can see it. Otherwise, check that the organization "+
+				"ID is correct and that this token can reach that organization.",
+			name,
+		)
+
+	case circleci.IsConflict(err):
+		return detail + fmt.Sprintf(
+			"\n\nCircleCI already has a project named %[1]q in this organization. On a classic, "+
+				"VCS-backed organization, create can only ADOPT a repository, and a repository can be "+
+				"adopted at most once — this 409 is what adopting it again answers, whether that is "+
+				"because another circleci_project resource (in this configuration or another one) "+
+				"already adopted it, because it was adopted by hand in the CircleCI web app, or "+
+				"because this resource's own Terraform state was lost while the project it created "+
+				"still exists.\n\n"+
+				"Bring the existing project under this configuration instead of creating a new one — "+
+				"deleting it first would also delete its build history, for no reason:\n\n"+
+				"    terraform import <this resource's address> \"<vcs-type>/<org-name>/%[1]s\"\n\n"+
+				"using the project's slug exactly as CircleCI reports it (find it in the web app's "+
+				"project settings, or with `GET /api/v2/project/<vcs-type>/<org-name>/%[1]s`). See the "+
+				"resource documentation's Import section.",
+			name,
+		)
+
+	default:
+		return detail
+	}
 }
 
 // branchOverrides converts a Terraform set of branch names into plain strings.

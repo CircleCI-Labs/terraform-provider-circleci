@@ -409,3 +409,66 @@ func TestCreateProjectFollowLowercasesTheProvider(t *testing.T) {
 		t.Errorf("follow path = %q, want %q", got, want)
 	}
 }
+
+// TestCreateProjectReturnsTheProjectWhenOnlyFollowFails is BUG P8's regression
+// test: a v2 create that succeeds, followed by a v1.1 follow that does not,
+// used to make CreateProject discard the created project entirely and return
+// nil — indistinguishable, to a caller, from the v2 create itself having
+// failed and nothing existing at all. It is not nothing: CircleCI is tracking
+// this project, under this exact slug, whether or not the follow call ever
+// succeeds — measured live by adopting a repository with no commits on its
+// default branch, where the v2 create still answers 200 and the v1.1 follow
+// right after it answers 400 {"message":"Branch not found"} (see
+// followProject's own doc comment).
+//
+// The caller this matters most to is internal/provider/project_resource.go's
+// Create, by way of projectCreateFailureDetail: it names the project's slug in
+// the diagnostic and points at `terraform import`, which it can only do with
+// the project CreateProject returns here.
+func TestCreateProjectReturnsTheProjectWhenOnlyFollowFails(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if strings.HasSuffix(r.URL.Path, "/follow") {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "Branch not found"})
+
+			return
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "c7806d88-6921-4d9d-8810-7c3da450ae19",
+			"name":              "repo",
+			"slug":              "gh/acme/repo",
+			"organization_name": "acme",
+			"organization_slug": "gh/acme",
+			"organization_id":   standaloneOrgUUID,
+			"vcs_info": map[string]string{
+				"vcs_url":        "https://github.com/acme/repo",
+				"provider":       "GitHub",
+				"default_branch": "main",
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := circleci.New(circleci.Config{Host: srv.URL, Token: "tok"})
+
+	project, err := c.CreateProject(context.Background(), standaloneOrgUUID, "repo")
+	if err == nil {
+		t.Fatal("CreateProject succeeded; the fake was asked to fail the follow call")
+	}
+	if !circleci.HasStatus(err, http.StatusBadRequest) {
+		t.Errorf("CreateProject error = %v, want one carrying the follow call's 400", err)
+	}
+
+	if project == nil {
+		t.Fatal("CreateProject returned a nil project alongside the error; the v2 create it already " +
+			"made succeeded, so the caller has no way to find what CircleCI is now tracking")
+	}
+	if project.Slug != "gh/acme/repo" {
+		t.Errorf("project.Slug = %q, want %q (the v2 create's own response)", project.Slug, "gh/acme/repo")
+	}
+}

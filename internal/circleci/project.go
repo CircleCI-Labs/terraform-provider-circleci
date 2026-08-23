@@ -99,6 +99,8 @@ func (c *Client) GetProject(ctx context.Context, slug string) (*Project, error) 
 // configured host, which made project creation impossible against CircleCI Server.
 // And the SDK's settings struct has no field for build_prs_only, so that setting
 // was unreachable.
+// The returned *Project is non-nil on a follow failure too — see the return
+// statement inside the follow branch below for why that matters.
 func (c *Client) CreateProject(ctx context.Context, organizationID, name string) (*Project, error) {
 	var project Project
 
@@ -110,7 +112,29 @@ func (c *Client) CreateProject(ctx context.Context, organizationID, name string)
 	}
 
 	if err := c.followProject(ctx, &project); err != nil {
-		return nil, err
+		// The v2 create above already succeeded — CircleCI is tracking this
+		// project whether or not the call below did — so the project is
+		// returned alongside the error rather than discarded as nil.
+		//
+		// Discarding it here is BUG P8, found live: followProject's own doc
+		// comment records that this call fails 400 "Branch not found" when
+		// the repository has no commits, and the project it leaves behind is
+		// then invisible to every listing this package has — there is no
+		// "list projects in an organization" route (see DeleteProject's own
+		// doc comment), and the v1.1 listing this package otherwise relies on
+		// for "does this project exist" turns out to answer 200 with an empty
+		// array for a project that was never followed, the same as for one
+		// that plain does not exist. A caller that gets nil here has no
+		// slug, no id, and no way to find what it just created — which is
+		// exactly what happened to this suite's own acceptance tests while
+		// this fix was being written: three test runs each orphaned a
+		// project this way, none of them discoverable afterwards by name,
+		// slug, or any listing, and requiring the terraform working
+		// directory's own leftover .tf file to recover the name at all. The
+		// caller that does get the project back can at least report its slug
+		// — see projectCreateFailureDetail in internal/provider/
+		// project_resource.go, which does.
+		return &project, err
 	}
 
 	return &project, nil
@@ -130,6 +154,14 @@ func (c *Client) CreateProject(ctx context.Context, organizationID, name string)
 // is a short hyphenated string.
 // It is not a UUID, as an earlier version of this comment claimed; that mattered
 // only as a description, since either way it never equals OrganizationName.
+//
+// This call needs the repository to have a commit on its default branch.
+// Measured over the network by adopting a repository created moments earlier
+// with no commits at all: the v2 create above still answers 200, but this
+// follow call answers 400 {"message":"Branch not found"} — there is no
+// default branch yet for it to follow. A repository seeded with an initial
+// commit (README or otherwise) answers 200 here. No .circleci/config.yml is
+// needed for either call to succeed; only a commit is.
 func (c *Client) followProject(ctx context.Context, project *Project) error {
 	segments := strings.Split(project.Slug, "/")
 	if len(segments) != projectSlugSegments || segments[1] != project.OrganizationName {

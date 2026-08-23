@@ -30,7 +30,19 @@ Could not create CircleCI project, unexpected error: GitHub response: Not Found 
 
 The provider adds the explanation, but the underlying condition can only be fixed on the VCS: create the repository first, then apply. A randomly generated project name can never work on a classic organization.
 
-Destroying works the same way on both: `DELETE /api/v2/project/{project-slug}`, using the slug CircleCI reported. On a standalone organization that slug's segments are opaque identifiers rather than names (`circleci/<org-fragment>/<project-fragment>`), and a slug assembled from the organization and project names is rejected with `400 Invalid project slug` — so use the `slug` attribute, not a name-based guess, when importing.
+~> **The other classic-organization failure: adopting a repository that is already a CircleCI project.** A repository can be adopted at most once, so naming one that is already a project — someone else's `circleci_project`, one adopted by hand in the CircleCI web app, or this resource's own state having been lost while the project it created still exists — fails too, and again the API's answer says nothing about why or what to do:
+
+```
+Error: Error creating CircleCI project
+
+Could not create CircleCI project, unexpected error: Cannot create project
+since a project with the same name already exists in this organization
+(HTTP 409)
+```
+
+The provider adds a hint here as well, pointing at `terraform import` (see below) rather than at deleting the existing project — deleting it first would also delete its build history, for no reason, when importing it into this configuration keeps it intact.
+
+Destroying works the same way on both: `DELETE /api/v2/project/{project-slug}`, using the slug CircleCI reported. On a standalone organization that slug's segments are opaque identifiers rather than names (`circleci/<org-fragment>/<project-fragment>`), and a slug assembled from the organization and project names is rejected with `400 Invalid project slug` — so use the `slug` attribute, not a name-based guess, when importing. On a classic organization, destroying really does unfollow the repository rather than merely dropping it from state: measured over the network, adopting the same repository again immediately afterward succeeds, where a still-followed repository would answer the 409 above.
 
 ## Availability
 
