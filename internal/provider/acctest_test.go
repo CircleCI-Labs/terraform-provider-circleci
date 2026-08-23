@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // Acceptance tests in this package talk to a real CircleCI installation, so
@@ -290,30 +292,6 @@ func testGithubServerRepoExternalID(t *testing.T) string {
 	return testAccEnv(t, "CIRCLECI_TEST_GH_SERVER_REPO_EXTERNAL_ID", "GitHub Server repository external ID")
 }
 
-// testContextID returns the UUID of a pre-existing context in the primary
-// test organization for the active integration.
-func testContextID(t *testing.T) string {
-	t.Helper()
-
-	return testActiveEnv(t, "CONTEXT_ID", "UUID of a pre-existing context for the active integration")
-}
-
-// testContextName returns the name of the pre-existing context for the
-// active integration.
-func testContextName(t *testing.T) string {
-	t.Helper()
-
-	return testActiveEnv(t, "CONTEXT_NAME", "name of the pre-existing context for the active integration")
-}
-
-// testContextEnvVarName returns the name of an environment variable that
-// already exists on the pre-existing context for the active integration.
-func testContextEnvVarName(t *testing.T) string {
-	t.Helper()
-
-	return testActiveEnv(t, "CONTEXT_ENV_VAR_NAME", "name of an environment variable on the pre-existing context for the active integration")
-}
-
 // testTriggerID returns the UUID of a pre-existing trigger for the active
 // integration.
 func testTriggerID(t *testing.T) string {
@@ -339,30 +317,6 @@ func testScheduledTriggerID(t *testing.T) string {
 	return testActiveEnv(t, "SCHEDULED_TRIGGER_ID", "UUID of a pre-existing scheduled trigger for the active integration")
 }
 
-// testWebhookID returns the UUID of a pre-existing webhook scoped to the
-// project identified by testProjectID, for the active integration.
-func testWebhookID(t *testing.T) string {
-	t.Helper()
-
-	return testActiveEnv(t, "WEBHOOK_ID", "UUID of a pre-existing webhook for the active integration")
-}
-
-// testWebhookName returns the name of the pre-existing webhook for the active
-// integration.
-func testWebhookName(t *testing.T) string {
-	t.Helper()
-
-	return testActiveEnv(t, "WEBHOOK_NAME", "name of the pre-existing webhook for the active integration")
-}
-
-// testWebhookURL returns the receiver URL of the pre-existing webhook for the
-// active integration.
-func testWebhookURL(t *testing.T) string {
-	t.Helper()
-
-	return testActiveEnv(t, "WEBHOOK_URL", "URL of the pre-existing webhook for the active integration")
-}
-
 // testRunnerNamespace returns the runner namespace of the primary test
 // organization for the active integration, used to build
 // "<namespace>/<resource-class>" names.
@@ -370,6 +324,28 @@ func testRunnerNamespace(t *testing.T) string {
 	t.Helper()
 
 	return testActiveEnv(t, "RUNNER_NAMESPACE", "runner namespace of the primary test organization for the active integration")
+}
+
+// testAccClient builds a circleci.Client against the same installation the
+// provider under test talks to, resolved from the same two environment
+// variables the provider itself falls back to (CIRCLE_HOST, CIRCLE_DEPLOYMENT)
+// so that a run against CircleCI Server reaches the same installation.
+//
+// Acceptance tests normally reach the API only through Terraform. A handful
+// need a side channel instead — to establish or restore state Terraform has no
+// operation for (testAccProjectSettingsClient), or to observe a value
+// Terraform's own state never carries because the API refuses to disclose it,
+// such as a webhook's signing secret (see Webhook.SigningSecret's doc
+// comment). Call testAccPreCheck first: it is what resolves the active
+// integration's token into CIRCLE_TOKEN.
+func testAccClient(t *testing.T) *circleci.Client {
+	t.Helper()
+
+	return circleci.New(circleci.Config{
+		Host:       os.Getenv("CIRCLE_HOST"),
+		Token:      os.Getenv("CIRCLE_TOKEN"),
+		Deployment: circleci.Deployment(os.Getenv("CIRCLE_DEPLOYMENT")),
+	})
 }
 
 // testUniqueRunnerResourceClass returns a "<namespace>/<prefix>-<random>"

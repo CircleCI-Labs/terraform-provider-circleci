@@ -118,6 +118,42 @@ const webhookRoute = "/webhook/%s"
 // fails, TLS verification is simply off and the receiver has no secret to
 // authenticate deliveries with.
 //
+// # AN EMPTY signing-secret DOES NOT CLEAR ONE THAT ALREADY EXISTS
+//
+// The hyphenated PUT example above ("honoured") is correct as far as it goes,
+// but it is easy to over-read: it was measured against a webhook that had no
+// secret to begin with, so an empty signing-secret trivially left it with
+// none. It does NOT mean an empty signing-secret clears a secret that is
+// already set. [NET, measured against gh-app-cci-1 on 2026-08-22, both
+// directly and through TestAccWebhookResourceSigningSecretReachesTheWireLive]:
+//
+//	POST /api/v2/webhook  {"signing-secret":"initial", ...}
+//	  -> 201 {"signing_secret":"****", ...}
+//	PUT  /api/v2/webhook/{id}  {"signing-secret":"", ...}          (no other field changed)
+//	  -> 200 {"signing_secret":"****", ...}                        UNCHANGED, not cleared
+//	GET  /api/v2/webhook/{id}
+//	  -> 200 {"signing_secret":"****", ...}                        still there
+//
+// So this route has no way, discovered so far, to remove a signing secret once
+// one has been set — an empty value is treated as "leave whatever is there
+// alone", the same way an unrecognized key is. This provider does not attempt
+// to work around it: circleci_webhook has no way to unset signing_secret
+// either, and a configuration that sets it to "" will apply successfully
+// without actually clearing anything server-side, which is worth knowing
+// before relying on it.
+//
+// A related question this investigation could NOT settle: whether writing a
+// DIFFERENT non-empty secret over an existing one (a genuine rotation, as
+// opposed to a clear) actually replaces the stored value, or is similarly
+// ignored. GetWebhook answers with WebhookSigningSecretMask either way, so
+// there is no read available anywhere on this API that distinguishes "the new
+// secret took effect" from "the old one is still in force" once both are
+// non-empty — only the empty-string case above is independently observable,
+// because only it has a different mask state (absent vs. present) to compare.
+// Treat "rotating to a new non-empty secret" as unverified, not as confirmed
+// working, until some other signal (e.g. an actual delivery whose HMAC only
+// the new secret would produce) is checked.
+//
 // Provider consequences of getting this wrong, both of which shipped once:
 //
 //   - the signing secret never reaches CircleCI, so a receiver cannot tell a

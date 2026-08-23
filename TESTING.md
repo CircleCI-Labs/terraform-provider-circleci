@@ -135,9 +135,13 @@ in `.circleci/config.yml`.
 | `CIRCLECI_TEST_<KEY>_PIPELINE_ID` | A pipeline definition on the writable project |
 | `CIRCLECI_TEST_<KEY>_TRIGGER_ID` / `_TRIGGER_PROJECT_ID` | An existing trigger |
 | `CIRCLECI_TEST_<KEY>_SCHEDULED_TRIGGER_ID` | A `schedule` event-source trigger |
-| `CIRCLECI_TEST_<KEY>_CONTEXT_ID` / `_CONTEXT_NAME` / `_CONTEXT_ENV_VAR_NAME` | A pre-existing context to read |
-| `CIRCLECI_TEST_<KEY>_WEBHOOK_ID` / `_WEBHOOK_NAME` / `_WEBHOOK_URL` | A pre-existing webhook |
 | `CIRCLECI_TEST_<KEY>_RUNNER_NAMESPACE` | Namespace for runner resource classes |
+
+There is deliberately no `CONTEXT_*` or `WEBHOOK_*` row: the acceptance tests
+for `circleci_context`, `circleci_context_environment_variable` and
+`circleci_webhook` all create their own scratch context or webhook per run
+(the org and project fixtures above are all they need) rather than reading a
+shared, pre-existing one, so there is no such fixture for a variable to name.
 
 `<KEY>` is `GH_APP`, `GH_OAUTH`, `GH_HYBRID`, `GH_SERVER`, `GL_CLOUD`, `GL_SM`
 or `BB_CLOUD` — fill in the row for every integration you have an account for.
@@ -331,11 +335,20 @@ so none of them can run there. The ran/skipped counts are what to read in those
 two jobs.
 
 **Filling in the rest.** Each job sets only the identifiers that exist today —
-the organization and the writable project. `PROJECT_SLUG`, `STATIC_PROJECT_*`,
-`PIPELINE_ID`, `TRIGGER_*`, `CONTEXT_*`, `WEBHOOK_*`, `RUNNER_NAMESPACE` and the
+the organization, the writable project (`PROJECT_ID` and `PROJECT_SLUG`), and
+the runner namespace each of these four organizations already had claimed
+(`RUNNER_NAMESPACE` — see the config's own comment on why that one could be
+added at all: unlike every other fixture here, a namespace cannot be created
+per test run, because CircleCI has no way to delete one). `STATIC_PROJECT_*`,
+`PIPELINE_ID`, `TRIGGER_*`, `CONTEXT_*`, `WEBHOOK_*` and the
 static `GH_APP_REPO_*` pair are deliberately absent rather than guessed: an
 absent variable skips with its own name in the message, while a wrong one fails
-against a nonsense identifier in a way that reads exactly like a regression. So
+against a nonsense identifier in a way that reads exactly like a regression.
+`CONTEXT_*` and `WEBHOOK_*` in particular are not merely absent for lack of a
+value — the acceptance tests for `circleci_context`,
+`circleci_context_environment_variable` and `circleci_webhook` create their
+own scratch context/webhook per run instead of reading a shared one, so they
+were never going to need these two rows filled in. So
 the artifact of a green run doubles as the to-do list for the next one.
 
 ## Parallel-safe acceptance fixtures
