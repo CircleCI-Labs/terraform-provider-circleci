@@ -39,12 +39,27 @@ block="$(awk '/^=== VCS integration coverage/ { inside = 1 }
 # "Exercised by this run (N):" is TestMain's own headline; pull N back out of
 # it rather than recomputing it, so this script and that block can never
 # disagree about what a real-API test is.
+#
+# N itself is a union of two independent mechanisms inside TestMain
+# (vcs_gating_test.go): tests gated by testRequireVCSType/testRequireStandaloneOrg,
+# named plainly, and tests networkCoverage observed configuring the provider
+# against a real host despite calling neither gate -- the iOS signing,
+# notification, organization-contacts and URL-orb-allow-list families this
+# rewrite exists for. TestMain marks the second kind with the literal suffix
+# below (networkOnlyAnnotation in vcs_gating_test.go); network_observed_only
+# counts them the same way `exercised` counts N, by reading TestMain's own
+# output rather than recomputing the classification here.
 exercised=0
+network_observed_only=0
 if [ -n "$block" ]; then
   exercised="$(printf '%s\n' "$block" \
     | sed -nE 's/^Exercised by this run \(([0-9]+)\).*/\1/p' \
     | head -1)"
   : "${exercised:=0}"
+
+  network_observed_only="$(printf '%s\n' "$block" \
+    | grep -c ' (real API, not VCS/org-class-gated)' || true)"
+  : "${network_observed_only:=0}"
 fi
 
 # --- Every TestAcc* testcase, skipped or not, straight from the JUnit XML ---
@@ -198,6 +213,7 @@ causes_total=$((no_token + placeholder + fixture_unset + unrecognized_vcs_type +
   echo "*** REAL-API TESTS EXERCISED THIS RUN: $exercised ***"
   echo "This is the number that matters. Every count below is context, not evidence of API coverage —"
   echo "most TestAcc tests in this package are mock-backed and run with no credential at all."
+  printf '  of which, via network observation only (no VCS/org-class gate): %s\n' "$network_observed_only"
   echo
   echo "=== Acceptance tests (TestAcc*) in internal/provider ==="
   printf '  ran (mock-backed or real; NOT a proxy for real-API coverage): %s\n' "$((total - skipped))"

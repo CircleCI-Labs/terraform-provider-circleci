@@ -3,13 +3,24 @@
 
 version: 2.1
 
-# The only way to turn the acceptance workflow on. It defaults to false, so an
-# ordinary push or pull request never even compiles those jobs into its
-# pipeline — see the `acceptance` workflow at the bottom of this file for why
-# that separation matters, and the setup note below it for how the nightly
-# schedule sets this to true.
+# run-acceptance-tests is the on-demand escape hatch: set it true on a manual
+# pipeline trigger to run the acceptance workflow outside its normal triggers
+# (see the `acceptance` workflow below for what those are — every PR from a
+# branch of this repository, plus this parameter). It defaults to false so an
+# ad-hoc API-triggered pipeline never runs the suite by accident.
+#
+# nightly-acceptance-run distinguishes the scheduled nightly trigger from
+# every other way the acceptance workflow can start (a PR branch's own push,
+# or run-acceptance-tests set by hand). It is what acceptance_test's last step
+# checks before filing a GitHub issue on failure — see that step below for why
+# a PR's own failure must not also open one. The nightly scheduled trigger
+# (Project Settings -> Triggers; see the setup note at the end of this file)
+# is the only thing that should ever set this true.
 parameters:
   run-acceptance-tests:
+    type: boolean
+    default: false
+  nightly-acceptance-run:
     type: boolean
     default: false
 
@@ -53,34 +64,41 @@ commands:
   # buried in a shared parameter list. Nothing secret appears there — the
   # fixture identifiers are org and project UUIDs and slugs, and the one actual
   # credential (CIRCLE_TOKEN) comes from the context.
+  #
+  # There used to be a step here ("Refuse to run anywhere but the labs branch
+  # of this repository") that failed the job outright unless CIRCLE_BRANCH was
+  # exactly "labs" and CIRCLE_PULL_REQUEST was unset. It existed as defence in
+  # depth against a pull request from a fork building under this project with
+  # a branch name this file does not choose. That threat does not exist:
+  #
+  #   [NET] GET /api/v2/project/gh/CircleCI-Labs/terraform-provider-circleci/settings
+  #   ->    "build_fork_prs":false, "forks_receive_secret_env_vars":false
+  #
+  # A fork PR never builds under this project at all, so there is no branch
+  # name for it to arrive with and no secret it could ever see — the guard was
+  # refusing a build that cannot happen, at the cost of also refusing the one
+  # this file now wants: a PR from a branch *of this repository* (see the
+  # `acceptance` workflow's `when:` below). Removing it is what makes that
+  # possible; nothing replaces it, because nothing needs to.
+  #
+  # What still has to be true, and is not something this file can express: the
+  # terraform-provider-acc-token context (used below) currently carries an
+  # *expression* restriction, `pipeline.git.branch == "labs"`, on top of its
+  # project restriction —
+  #
+  #   [NET] GET /api/v2/context/8d6a35ff-d9c4-4f12-8657-d2b8a96cc375/restrictions
+  #
+  # — which would make every job below fail on a missing credential on any
+  # branch but labs, exactly the failure summarize-acceptance-run.sh's
+  # no-token check exists to name. That expression restriction has to be
+  # removed (leaving the project restriction, which is what actually matters
+  # now that forks cannot build) before this workflow can run on a PR branch.
+  # This is a one-time, manual change to a live context, the same kind of
+  # change the nightly-trigger setup note at the end of this file already
+  # asks a maintainer to make by hand — not something to script against a
+  # shared credential without review.
   acceptance_test:
     steps:
-      - run:
-          name: Refuse to run anywhere but the labs branch of this repository
-          command: |
-            set -euo pipefail
-
-            # Defence in depth, not the primary control. The primary controls
-            # are the branch filter on each job in the `acceptance` workflow
-            # and the fact that the terraform-provider-acc-token context is
-            # restricted to this project *and* to the labs branch, which
-            # CircleCI enforces before the job starts.
-            #
-            # This step exists anyway because a pull request from a fork builds
-            # under *this* project, with a branch name this config does not
-            # choose, so "our config only lists labs" is an argument about
-            # intent rather than a guarantee. It fails in three lines and names
-            # the reason, which beats discovering it from an API call made with
-            # our token on behalf of a branch nobody reviewed.
-            if [ "${CIRCLE_BRANCH:-}" != "labs" ]; then
-              echo "CIRCLE_BRANCH=${CIRCLE_BRANCH:-<unset>}: the acceptance jobs only run on labs." >&2
-              exit 1
-            fi
-
-            if [ -n "${CIRCLE_PULL_REQUEST:-}" ]; then
-              echo "This is a pull-request build ($CIRCLE_PULL_REQUEST): the acceptance jobs never run on one." >&2
-              exit 1
-            fi
       - setup:
           # One Terraform version rather than the matrix. These jobs measure
           # the provider against a live API; build-and-test above already
@@ -137,6 +155,45 @@ commands:
           command: |
             bash .circleci/scripts/summarize-acceptance-run.sh \
               test-reports/acceptance.log test-reports/tests.xml test-reports/vcs-coverage.txt
+      - run:
+          name: File a GitHub issue naming the integration and failing tests (nightly only)
+          when: on_fail
+          # Only for the scheduled nightly run — see nightly-acceptance-run's
+          # own comment at the top of this file for why. A PR's failure is
+          # already visible as this job's own red check on that PR; opening a
+          # second, separate report for it would just be noise, and would
+          # also mean every open PR touching a flaky fixture nights out a
+          # fresh issue of its own.
+          #
+          # The logic lives in .circleci/scripts/file-nightly-failure-issue.sh,
+          # not here, for the same reason summarize-acceptance-run.sh does:
+          # so it can be unit-tested (file-nightly-failure-issue_test.sh, next
+          # to it) without CircleCI, GitHub, or a real `gh` call. Needs the
+          # terraform-provider-issue-token context (below) for GH_TOKEN, which
+          # `gh` itself reads from the environment.
+          command: |
+            set -euo pipefail
+
+            if [ "<<pipeline.parameters.nightly-acceptance-run>>" != "true" ]; then
+              echo "Not the nightly run (pipeline.parameters.nightly-acceptance-run=<<pipeline.parameters.nightly-acceptance-run>>): skipping issue filing."
+              exit 0
+            fi
+
+            # cimg/go's convenience-image lineage documents `gh` as one of
+            # the tools it bundles; this is the check that turns "silently
+            # missing" into a named, actionable failure if that ever stops
+            # being true, rather than a bare "command not found" three
+            # levels into a script.
+            if ! command -v gh >/dev/null 2>&1; then
+              echo "gh (GitHub CLI) is not on PATH in this executor; cannot file a GitHub issue." >&2
+              exit 1
+            fi
+
+            # gh reads GH_TOKEN from the environment on its own; no `gh auth
+            # login` step needed. GH_TOKEN itself comes from the
+            # terraform-provider-issue-token context on this job.
+            bash .circleci/scripts/file-nightly-failure-issue.sh \
+              "$CIRCLE_JOB" test-reports/tests.xml "$CIRCLE_BUILD_URL" "$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME"
       - store_results
 
 jobs:
@@ -321,6 +378,12 @@ jobs:
       # below — the move writes a project into the organization that job owns.
       CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID: 11047c98-2415-4410-98dc-899c86f8d0e5
       CIRCLECI_TEST_GH_OAUTH_ALT_ORG_SLUG: gh/gh-oauth-cci-2
+      # A repository that EXISTS in this organization but whose CircleCI project the
+      # suite creates and destroys itself. circleci_project cannot create a project on
+      # a classic organization — it only adopts an existing repository — so the adopt
+      # tests skip without this. The project must NOT be left adopted between runs:
+      # re-adopting answers 409 and the tests fail.
+      CIRCLECI_TEST_GH_OAUTH_ADOPTABLE_REPO_NAME: tf-acc-adoptable
     steps:
       - acceptance_test
 
@@ -330,30 +393,25 @@ jobs:
   # distinction and why no testRequireVCSType-gated test names it yet.
   #
   # gh-oauth-cci-2 is also a CLASSIC (VCS-backed) organization, so
-  # testRequireStandaloneOrg's tests skip here too (project_resource_test.go)
-  # — every route into a real API call that is GATED to an integration or an
-  # organization class in this package is gated to one this job's fixtures
-  # are neither, so "Exercised by this run (0)" is not a possibility to
-  # expect and shrug off, it is the honest count of THAT metric, and
-  # .circleci/scripts/summarize-acceptance-run.sh fails this job on it (the
-  # check that catches a job proving nothing — see that script). Leave it
-  # failing rather than gating anything to github_hybrid just to make it
-  # pass: no test is gated to include github_hybrid today. It stops failing
-  # the day a real acceptance test is written that this organization's class
-  # or integration actually supports and is gated to include github_hybrid.
+  # testRequireStandaloneOrg's tests skip here too (project_resource_test.go):
+  # every testRequireVCSType/testRequireStandaloneOrg-gated route in this
+  # package needs an integration or organization class this job's fixtures
+  # are neither.
   #
-  # "(0)" measures only tests that call testRequireVCSType or
-  # testRequireStandaloneOrg — it is NOT a count of every real-API call this
-  # job makes. Most tests in this package carry no VCS or org-class gate at
-  # all, because most resources behave identically everywhere, so they run
-  # here same as on any other job and are simply not tallied by that specific
-  # instrumentation: circleci_context, circleci_context_environment_variable,
-  # circleci_webhook and circleci_runner_resource_class/token all get full
-  # live CRUD coverage on THIS job too, from PROJECT_SLUG and
-  # RUNNER_NAMESPACE below plus the ORG_ID/PROJECT_ID already set. "This
-  # integration genuinely has zero real-API coverage today", a few lines up,
-  # is therefore true of the tally this job is checked against, not of what
-  # actually reaches CircleCI when this job runs.
+  # That used to make this job's real-API coverage zero, full stop — and
+  # summarize-acceptance-run.sh failed it on exactly that, on the theory that
+  # no gated route supporting github_hybrid meant no route at all did. It was
+  # wrong: internal/provider's networkCoverage instrument (vcs_gating_test.go)
+  # counts a test the moment it configures the provider against a real host,
+  # independent of either gate, and several families never needed a VCS/
+  # org-class gate to begin with — iOS signing, notification,
+  # organization-contacts, URL-orb-allow-list — because their resource behaves
+  # identically everywhere. Those run here (testAccPreCheck's token and
+  # testOrgID's fixture are both satisfied by CIRCLECI_TEST_GH_HYBRID_* above),
+  # and now get counted. So this job's real coverage is whatever those are,
+  # not zero — summarize-acceptance-run.sh still fails the job if that ever
+  # actually drops to zero, which is a live check again rather than an
+  # accepted, permanent exception.
   #
   # No ALT_ORG pair. testAltOrgID resolves CIRCLECI_TEST_GH_HYBRID_ALT_ORG_ID
   # under this integration, and a second *hybrid* organization is not something
@@ -513,20 +571,41 @@ workflows:
   # with the commit under test: an API blip, a rate limit, an object a killed
   # earlier run never destroyed. Putting that failure rate in front of every
   # push — whether chained after `lint` or run beside it — makes a red build
-  # ambiguous, and a red build nobody trusts is worse than no build. There is
-  # also a hard reason: the context these jobs need is restricted to the labs
-  # branch, so on a pull request they would not skip, they would fail on a
-  # missing credential.
+  # ambiguous, and a red build nobody trusts is worse than no build. Its own
+  # workflow, with its own pass/fail, keeps that ambiguity from bleeding into
+  # build-and-test's.
   #
-  # So they get their own workflow, on its own pipeline, compiled in only when
-  # `run-acceptance-tests` is true. A push cannot set it; a scheduled trigger
-  # or an authenticated API call can (see the setup note at the end of this
-  # file). Nightly is the intended cadence: a live-API regression that appears
-  # without a commit is worth catching within a day, and per-commit precision
-  # is not something these jobs can offer anyway. The same parameter is how a
-  # maintainer runs them on demand after touching a resource — which is the
-  # case that matters most, because it is the one where the failure is
-  # attributable.
+  # WHAT TRIGGERS IT, and why every PR from a branch of this repository is one
+  # of those triggers now, when it used to be only `run-acceptance-tests` (a
+  # scheduled or authenticated-API pipeline). The fork problem this used to be
+  # guarded against does not exist:
+  #
+  #   [NET] GET /api/v2/project/gh/CircleCI-Labs/terraform-provider-circleci/settings
+  #   ->    "build_fork_prs":false, "forks_receive_secret_env_vars":false
+  #
+  # A fork PR never builds under this project at all, let alone with a secret
+  # — so the only pipelines that can ever reach the `when:` below are the ones
+  # from this repository's own branches (internal PRs) and this project's own
+  # scheduled/API-triggered ones. Gating every internal PR on this suite,
+  # rather than only labs itself after merge, is what lets one of these jobs
+  # become a required check before merge — the failure is attributable to the
+  # PR under review, not discovered a day later on labs with three other
+  # commits since.
+  #
+  # `run-acceptance-tests` stays, for the same on-demand case as before (a
+  # maintainer re-running the suite by hand after touching a resource, on any
+  # branch), and the scheduled nightly trigger keeps running against labs
+  # itself, catching a live-API regression that shows up with no commit to
+  # attribute it to. See nightly-acceptance-run's own comment at the top of
+  # this file for the third parameter that came with it.
+  #
+  # WHAT ELSE HAS TO BE TRUE for a PR build to actually pass credentials
+  # through, and is NOT something this file can express: see the long comment
+  # on the `acceptance_test` command above (the one that used to be a runtime
+  # "refuse to run anywhere but labs" guard) for the terraform-provider-acc-
+  # token context's own branch restriction, which still has to be loosened by
+  # hand before this is more than a suite that fails on every PR with "no API
+  # token reached this job."
   #
   # WHY ONE SERIAL GROUP PER JOB, RATHER THAN ONE OR FOUR. A serial group
   # serializes pipelines against shared state, so the question is what state
@@ -538,18 +617,34 @@ workflows:
   # organization, and collapsing any of them into one group would serialize
   # four ~40-minute jobs into a slower nightly for no safety gained.
   #
-  # acceptance-gh-oauth and acceptance-gh-hybrid used to share a group here,
-  # because acceptance-gh-oauth's org-move test (TestAccCircleCiProjectOrgUpdateResource)
-  # moves a project into CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID, which is set to
-  # gh-oauth-cci-2 — acceptance-gh-hybrid's own primary organization. That
-  # stopped being true once the test was re-gated onto organization CLASS
-  # (testRequireStandaloneOrg in project_resource_test.go, the BUG P4 fix):
-  # the move only runs when BOTH the primary and the alt organization are
-  # standalone, and acceptance-gh-oauth's primary organization
-  # (gh-oauth-cci-1, slug gh/gh-oauth-cci-1) is classic. Reproduced directly —
-  # no network call, no CIRCLE_TOKEN needed, since the gate skips before
-  # either would be reached — by running the test with exactly this job's
-  # environment block:
+  # Hence one group per organization — with the two GitHub jobs that share
+  # organizations sharing a group. acceptance-gh-oauth's org-move test moves a
+  # project into gh-oauth-cci-2, which is acceptance-gh-hybrid's primary
+  # organization: two jobs writing to one org is exactly the overlap a serial
+  # group is for, even though only one of them owns it. This groups jobs, not
+  # branches or PRs: the key is `<< pipeline.project.slug >>/<name>`, with
+  # nothing branch-specific in it, so two different PRs that both trigger
+  # acceptance-gh-app still queue behind each other rather than racing — the
+  # thing being protected is gh-app-cci-1, and it does not care which PR is
+  # asking.
+  #
+  # Gating every PR is what makes that queue longer in practice: several PRs
+  # open at once now means several pipelines contending for the same three
+  # groups, not four ~40-minute jobs run once a night. That is a wait-time
+  # cost, not a correctness one — accept it, or shorten it by pushing fewer
+  # commits per PR (CircleCI's own auto-cancel-redundant-builds setting, if
+  # enabled on this project, already retires a PR's *own* superseded pipeline
+  # when a new commit lands on the same branch; it does nothing for two
+  # different PRs' pipelines wanting the same organization at the same time).
+  #
+  # Collapsing acceptance-gh-oauth and acceptance-gh-hybrid's shared group into
+  # two independent ones needs the org-move test itself to stop writing into
+  # gh-oauth-cci-2 — pointing CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID at some third,
+  # dedicated organization instead, so acceptance-gh-hybrid's own organization
+  # is never a destination the other job writes to. That is a change to the
+  # test fixtures, not to this file, and until it lands this comment's "two
+  # jobs writing to one org" is still literally true, so the shared group
+  # stays.
   #
   #   CIRCLECI_TEST_VCS_TYPE=github_oauth CIRCLECI_TEST_GH_OAUTH_ORG_SLUG=gh/gh-oauth-cci-1 \
   #     TF_ACC=1 go test ./internal/provider/ -run TestAccCircleCiProjectOrgUpdateResource -v
@@ -570,36 +665,49 @@ workflows:
   # the moment CIRCLECI_TEST_GH_OAUTH_ALT_ORG_ID again points a runnable test
   # at another job's organization. Nothing here does either today.
   acceptance:
-    when: << pipeline.parameters.run-acceptance-tests >>
+    when:
+      or:
+        - << pipeline.parameters.run-acceptance-tests >>
+        - << pipeline.parameters.nightly-acceptance-run >>
+        # Every PR from a branch of this repository: a branch build (not a
+        # tag — release tags need none of this) that is not labs itself.
+        # Labs only ever gets here through one of the two parameters above,
+        # nightly or on demand; a plain push to labs (a merge) does not
+        # re-trigger it on its own, which is deliberate — post-merge coverage
+        # is the nightly trigger's job, not every push's.
+        - and:
+            - equal: ["", << pipeline.git.tag >>]
+            - not:
+                equal: ["labs", << pipeline.git.branch >>]
     jobs:
       - acceptance-gh-app:
-          # This context holds CIRCLE_TOKEN and nothing else, and is restricted
-          # to this project and the labs branch. No other context is requested
-          # by these jobs: every other value they need is a fixture identifier,
-          # set in plain sight in the job's environment block above.
-          context: terraform-provider-acc-token
-          # Same idiom as the release job above.
-          filters:
-            branches:
-              only: labs
+          # terraform-provider-acc-token holds CIRCLE_TOKEN and nothing else.
+          # terraform-provider-issue-token holds a separate, minimally-scoped
+          # GH_TOKEN (issues: read/write on this repository only) that
+          # file-nightly-failure-issue.sh's `gh` calls read from the
+          # environment; see the setup note at the end of this file. Neither
+          # is requested for anything else these jobs need: every other value
+          # is a fixture identifier, set in plain sight in the job's
+          # environment block above.
+          context:
+            - terraform-provider-acc-token
+            - terraform-provider-issue-token
           serial-group: << pipeline.project.slug >>/acceptance-gh-app
       - acceptance-gh-oauth:
-          context: terraform-provider-acc-token
-          filters:
-            branches:
-              only: labs
-          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth
+          context:
+            - terraform-provider-acc-token
+            - terraform-provider-issue-token
+          # Shared with acceptance-gh-hybrid on purpose — see above.
+          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth-pair
       - acceptance-gh-hybrid:
-          context: terraform-provider-acc-token
-          filters:
-            branches:
-              only: labs
-          serial-group: << pipeline.project.slug >>/acceptance-gh-hybrid
+          context:
+            - terraform-provider-acc-token
+            - terraform-provider-issue-token
+          serial-group: << pipeline.project.slug >>/acceptance-gh-oauth-pair
       - acceptance-gl-cloud:
-          context: terraform-provider-acc-token
-          filters:
-            branches:
-              only: labs
+          context:
+            - terraform-provider-acc-token
+            - terraform-provider-issue-token
           serial-group: << pipeline.project.slug >>/acceptance-gl-cloud
 
 # Setting up releases (moved here from GitHub Actions)
@@ -647,8 +755,13 @@ workflows:
 #
 # What supplies the difference is split in two, on purpose:
 #
-#   * ONE SECRET, in a context. terraform-provider-acc-token holds CIRCLE_TOKEN
-#     and nothing else, restricted to this project and to the labs branch.
+#   * TWO SECRETS, in two contexts. terraform-provider-acc-token holds
+#     CIRCLE_TOKEN and nothing else. terraform-provider-issue-token holds
+#     GH_TOKEN and nothing else, for file-nightly-failure-issue.sh's `gh`
+#     calls. Separate contexts because the two tokens have unrelated blast
+#     radii — one can rewrite four CircleCI organizations, the other can only
+#     open and comment on GitHub issues in this one repository — and a
+#     restriction that fits one is not the right restriction for the other.
 #   * EVERY FIXTURE IDENTIFIER, in this file, in each job's environment block.
 #     Org and project UUIDs and slugs are not secrets, and keeping them here
 #     means changing which organization gets written to is a reviewable diff
@@ -659,19 +772,59 @@ workflows:
 # and replace policy bundles and OIDC claims wholesale. TESTING.md has the full
 # blast radius.
 #
-# One-time setup for the nightly run
+# One-time setup
 #
-#   1. Create the context and put CIRCLE_TOKEN in it (an org-admin personal API
-#      token that can reach all four organizations). Restrict it to this
-#      project and to the labs branch.
-#   2. In Project Settings -> Triggers, add a scheduled trigger on the labs
-#      branch with the pipeline parameter run-acceptance-tests set to true.
-#      Nightly, off-peak.
-#   3. To run them on demand, trigger a pipeline with the same parameter:
+#   1. Create terraform-provider-acc-token and put CIRCLE_TOKEN in it (an
+#      org-admin personal API token that can reach all four organizations).
+#      Restrict it to this project.
+#
+#      If it already exists restricted to this project *and* to the labs
+#      branch (an earlier setup step said to add that second restriction),
+#      remove the branch restriction now:
+#
+#        [NET] GET /api/v2/context/8d6a35ff-d9c4-4f12-8657-d2b8a96cc375/restrictions
+#        (terraform-provider-acc-token's own id) found exactly
+#        that expression, `pipeline.git.branch == "labs"`, still present as
+#        of this file's last acceptance-workflow change. Left in place, the
+#        `acceptance` workflow's new PR trigger below compiles the jobs in
+#        on every PR branch and then watches every one of them fail on a
+#        missing CIRCLE_TOKEN — summarize-acceptance-run.sh's "no API token
+#        reached this job" check, not a fixture problem. The project
+#        restriction alone is enough: a fork PR cannot reach this project's
+#        pipelines at all (build_fork_prs / forks_receive_secret_env_vars are
+#        both false on this project — see the `acceptance` workflow's own
+#        comment for the exact API response), so there is no longer a branch
+#        this context needs to exclude.
+#
+#   2. Create terraform-provider-issue-token and put a GH_TOKEN in it: a
+#      fine-grained GitHub PAT scoped to this repository only, with "Issues:
+#      read and write" and nothing else. Restrict the context to this
+#      project. This is what file-nightly-failure-issue.sh's `gh` calls
+#      authenticate with.
+#   3. In Project Settings -> Triggers, add a scheduled trigger on the labs
+#      branch with pipeline parameters run-acceptance-tests AND
+#      nightly-acceptance-run both set to true. Nightly, off-peak. Both
+#      parameters matter: the first is what actually compiles the
+#      `acceptance` workflow in (see its `when:`), the second is what tells
+#      acceptance_test's last step this run — and only this run — should
+#      open a GitHub issue if a job fails; see that parameter's own comment
+#      at the top of this file.
+#   4. To run the suite on demand instead of waiting for either the nightly
+#      trigger or a PR, trigger a pipeline with run-acceptance-tests alone
+#      (leave nightly-acceptance-run false, so a maintainer's own manual run
+#      does not also file an issue on failure — they are already watching it):
 #
 #        curl -X POST https://circleci.com/api/v2/project/<slug>/pipeline \
 #          -H "Circle-Token: $CIRCLE_TOKEN" -H 'Content-Type: application/json' \
 #          -d '{"branch":"labs","parameters":{"run-acceptance-tests":true}}'
+#
+#   5. To make one or more of these jobs a required check before merge:
+#      GitHub repository settings -> Branches -> branch protection rule for
+#      labs -> require status checks -> add "ci/circleci: acceptance-gh-app"
+#      (and any of the other three). Do this only once step 1's context
+#      restriction has actually been loosened — otherwise the required check
+#      is one that fails on every PR by construction, which blocks every
+#      merge rather than gating the ones that matter.
 #
 # Filling in the rest of the fixtures
 #
