@@ -64,8 +64,22 @@ type OrbPackage struct {
 	// contract, so this is a convention rather than a guarantee. It is empty for
 	// an orb with no versions yet.
 	//
-	// A detail response carries up to 50 version references; a paginated listing
-	// carries only one, so LatestVersion is all a listing can offer.
+	// How many version references come embedded depends on which route
+	// produced this package, and [NET, this investigation, confirmed against a
+	// certified public orb with 63 published versions] three different routes
+	// give three different counts for the exact same package:
+	//   - an ordinary /orb/packages listing (filter[namespace_id], filter
+	//     [certified], or no filter) embeds exactly one — the latest — which is
+	//     why LatestVersion is all such a listing can offer;
+	//   - the /orb/packages/{id} detail route embeds up to 50, and silently
+	//     truncates a package with more (measured 50 of 63);
+	//   - filter[name] on /orb/packages — the by-name lookup — embeds ALL of
+	//     them, uncapped (measured 63 of 63), because it is not a paginated
+	//     listing at all; see ListOrbPackagesOptions.Name.
+	// A caller that needs the true, complete version history regardless of
+	// count should use ListOrbVersions(OrbID: ...), which pages until
+	// exhausted, rather than reading references.orb_versions off of any
+	// OrbPackage.
 	LatestVersion          string
 	LatestVersionCreatedAt string
 	Last30DaysBuildCount   int64
@@ -240,6 +254,11 @@ type orbValidationWire struct {
 // createOrbPackageWire is the data payload of POST /orb/packages. Unlike the
 // namespace routes, the orb routes take the full v3 data/attributes/references
 // envelope on the way in as well as out.
+//
+// Attributes.Name is the one field on this route that is NOT symmetric with
+// what every response reports: it must be sent bare, with no namespace
+// prefix, even though every response — including this route's own — reports
+// it namespace-qualified. See CreateOrbPackage's doc comment.
 type createOrbPackageWire struct {
 	Attributes struct {
 		Name      string `json:"name"`
@@ -343,9 +362,10 @@ func (w orbVersionWire) toOrbVersion() *OrbVersion {
 
 // CreateOrbPackageRequest is the input to CreateOrbPackage.
 type CreateOrbPackageRequest struct {
-	// Name is the fully qualified orb name, "<namespace>/<orb>". The API stores
-	// and filters orbs by that qualified form even though the namespace is also
-	// given by reference.
+	// Name is the BARE orb name, with no namespace prefix — "node", not
+	// "acme/node". See CreateOrbPackage's doc comment: sending the qualified
+	// form here, which is what every other orb route accepts and reports, is
+	// rejected.
 	Name        string
 	NamespaceID string
 	IsPrivate   bool
@@ -353,6 +373,27 @@ type CreateOrbPackageRequest struct {
 
 // CreateOrbPackage creates an empty orb in a namespace. An orb has no source
 // until a version is published against it with PublishOrbVersion.
+//
+// req.Name must be the BARE orb name, with no namespace prefix.
+//
+// [NET, this investigation, against two separate real accounts]: sending the
+// fully qualified "<namespace>/<orb>" form here — which is what GetOrbPackage,
+// ListOrbPackages and every other orb route both accept and report, and what
+// every earlier version of this client sent — is rejected on EVERY name tried:
+// a brand-new name, a name that already belongs to an existing orb in the same
+// namespace, a single character, all in a namespace created fresh for this
+// investigation with every orb-related organization setting explicitly turned
+// on. Every one of those answers the same
+// `400 {"error":{"title":"Cannot create an Orb named '<name>': this name is
+// invalid. See the documentation..."}}`, including the literal duplicate —
+// which is the tell: a real duplicate-name check answers "an Orb with that
+// name already exists," not "this name is invalid," so this was never about
+// quota, entitlement, or the name's content. It is that this one route, alone
+// among the orb routes, wants the bare form and treats the "/" in a qualified
+// name as what makes the name "invalid." Sending the bare name (verified
+// against the same accounts) succeeds with `201`, and the response's own
+// attributes.name still comes back namespace-qualified — the server adds the
+// prefix that this route uniquely does not want handed to it on the way in.
 func (c *Client) CreateOrbPackage(ctx context.Context, req CreateOrbPackageRequest) (*OrbPackage, error) {
 	var body Entity[createOrbPackageWire]
 	body.Data.Attributes.Name = req.Name
@@ -390,17 +431,32 @@ func (c *Client) GetOrbPackage(ctx context.Context, id string) (*OrbPackage, err
 //
 //   - Name short-circuits everything. When filter[name] is present the handler
 //     resolves that one name and returns immediately, so Certified, Visibility
-//     and NamespaceID are all ignored, and the answer is never paginated.
+//     and NamespaceID are all ignored, and the answer is never paginated —
+//     [NET, freshly reconfirmed this investigation against a certified public
+//     orb with 63 published versions] it also embeds every one of those 63 in
+//     references.orb_versions, uncapped, where the by-id detail route for the
+//     identical package truncates the same list at 50. See OrbPackage.LatestVersion.
 //   - Visibility is only consulted alongside NamespaceID, and the two settings
 //     are mutually exclusive rather than additive: a namespace listing is
 //     public-only unless Visibility is OrbVisibilityPrivate, which makes it
 //     private-only. There is no way to ask for both in one request, and a
 //     Visibility with no NamespaceID does nothing at all.
 //   - Certified is only consulted when NamespaceID is empty.
+//   - [NET] A NamespaceID listing with no Visibility filter also silently
+//     excludes any orb whose is_listed is false, even though such an orb is
+//     public (not private) and reads back fine by id or by Name. An orb hidden
+//     with SetOrbListed(id, false) therefore disappears from ListOrbPackages
+//     and from circleci_orbs entirely, not just from CircleCI's own public
+//     registry search.
 type ListOrbPackagesOptions struct {
 	NamespaceID string
 	// Name filters on the fully qualified "<namespace>/<orb>" name. It is an
 	// exact lookup that overrides every other field here.
+	//
+	// This is the read side; do not confuse it with CreateOrbPackageRequest.Name,
+	// which — despite living in the same file, for the same resource — must be
+	// the BARE name with no namespace prefix. Every read route reports and
+	// filters on the qualified form; only the create route rejects it.
 	Name string
 	// Certified, when non-nil, restricts the listing to CircleCI-certified orbs.
 	//
@@ -729,8 +785,22 @@ type PromoteOrbVersionRequest struct {
 	SemanticVersion string `json:"semantic_version,omitempty"`
 }
 
-// PromoteOrbVersion publishes a dev version as a stable semantic version. The
-// promoted version is a new, immutable version; the dev version is untouched.
+// PromoteOrbVersion publishes a dev version as a stable semantic version.
+//
+// [NET, this investigation]: the response reuses the SAME version id that was
+// passed in — it does not mint a new one — with attributes.version changed to
+// the promoted semantic version, and GetOrbVersion(id) afterward agrees with
+// that. That much matches "the promoted version is immutable" once it settles.
+// What this investigation could not reconcile: for several seconds afterward
+// (and possibly longer; this was not chased further), ListOrbVersions with
+// Channel: OrbChannelDev on the same orb still listed that same id under its
+// original dev:<label> version string, disagreeing with the by-id GET taken at
+// the same moment. Treat the dev-channel listing as potentially stale
+// immediately after a promotion, and confirm a promotion by reading the
+// returned id back with GetOrbVersion rather than by re-listing either
+// channel. Separately, and independently of that: the label itself is not
+// consumed by promotion — dev:<label> can be published again right after, and
+// answers 201 with a brand new id.
 func (c *Client) PromoteOrbVersion(ctx context.Context, id string, req PromoteOrbVersionRequest) (*OrbVersion, error) {
 	var env Entity[orbVersionWire]
 	if err := c.PostV3(ctx, "/orb/versions/%s/promote", req, &env, RouteParams(id)); err != nil {

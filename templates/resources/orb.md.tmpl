@@ -11,7 +11,7 @@ Manages a CircleCI orb: the named container in a namespace that owns a series of
 
 Creating an orb publishes no source. Use `circleci_orb_version` to publish versions against it, and reference them from a `.circleci/config.yml` as `<namespace>/<orb>@<version>`.
 
-!> **An orb cannot be deleted.** The CircleCI API has no delete route for an orb, on purpose: pipelines that reference its versions must keep resolving. `terraform destroy` therefore removes the resource from Terraform state, warns, and leaves the orb in the registry. To hide a public orb, set `is_listed = false` instead of destroying it. To remove an orb entirely, delete the `circleci_orb_namespace` that owns it, which deletes its orbs too.
+!> **An orb cannot be removed, ever, once created.** `DELETE /orb/packages/{id}` answers a router-level 404 "Route Not Found": the route simply does not exist. There is no back door through the namespace either — destroying `circleci_orb_namespace` does not delete the namespace at CircleCI, so it cannot take the orb down with it; see that resource's own documentation. `terraform destroy` therefore removes the resource from Terraform state only, and warns that it did. To hide a public orb from the registry listing instead, set `is_listed = false`.
 
 ## Availability
 

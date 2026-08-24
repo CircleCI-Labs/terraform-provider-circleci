@@ -69,13 +69,22 @@ const (
 	orbEmptyList = `{"data":[],"page":{"next":null,"prev":null}}`
 )
 
+// TestCreateOrbPackageSendsDataEnvelope pins the create route's one asymmetry
+// with every other orb route: it sends the BARE name, not the qualified one.
+//
+// [NET]: sending the qualified "<namespace>/<orb>" form here — which this test,
+// and CreateOrbPackageRequest's own doc comment, used to assert as correct —
+// answers 400 "this name is invalid" on every name tried against two real
+// accounts, including a genuine duplicate. See CreateOrbPackage's doc comment.
+// The response is still qualified regardless, which orbDetailEntity's fixture
+// reflects unchanged: only the request side was wrong.
 func TestCreateOrbPackageSendsDataEnvelope(t *testing.T) {
 	t.Parallel()
 
 	client, rec := newOrbClient(t, orbJSON(orbDetailEntity))
 
 	pkg, err := client.CreateOrbPackage(context.Background(), circleci.CreateOrbPackageRequest{
-		Name:        "acme/node",
+		Name:        "node",
 		NamespaceID: orbNsID,
 		IsPrivate:   true,
 	})
@@ -92,14 +101,17 @@ func TestCreateOrbPackageSendsDataEnvelope(t *testing.T) {
 	}
 
 	// The orb routes take the v3 data/attributes/references envelope on the way
-	// in, and the name is fully qualified even though the namespace is also given
-	// by reference.
-	want := `{"data":{"attributes":{"name":"acme/node","is_private":true},` +
+	// in, and — unlike every other field this client sends or reads for an orb —
+	// the name is the BARE form here, with the namespace given only by
+	// reference. See CreateOrbPackage's doc comment for why.
+	want := `{"data":{"attributes":{"name":"node","is_private":true},` +
 		`"references":{"namespace":{"id":"11111111-1111-1111-1111-111111111111"}}}}`
 	if got.body != want {
 		t.Errorf("body = %s, want %s", got.body, want)
 	}
 
+	// The response is unaffected by the fix: it was always, and remains,
+	// namespace-qualified.
 	if pkg.Name != "acme/node" || pkg.Namespace != "acme" {
 		t.Errorf("package = %+v, want name acme/node in namespace acme", pkg)
 	}

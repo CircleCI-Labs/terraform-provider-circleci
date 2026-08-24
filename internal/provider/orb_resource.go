@@ -88,10 +88,14 @@ func (r *orbResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"~> **CircleCI Cloud only.** Orbs are served by the CircleCI v3 API, which CircleCI " +
 			"Server does not route. Using this resource against a provider configured with " +
 			"`deployment = \"server\"` fails with an explicit error.\n\n" +
-			"!> **Orbs cannot be deleted.** The CircleCI API has no delete route for an orb. " +
-			"Destroying this resource removes it from Terraform state and leaves the orb in the " +
-			"registry; a warning says so. Set `is_listed = false` to hide a public orb, or delete " +
-			"the whole `circleci_orb_namespace` to remove its orbs.",
+			"!> **An orb cannot be removed, ever, once created.** `DELETE /orb/packages/{id}` " +
+			"answers a router-level 404 \"Route Not Found\": the route does not exist at all, " +
+			"not even to refuse cleanly. There is also no back door through the namespace that " +
+			"owns it -- destroying `circleci_orb_namespace` does not delete the namespace at " +
+			"CircleCI either, so it cannot take the orb down with it; see that resource's own " +
+			"documentation. Destroying this resource only removes it from Terraform state, and " +
+			"a warning says so. Set `is_listed = false` to hide a public orb from the registry " +
+			"listing instead.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Unique identifier (UUID) of the orb.",
@@ -244,10 +248,14 @@ func (r *orbResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
-	// The API stores an orb under its fully qualified "<namespace>/<orb>" name and
-	// wants that qualified form on create, even though the namespace is also given
-	// by reference. Resolving the namespace first also turns a bad namespace_id
-	// into a clear error instead of a confusing orb-create failure.
+	// The namespace is resolved first so that a bad namespace_id produces a
+	// clear error instead of a confusing orb-create failure, and to build
+	// fullName below for diagnostics. The create request itself must NOT
+	// repeat the namespace in Name: see CreateOrbPackage's doc comment in
+	// internal/circleci/orb.go for why sending the qualified form there — what
+	// this resource used to do — made every creation fail with a generic
+	// "this name is invalid" 400, indistinguishable from a real name problem or
+	// a quota.
 	ns, err := r.client.GetNamespaceByID(ctx, plan.NamespaceId.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -258,10 +266,14 @@ func (r *orbResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
+	// fullName is for diagnostics only; the API reports it back qualified
+	// regardless of what was sent, once creation succeeds. It is computed here,
+	// ahead of the create call, so it is available for the error message below
+	// even when that call fails.
 	fullName := ns.Name + "/" + plan.Name.ValueString()
 
 	pkg, err := r.client.CreateOrbPackage(ctx, circleci.CreateOrbPackageRequest{
-		Name:        fullName,
+		Name:        plan.Name.ValueString(),
 		NamespaceID: plan.NamespaceId.ValueString(),
 		IsPrivate:   plan.IsPrivate.ValueBool(),
 	})
@@ -412,10 +424,19 @@ func (r *orbResource) Update(ctx context.Context, req resource.UpdateRequest, re
 
 // Delete removes the orb from Terraform state without calling the API.
 //
-// The CircleCI API has no delete route for an orb: an orb, like the versions
-// published against it, is permanent. Failing the destroy would leave the
-// practitioner unable to remove the resource from their configuration at all, so
-// the state entry is dropped and a warning explains what is left behind.
+// [NET] DELETE /orb/packages/{id} answers a router-level 404 "Route Not
+// Found" — the route does not exist, so there is no API call this method
+// could make. An orb, like the versions published against it, is permanent.
+// Failing the destroy would leave the practitioner unable to remove the
+// resource from their configuration at all, so the state entry is dropped and
+// a warning explains what is left behind.
+//
+// It used to be believed that deleting the circleci_orb_namespace that owns
+// an orb would remove the orb along with it, and this method's warning said
+// so. That was never demonstrated, and it is not true: namespace deletion is
+// not something Terraform can actually cause either — see
+// circleci_orb_namespace's own Delete and documentation — so there never was
+// a working path from here to there.
 func (r *orbResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	if !requireCloud(r.client, orbTypeName, &resp.Diagnostics) {
 		return
@@ -431,10 +452,12 @@ func (r *orbResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 		"CircleCI orb cannot be deleted",
 		fmt.Sprintf(
 			"The orb %q has been removed from Terraform state, but it still exists in the CircleCI "+
-				"orb registry: the API has no route to delete an orb.\n\n"+
-				"To hide a public orb from the registry listing, set is_listed = false instead of "+
-				"destroying it. To remove an orb entirely, delete the namespace that owns it with "+
-				"circleci_orb_namespace, which deletes its orbs as well.",
+				"orb registry: DELETE /orb/packages/{id} answers a router-level 404 \"Route Not "+
+				"Found\" -- the route does not exist. There is no way to remove an orb once it has "+
+				"been created, and no way to reach it indirectly either: destroying "+
+				"circleci_orb_namespace does not delete the namespace at CircleCI, so it cannot take "+
+				"the orb down with it.\n\n"+
+				"To hide a public orb from the registry listing instead, set is_listed = false.",
 			state.FullName.ValueString(),
 		),
 	)
