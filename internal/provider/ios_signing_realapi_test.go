@@ -481,7 +481,7 @@ resource "circleci_ios_signing_config" "test" {
 	})
 }
 
-// TestAccIOSSigningCertificateDeleteWhileReferenced_RealAPI is the automated
+// TestIOSSigningCertificateDeleteWhileReferenced_RealAPI is the automated
 // [NET] proof of the fact this file's package comment says was, until now,
 // only "verified by hand": DeleteSigningCertificate answers 409 while a
 // circleci_ios_signing_config still references the certificate. It is also
@@ -496,7 +496,7 @@ resource "circleci_ios_signing_config" "test" {
 // together -- the only way to create the pair), so reproducing the 409 means
 // deliberately deleting in the wrong order, which there is no supported way
 // to do through the resources themselves.
-func TestAccIOSSigningCertificateDeleteWhileReferenced_RealAPI(t *testing.T) {
+func TestIOSSigningCertificateDeleteWhileReferenced_RealAPI(t *testing.T) {
 	testAccPreCheck(t)
 	orgID := testOrgID(t)
 	ctx := t.Context()

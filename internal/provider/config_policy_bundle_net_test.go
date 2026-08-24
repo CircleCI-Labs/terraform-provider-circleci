@@ -195,7 +195,7 @@ resource "circleci_config_policy_bundle" "net_test" {
 	})
 }
 
-// TestAccConfigPolicyBundleNet_DryRunDoesNotApply pins, against the real API,
+// TestConfigPolicyBundleNet_DryRunDoesNotApply pins, against the real API,
 // the mechanism every other test in this file relies on to check before it
 // destroys anything: [NET, measured 2026-08-21] dry=true validates and reports
 // the diff an upload would produce, without applying it.
@@ -204,7 +204,7 @@ resource "circleci_config_policy_bundle" "net_test" {
 // anything captured from a pre-existing bundle — so a regression in this
 // property (dry-run starting to apply for real) is caught without any risk of
 // data loss to a policy this test does not own.
-func TestAccConfigPolicyBundleNet_DryRunDoesNotApply(t *testing.T) {
+func TestConfigPolicyBundleNet_DryRunDoesNotApply(t *testing.T) {
 	testAccPreCheck(t)
 	ownerID := testOrgID(t)
 	testRequireVCSType(t, acceptanceVCSTypes...)
