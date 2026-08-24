@@ -404,6 +404,80 @@ func asStringOrEmpty(v any) string {
 	return s
 }
 
+// redactSecretQueryParam returns url with its "secret=" query parameter's
+// value replaced by circleci.TriggerWebhookURLRedacted, leaving the host and
+// path untouched.
+//
+// This fake used to model redaction by replacing the WHOLE url field with the
+// bare placeholder string. That is not what the real API does — confirmed
+// 2026-08-22 by TestAccTriggerResourceWebhook against circleci.com, which
+// failed the moment this fix landed with a real URL like
+// "https://.../secret=<token>" compared against the redaction this fake used
+// to produce, a bare "**REDACTED**" with no host or path at all — and it is
+// exactly the gap that let circleci.TriggerWebhook.URLIsRedacted() ship as an
+// equality check that could never be true against production, which would
+// have made the corresponding fix in trigger_resource.go a no-op there. A
+// fake that is wrong about the SHAPE of the API's own defect cannot catch a
+// fix that only handles the wrong shape.
+func redactSecretQueryParam(url string) string {
+	prefix, _, found := strings.Cut(url, "secret=")
+	if !found {
+		return url
+	}
+
+	return prefix + "secret=" + circleci.TriggerWebhookURLRedacted
+}
+
+// redactWebhookURLForRead returns a copy of record with
+// event_source.webhook.url's secret redacted via redactSecretQueryParam,
+// modelling what GET and PATCH answer with on the real API — see
+// CreateTrigger's doc comment in internal/circleci/trigger.go: only the create
+// response ever carries the real secret, even to the token that just minted
+// it.
+//
+// The fake used to answer every route with the same real URL it stored, which
+// is exactly the one behaviour production does not have for GET and PATCH. A
+// fake that cannot be wrong the way the API is wrong cannot catch Read or
+// Update clobbering state with the placeholder — see
+// TestTriggerResourceUnit_WebhookURLSurvivesRefreshAndUpdate, which needs this
+// to be wrong in the same way the API is wrong or it would pass for having
+// nothing to preserve rather than for actually preserving something.
+//
+// Only the returned response is redacted; a.triggers keeps the real URL, so a
+// later call still has it to redact again.
+func redactWebhookURLForRead(record map[string]any) map[string]any {
+	eventSource, ok := record["event_source"].(map[string]any)
+	if !ok {
+		return record
+	}
+	webhook, ok := eventSource["webhook"].(map[string]any)
+	if !ok {
+		return record
+	}
+
+	redactedWebhook := make(map[string]any, len(webhook))
+	for k, v := range webhook {
+		redactedWebhook[k] = v
+	}
+	if url, ok := webhook["url"].(string); ok {
+		redactedWebhook["url"] = redactSecretQueryParam(url)
+	}
+
+	redactedSource := make(map[string]any, len(eventSource))
+	for k, v := range eventSource {
+		redactedSource[k] = v
+	}
+	redactedSource["webhook"] = redactedWebhook
+
+	redacted := make(map[string]any, len(record))
+	for k, v := range record {
+		redacted[k] = v
+	}
+	redacted["event_source"] = redactedSource
+
+	return redacted
+}
+
 func (a *fakeTriggerAPI) get(w http.ResponseWriter, r *http.Request) {
 	a.record(r, nil)
 
@@ -432,7 +506,7 @@ func (a *fakeTriggerAPI) get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(record)
+	_ = json.NewEncoder(w).Encode(redactWebhookURLForRead(record))
 }
 
 func (a *fakeTriggerAPI) update(w http.ResponseWriter, r *http.Request) {
@@ -515,7 +589,7 @@ func (a *fakeTriggerAPI) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(record)
+	_ = json.NewEncoder(w).Encode(redactWebhookURLForRead(record))
 }
 
 func (a *fakeTriggerAPI) delete(w http.ResponseWriter, r *http.Request) {
@@ -1041,7 +1115,9 @@ func TestTriggerResourceUnit_EventSourceRepoExternalIdChangeForcesReplacement(t 
 
 // --- webhook provider: CRUD ---
 
-func triggerFakeWebhookConfig(host, eventName, sender string) string {
+// The event name is fixed: only the sender varies between these cases, and a
+// parameter every caller passes the same value to reads like a knob that isn't one.
+func triggerFakeWebhookConfig(host, sender string) string {
 	return triggerFakeProviderConfig(host) + fmt.Sprintf(`
 resource "circleci_trigger" "test" {
   project_id                     = %[1]q
@@ -1055,7 +1131,7 @@ resource "circleci_trigger" "test" {
   checkout_ref                   = "main"
   config_ref                     = "main"
 }
-`, fakeTriggerProjectID, fakeTriggerPipelineID, eventName, sender)
+`, fakeTriggerProjectID, fakeTriggerPipelineID, "deploy-hook", sender)
 }
 
 func TestTriggerResourceUnit_WebhookCRUD(t *testing.T) {
@@ -1065,7 +1141,7 @@ func TestTriggerResourceUnit_WebhookCRUD(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: triggerFakeWebhookConfig(host, "deploy-hook", "datadog"),
+				Config: triggerFakeWebhookConfig(host, "datadog"),
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_source_provider"), knownvalue.StringExact("webhook")),
 					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_name"), knownvalue.StringExact("deploy-hook")),
@@ -1073,10 +1149,18 @@ func TestTriggerResourceUnit_WebhookCRUD(t *testing.T) {
 				},
 			},
 			{
-				ResourceName:      "circleci_trigger.test",
-				ImportState:       true,
-				ImportStateVerify: true,
-				ImportStateIdFunc: triggerImportID(),
+				ResourceName: "circleci_trigger.test",
+				ImportState:  true,
+				// event_source_web_hook_url only: GET always answers with the redacted
+				// placeholder (see redactWebhookURLForRead), and Read preserves whatever
+				// was already in state rather than writing that placeholder over it —
+				// see trigger_resource.go's Read. A fresh import has no prior state to
+				// preserve, so this attribute reads null after import even though the
+				// created resource's state holds the real URL. Same ignore, same reason,
+				// as TestAccTriggerResourceWebhook's real-API acceptance test.
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"event_source_web_hook_url"},
+				ImportStateIdFunc:       triggerImportID(),
 			},
 		},
 	})
@@ -1089,6 +1173,129 @@ func TestTriggerResourceUnit_WebhookCRUD(t *testing.T) {
 	webhook, _ := eventSource["webhook"].(map[string]any)
 	if webhook["sender"] != "datadog" {
 		t.Errorf("create event_source.webhook.sender = %v, want datadog", webhook["sender"])
+	}
+}
+
+// TestTriggerResourceUnit_WebhookURLSurvivesRefreshAndUpdate is the regression
+// test for the question this review was asked to settle for every
+// secret-bearing resource shipped: when the API redacts a value on read, does
+// Read (and, for this resource, Update) PRESERVE the state value instead of
+// clobbering it with the placeholder?
+//
+// Before the fix, trigger_resource.go's Read and Update both wrote the API
+// response's event_source.webhook.url into state unconditionally. Because GET
+// and PATCH both redact it (circleci.TriggerWebhookURLRedacted), that meant the
+// real signed URL a create response carries was replaced with the unusable
+// placeholder on the very first refresh after any apply, and again on every
+// update after that — silently, since this is a Computed attribute with no
+// configured value to diff against, so no ordinary plan check would surface
+// it. This test needed the fake to be capable of answering wrong the way the
+// API is wrong (see redactWebhookURLForRead) before it could catch that: a
+// fake that always echoes the real URL back could never distinguish "nothing
+// to clobber" from "clobbering successfully prevented".
+func TestTriggerResourceUnit_WebhookURLSurvivesRefreshAndUpdate(t *testing.T) {
+	_, host := newFakeTriggerAPI(t)
+
+	const wantURL = "https://webhook.circleci.com/hooks/22222222-3333-4444-5555-000000000001?secret=fake-secret"
+
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// Create: the response is never redacted (only GET and PATCH are), so
+				// the real URL lands in state straight from the create response —
+				// trigger_resource.go's Create does not call Read for this field.
+				Config: triggerFakeWebhookConfig(host, "datadog"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_source_web_hook_url"), knownvalue.StringExact(wantURL)),
+				},
+			},
+			{
+				// Re-applying the identical configuration forces a refresh — a GET,
+				// which the fake now redacts exactly like the real API. The URL must
+				// still be the real one afterwards, not the placeholder.
+				Config: triggerFakeWebhookConfig(host, "datadog"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_source_web_hook_url"), knownvalue.StringExact(wantURL)),
+				},
+			},
+			{
+				// An update (changing the sender) goes through PATCH, which the fake
+				// also redacts. The real URL must survive that too.
+				Config: triggerFakeWebhookConfig(host, "pagerduty"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_source_web_hook_sender"), knownvalue.StringExact("pagerduty")),
+					statecheck.ExpectKnownValue("circleci_trigger.test", tfjsonpath.New("event_source_web_hook_url"), knownvalue.StringExact(wantURL)),
+				},
+			},
+		},
+	})
+}
+
+// TestFakeTriggerAPIRedactsWebhookURLOnReadAndUpdate guards the guard: it talks
+// to the fake directly and proves GET and PATCH actually answer with
+// circleci.TriggerWebhookURLRedacted rather than the real URL, which is the one
+// property TestTriggerResourceUnit_WebhookURLSurvivesRefreshAndUpdate depends on
+// to be a meaningful test at all. Without this, a future edit that quietly made
+// the fake stop redacting would make that test pass for having nothing to
+// preserve, not for actually preserving something — the same failure mode
+// TestFakeAPIsDoNotEchoCollectionOrder guards against for `events` ordering.
+func TestFakeTriggerAPIRedactsWebhookURLOnReadAndUpdate(t *testing.T) {
+	t.Parallel()
+
+	_, host := newFakeTriggerAPI(t)
+	createPath := "/api/v2/projects/" + fakeTriggerProjectID + "/pipeline-definitions/" + fakeTriggerPipelineID + "/triggers"
+
+	created := postJSON(t, host+createPath, `{
+		"event_source": {"provider": "webhook", "webhook": {"sender": "datadog"}},
+		"checkout_ref": "main", "config_ref": "main", "event_name": "deploy-hook"
+	}`)
+	if created.status != http.StatusOK {
+		t.Fatalf("create answered %d: %s", created.status, created.body)
+	}
+	id, _ := created.decoded["id"].(string)
+	if id == "" {
+		t.Fatalf("create returned no id: %s", created.body)
+	}
+	createdSource, _ := created.decoded["event_source"].(map[string]any)
+	createdWebhook, _ := createdSource["webhook"].(map[string]any)
+	realURL, _ := createdWebhook["url"].(string)
+	if realURL == "" || realURL == circleci.TriggerWebhookURLRedacted {
+		t.Fatalf("create response event_source.webhook.url = %q, want a real, non-redacted URL", realURL)
+	}
+
+	triggerPath := "/api/v2/projects/" + fakeTriggerProjectID + "/triggers/" + id
+
+	// URLIsRedacted, not equality: the real API keeps the URL's host and path
+	// intact and redacts only the secret query parameter's value (see its own
+	// doc comment in internal/circleci/trigger.go for how that was learned),
+	// so a check this test and trigger_resource.go do not share could each be
+	// wrong about the shape in a different, mutually-hiding way.
+	got := sendJSON(t, http.MethodGet, host+triggerPath, "")
+	gotSource, _ := got.decoded["event_source"].(map[string]any)
+	gotWebhook, _ := gotSource["webhook"].(map[string]any)
+	gotURL, _ := gotWebhook["url"].(string)
+	if !(circleci.TriggerWebhook{URL: gotURL}).URLIsRedacted() {
+		t.Errorf("GET event_source.webhook.url = %q, want it to contain the redacted placeholder %q — "+
+			"a fake that echoes the real secret back on GET cannot catch Read clobbering state with it",
+			gotURL, circleci.TriggerWebhookURLRedacted)
+	}
+	if !strings.HasPrefix(gotURL, realURL[:strings.Index(realURL, "secret=")]) {
+		t.Errorf("GET event_source.webhook.url = %q, want the same host and path as the create "+
+			"response's %q with only the secret's value replaced — the real API keeps those, and a "+
+			"fake that redacted the whole field could not catch trigger_resource.go treating the "+
+			"whole field as the placeholder", gotURL, realURL)
+	}
+
+	patched := sendJSON(t, http.MethodPatch, host+triggerPath,
+		`{"event_source":{"provider":"webhook","webhook":{"sender":"pagerduty"}}}`)
+	patchedSource, _ := patched.decoded["event_source"].(map[string]any)
+	patchedWebhook, _ := patchedSource["webhook"].(map[string]any)
+	patchedURL, _ := patchedWebhook["url"].(string)
+	if !(circleci.TriggerWebhook{URL: patchedURL}).URLIsRedacted() {
+		t.Errorf("PATCH event_source.webhook.url = %q, want it to contain the redacted placeholder %q — "+
+			"a fake that echoes the real secret back on PATCH cannot catch Update clobbering state with it",
+			patchedURL, circleci.TriggerWebhookURLRedacted)
 	}
 }
 

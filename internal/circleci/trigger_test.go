@@ -17,6 +17,51 @@ const (
 	testTriggerDefinitionID = "44444444-4444-4444-4444-444444444444"
 )
 
+// TestTriggerWebhookURLIsRedacted pins the substring check against both real
+// shapes the API has been observed to return: the whole field replaced by the
+// bare placeholder (what an earlier, imprecise probe recorded, and what a
+// naive implementation would check for with ==), and the real shape — the
+// URL's host and path intact, with only the secret query parameter's value
+// swapped for the placeholder (what a live acceptance run against
+// circleci.com actually returned, and what caught the imprecise probe). Both
+// must report redacted; only a URL carrying a real secret must not.
+func TestTriggerWebhookURLIsRedacted(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		url  string
+		want bool
+	}{
+		"the real shape: host and path intact, only the secret's value redacted": {
+			url:  "https://example.com/hooks/bc64f7c3-cd07-461e-87c7-e1c36eaf3b43?secret=**REDACTED**",
+			want: true,
+		},
+		"the bare placeholder with no URL at all": {
+			url:  circleci.TriggerWebhookURLRedacted,
+			want: true,
+		},
+		"a real, unredacted secret": {
+			url:  "https://example.com/hooks/bc64f7c3-cd07-461e-87c7-e1c36eaf3b43?secret=fake-example-secret-not-a-real-credential",
+			want: false,
+		},
+		"empty, as for a non-webhook trigger's event source": {
+			url:  "",
+			want: false,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			webhook := circleci.TriggerWebhook{URL: tc.url}
+			if got := webhook.URLIsRedacted(); got != tc.want {
+				t.Errorf("TriggerWebhook{URL: %q}.URLIsRedacted() = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestListTriggers(t *testing.T) {
 	t.Parallel()
 

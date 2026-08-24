@@ -1000,6 +1000,89 @@ func TestWebhookResourceUnit_UpdateWritesFromResponseNotPlan(t *testing.T) {
 	}
 }
 
+// TestWebhookResourceUnit_ReadPreservesSigningSecretWhenAPIRedacts settles, for
+// this resource, one of the two questions this review was asked to check for
+// every secret-bearing resource it touched: when the API redacts a value on
+// read, does Read preserve whatever is already in state instead of overwriting
+// it with the mask?
+//
+// webhook_resource.go's Read never assigns state.SigningSecret at all — the
+// field is simply absent from its "map response to state" block — which is
+// what makes this hold today. That omission is easy to lose sight of, because
+// nothing enforces it structurally: a well-meaning "map every field GetWebhook
+// returns into state" cleanup would add exactly the line this test exists to
+// catch.
+//
+// Read is driven directly, bypassing a full Terraform plan/apply cycle,
+// because `signing_secret` is Optional rather than Computed: through a full
+// cycle a wrongly-overwritten state value would only ever show up as an extra,
+// self-correcting Update immediately afterwards (Update writes signing_secret
+// from the plan/config, never from the response — see this resource's Update
+// and TestWebhookResourceUnit_UpdateWritesFromResponseNotPlan's own comment on
+// that exception), so the final state a resource.UnitTest run leaves behind
+// would look identical whether or not Read regressed. Driving Read alone is
+// the only way to observe the value it actually produced.
+func TestWebhookResourceUnit_ReadPreservesSigningSecretWhenAPIRedacts(t *testing.T) {
+	t.Parallel()
+
+	api, client := newFakeWebhookClient(t)
+
+	const id = "fixed-webhook-id-redact-check"
+	api.mu.Lock()
+	api.webhooks[id] = map[string]any{
+		"id":             id,
+		"name":           "hook-1",
+		"url":            "https://example.com/hook",
+		"verify_tls":     true,
+		"signing_secret": circleci.WebhookSigningSecretMask, // all GetWebhook ever answers with
+		"scope":          map[string]any{"id": fakeWebhookScopeID, "type": "project"},
+		"events":         []any{"workflow-completed"},
+		"created_at":     "2024-07-01T00:00:00.000Z",
+		"updated_at":     "2024-07-01T00:00:00.000Z",
+	}
+	api.mu.Unlock()
+
+	schema := webhookResourceSchemaForTest(t)
+
+	prior := webhookResourceModel{
+		Id:                     types.StringValue(id),
+		Name:                   types.StringValue("hook-1"),
+		Url:                    types.StringValue("https://example.com/hook"),
+		VerifyTls:              types.BoolValue(true),
+		SigningSecret:          types.StringValue("s3cr3t"), // the real, configured value
+		SigningSecretWO:        types.StringNull(),
+		SigningSecretWOVersion: types.Int64Null(),
+		ScopeId:                types.StringValue(fakeWebhookScopeID),
+		ScopeType:              types.StringValue("project"),
+		Events:                 types.SetValueMust(types.StringType, []attr.Value{types.StringValue("workflow-completed")}),
+		CreatedAt:              types.StringValue("2024-07-01T00:00:00.000Z"),
+		UpdatedAt:              types.StringValue("2024-07-01T00:00:00.000Z"),
+	}
+	state := webhookResourceStateForTest(t, schema, prior)
+
+	r := &webhookResource{client: client}
+	resp := &fwresource.ReadResponse{State: state}
+
+	assertNoPanic(t, func() {
+		r.Read(t.Context(), fwresource.ReadRequest{State: state}, resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read diagnostics: %+v", resp.Diagnostics)
+	}
+
+	var got webhookResourceModel
+	if diags := resp.State.Get(t.Context(), &got); diags.HasError() {
+		t.Fatalf("could not read the resulting state: %+v", diags)
+	}
+
+	if got.SigningSecret.ValueString() != "s3cr3t" {
+		t.Errorf(`signing_secret after Read = %q, want %q — GetWebhook only ever answers %q, and Read `+
+			`must leave the real, configured value in state rather than overwriting it with the mask`,
+			got.SigningSecret.ValueString(), "s3cr3t", circleci.WebhookSigningSecretMask)
+	}
+}
+
 // --- singular data source ---
 
 func TestWebhookDataSourceUnit_Read(t *testing.T) {

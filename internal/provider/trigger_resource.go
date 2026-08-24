@@ -182,17 +182,22 @@ func (r *triggerResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"event_source_web_hook_url": schema.StringAttribute{
 				MarkdownDescription: "The webhook URL for webhook-based triggers, including the secret that " +
 					"authenticates an inbound POST as a query parameter.\n\n" +
-					"~> **Only the create response carries the real secret; reads redact it.** `GET " +
+					"~> **Only the create response carries the real secret; every other read redacts it.** `GET " +
 					"/projects/{project_id}/triggers/{trigger_id}` — the same route this resource's Read " +
 					"uses on every refresh and on import — answers with the literal string `**REDACTED**` in " +
 					"place of the secret, and so does the `PATCH` update route. Probed 2026-08-21 with the " +
 					"very token that had just created the trigger: the create response carried the signed URL " +
 					"and the immediately following read carried `**REDACTED**`, so this is not merely a " +
-					"question of the calling token being insufficiently privileged. Read stores whatever it " +
-					"gets with no check, so the first refresh after an apply replaces a working URL with an " +
-					"unusable one in state. There is no write-only counterpart to recover from this: unlike " +
-					"a practitioner-supplied secret, this URL is minted by CircleCI, not configured, so there " +
-					"is nothing to re-supply — the only fix is to replace the trigger, which mints a new one.",
+					"question of the calling token being insufficiently privileged.\n\n" +
+					"Read and Update both recognize that placeholder and leave whatever is already in state " +
+					"alone when they see it, rather than overwriting a working URL with an unusable one — so " +
+					"the value captured at create time survives ordinary refreshes and updates. The one place " +
+					"it is genuinely lost is **import**: a fresh import has no prior state to preserve, so an " +
+					"imported webhook trigger's `event_source_web_hook_url` reads null and stays null. There " +
+					"is no write-only counterpart to recover from this: unlike a practitioner-supplied secret, " +
+					"this URL is minted by CircleCI, not configured, so there is nothing to re-supply — " +
+					"replacing the trigger, which mints a new one, is the only way to populate it after an " +
+					"import.",
 				Computed:      true,
 				Sensitive:     true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
@@ -563,7 +568,18 @@ func (r *triggerResource) Read(ctx context.Context, req resource.ReadRequest, re
 	} else {
 		triggerState.EventSourceRepoFullName = types.StringValue(readTrigger.EventSource.Repo.FullName)
 	}
-	triggerState.EventSourceWebHookUrl = types.StringValue(readTrigger.EventSource.Webhook.URL)
+	// The API redacts this on every read (see the attribute's own
+	// MarkdownDescription and circleci.TriggerWebhookURLRedacted): GET answers
+	// with a placeholder in place of the real signed URL, even to the token
+	// that created it. Overwriting state with that placeholder unconditionally
+	// would replace a working URL with an unusable one on the very first
+	// refresh after every apply, so only a real value ever lands in state here;
+	// seeing the placeholder leaves whatever is already in triggerState (the
+	// prior state's value, or null on a fresh import, where there is nothing
+	// prior to keep) untouched.
+	if !readTrigger.EventSource.Webhook.URLIsRedacted() {
+		triggerState.EventSourceWebHookUrl = types.StringValue(readTrigger.EventSource.Webhook.URL)
+	}
 	switch triggerState.EventSourceProvider.ValueString() {
 	case circleci.TriggerProviderWebhook:
 		triggerState.EventSourceWebHookSender = types.StringValue(readTrigger.EventSource.Webhook.Sender)
@@ -715,7 +731,15 @@ func (r *triggerResource) Update(ctx context.Context, req resource.UpdateRequest
 	} else {
 		state.EventSourceRepoExternalId = types.StringValue(updatedTrigger.EventSource.Repo.ExternalID)
 	}
-	state.EventSourceWebHookUrl = types.StringValue(updatedTrigger.EventSource.Webhook.URL)
+	// PATCH redacts this the same way GET does — see Read's identical guard and
+	// the attribute's own MarkdownDescription. `state` here already holds the
+	// plan's value, which UseStateForUnknown carried forward from before this
+	// update, so skipping the overwrite on a redacted response preserves the
+	// real URL captured at create time rather than clobbering it with the
+	// placeholder on every update.
+	if !updatedTrigger.EventSource.Webhook.URLIsRedacted() {
+		state.EventSourceWebHookUrl = types.StringValue(updatedTrigger.EventSource.Webhook.URL)
+	}
 	if updatedTrigger.EventSource.Schedule.CronExpression != "" {
 		state.EventSourceScheduleCronExpression = types.StringValue(updatedTrigger.EventSource.Schedule.CronExpression)
 	} else {
