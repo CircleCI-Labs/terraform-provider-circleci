@@ -1491,16 +1491,27 @@ func TestPipelineResourceSchema_CreatedAtDescribesImplicitAbsence(t *testing.T) 
 // checked here, see the test above for that); this test exists to pin the
 // behaviour the description now truthfully describes, on a path
 // (import-an-implicit-definition) no other test in this file reaches.
-func TestPipelineResourceUnit_ImplicitDefinitionImport(t *testing.T) {
+// TestPipelineResourceUnit_ImplicitDefinitionImportIsRefused pins the refusal,
+// on the one path that can reach it.
+//
+// This test used to assert the opposite: that importing an implicit definition
+// round-tripped to an empty plan, with created_at stably empty. That was true
+// as far as it went — the empty string does not drift — but it was proving the
+// safety of something that should not be possible. Measured over the network, an
+// implicit definition answers 200 on GET, 400 on PATCH, and 500 on DELETE while
+// surviving, so an import puts a resource in state that can never be updated or
+// destroyed and terraform destroy errors forever.
+//
+// So the import is now refused, and this asserts the refusal and that the
+// diagnostic explains it rather than relaying a bare API error. The stability of
+// created_at is still covered where it remains reachable: the schema description
+// test above, and the client-level decode test for an absent key.
+func TestPipelineResourceUnit_ImplicitDefinitionImportIsRefused(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
 	const implicitID = "99999999-8888-7777-6666-555555555555"
-	api.seedImplicitDefinition(fakePipelineProjectID, implicitID, "github_app", "100001")
+	api.seedImplicitDefinition(fakePipelineProjectID, implicitID, "github_oauth", "100001")
 
-	// Matches exactly what seedImplicitDefinition stored — including
-	// config_source_file_path, which pipelineFakeResourceConfig hardcodes to a
-	// different value ("config.yml") and so cannot be reused here without
-	// producing an unrelated diff on that field.
 	config := pipelineFakeProviderConfig(host, "cloud") + fmt.Sprintf(`
 resource "circleci_pipeline" "test" {
   project_id                       = %[1]q
@@ -1518,29 +1529,14 @@ resource "circleci_pipeline" "test" {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				// Bring the never-created-by-Terraform definition under
-				// management. ImportStatePersist is required to carry the
-				// imported state into the next step — see
-				// TestAccIOSSigningCertificateResource_ImportForcesReplacement's
-				// comment in ios_signing_certificate_resource_test.go.
-				ResourceName:       "circleci_pipeline.test",
-				ImportState:        true,
-				ImportStateId:      fakePipelineProjectID + "/" + implicitID,
-				ImportStatePersist: true,
-				Config:             config,
-				ConfigStateChecks: []statecheck.StateCheck{
-					// Absent from the wire decodes to an empty string, not an
-					// error and not some other placeholder.
-					statecheck.ExpectKnownValue("circleci_pipeline.test", tfjsonpath.New("created_at"), knownvalue.StringExact("")),
-				},
-			},
-			{
-				// Nothing about the definition changed, so a plan immediately
-				// after import must be empty. A diff here would mean the
-				// empty created_at is not the stable value the doc now
-				// describes it as.
-				Config:   config,
-				PlanOnly: true,
+				ResourceName:  "circleci_pipeline.test",
+				ImportState:   true,
+				ImportStateId: fakePipelineProjectID + "/" + implicitID,
+				Config:        config,
+				// The message has to say why, not just no: a practitioner who
+				// hits this needs to know there is nothing to manage here and
+				// that creating an explicit definition is the way forward.
+				ExpectError: regexp.MustCompile(`(?s)Cannot Import Implicit Pipeline Definition.*terraform destroy`),
 			},
 		},
 	})
