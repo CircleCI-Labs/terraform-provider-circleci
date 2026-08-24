@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -16,14 +17,32 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+
+	"terraform-provider-circleci/internal/circleci"
 )
 
 // This file is the only [NET] coverage for circleci_ios_signing_certificate
 // and circleci_ios_signing_config: every other test in this package (see
 // ios_signing_fake_test.go) drives the resources against an in-memory fake,
 // because this family shipped from a specification and had never been run
-// against a real CircleCI installation. These two tests close that gap.
+// against a real CircleCI installation. These three tests close that gap.
+//
+// The first two cover create/read/import/destroy for each resource in
+// isolation. TestAccIOSSigningCertificateRotation_RealAPI covers what those
+// two, run separately, cannot: rotating a certificate that a signing config
+// still references, as one compound Terraform apply. Both resources are
+// entirely RequiresReplace (there is no update route for either), so a
+// rotation is a destroy-and-create of the certificate *and* a destroy-and-
+// create of the config that names its id, in the same plan -- and
+// DeleteSigningCertificate answers 409 while a config still references the
+// certificate (see its doc comment below). Terraform's default replace
+// ordering destroys a dependent resource before the thing it depends on, so
+// the config is destroyed before the certificate it references, and that 409
+// is never reached; TestAccIOSSigningCertificateRotation_RealAPI is the real-
+// API proof that this actually happens, not just a description of why it
+// should.
 //
 // Every certificate and provisioning profile here is generated locally by
 // shelling out to openssl -- never a real Apple-issued signing identity, and
@@ -302,4 +321,259 @@ resource "circleci_ios_signing_config" "test" {
 			},
 		},
 	})
+}
+
+// TestAccIOSSigningCertificateRotation_RealAPI is the compound [NET] scenario
+// TestAccIOSSigningCertificateResource_RealAPI and
+// TestAccIOSSigningConfigResource_RealAPI cannot reach on their own: rotating
+// a certificate that a circleci_ios_signing_config still references, driven
+// through one ordinary Terraform apply rather than assembled by hand.
+//
+// The two certificates generated here must be genuinely different key
+// material, not the same bytes twice: CreateSigningCertificate upserts on
+// (organization, fingerprint), so re-uploading identical bytes under a new
+// file_name would silently return the first upload's id and certificate_id
+// would never actually change -- the test would report a pass having rotated
+// nothing. generateIOSSigningRealArtifacts is called twice with different
+// Subject Common Names specifically so each run generates its own RSA key
+// pair; the explicit fingerprint-inequality assertion below is what turns a
+// silent no-op into a loud failure if that ever stopped being true.
+//
+// Both resources are entirely RequiresReplace -- certificate_blob and
+// certificate_password force a new circleci_ios_signing_certificate, and
+// certificate_id forces a new circleci_ios_signing_config, because neither
+// resource has an update route (see both resources' Update methods). So this
+// rotation plans a replace of both in the same apply. DeleteSigningCertificate
+// answers 409 while any config still references the certificate (see the doc
+// comment on that method), which means the destroy order across the two
+// resources matters: destroying the old certificate before the old config is
+// deleted would hit that 409. It doesn't happen, because certificate_id also
+// makes the config depend on the certificate, and Terraform's default
+// (non-create_before_destroy) replace ordering destroys a dependent resource
+// before the resource it depends on -- so the old config is destroyed first,
+// and the 409 is never reached. This test is what proves that ordering holds
+// against the real API, rather than only against the fake's model of it (see
+// the 409 case in ios_signing_fake_test.go's deleteCertificate).
+func TestAccIOSSigningCertificateRotation_RealAPI(t *testing.T) {
+	testAccPreCheck(t)
+	orgID := testOrgID(t)
+
+	// Subject Common Name is capped at 64 characters by the X.509 ASN.1
+	// PrintableString it's encoded into -- openssl req rejects anything longer
+	// with "string too long" rather than truncating -- so these stay short.
+	before := generateIOSSigningRealArtifacts(t, "iPhone Developer: tf-provider-circleci acctest (ROTATE1)", true)
+	after := generateIOSSigningRealArtifacts(t, "iPhone Developer: tf-provider-circleci acctest (ROTATE2)", true)
+
+	if before.CertBlobBase64 == after.CertBlobBase64 {
+		t.Fatal("the two generated certificates are byte-identical -- this rotation test would upsert " +
+			"onto a single id and exercise nothing; see the doc comment above")
+	}
+
+	config := func(artifacts iosSigningRealArtifacts, certFileName, profileFileName string) string {
+		return fmt.Sprintf(`
+resource "circleci_ios_signing_certificate" "cert" {
+  organization_id      = %[1]q
+  file_name            = %[2]q
+  certificate_blob     = %[3]q
+  certificate_password = %[4]q
+}
+
+resource "circleci_ios_signing_config" "test" {
+  organization_id = %[1]q
+  name            = "acctest-rotation-config"
+  certificate_id  = circleci_ios_signing_certificate.cert.id
+
+  provisioning_profiles = [
+    {
+      file_name = %[5]q
+      blob      = %[6]q
+    },
+  ]
+}
+`, orgID, certFileName, artifacts.CertBlobBase64, artifacts.CertPassword, profileFileName, artifacts.ProfileBlobBase64)
+	}
+
+	var beforeCertID, beforeConfigID string
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config(before, "acctest-rotation-before.p12", "acctest-rotation-before.mobileprovision"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet("circleci_ios_signing_certificate.cert", "id"),
+					resource.TestCheckResourceAttrSet("circleci_ios_signing_config.test", "id"),
+					resource.TestCheckResourceAttrPair(
+						"circleci_ios_signing_config.test", "certificate_id",
+						"circleci_ios_signing_certificate.cert", "id",
+					),
+					func(s *terraform.State) error {
+						cert, ok := s.RootModule().Resources["circleci_ios_signing_certificate.cert"]
+						if !ok {
+							return fmt.Errorf("circleci_ios_signing_certificate.cert not found in state")
+						}
+						cfg, ok := s.RootModule().Resources["circleci_ios_signing_config.test"]
+						if !ok {
+							return fmt.Errorf("circleci_ios_signing_config.test not found in state")
+						}
+						beforeCertID = cert.Primary.ID
+						beforeConfigID = cfg.Primary.ID
+
+						return nil
+					},
+				),
+			},
+			// The rotation itself: genuinely different key material and a
+			// differently-authorized provisioning profile, which must plan (and
+			// successfully apply) a replace of both resources in one step.
+			{
+				Config: config(after, "acctest-rotation-after.p12", "acctest-rotation-after.mobileprovision"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("circleci_ios_signing_certificate.cert", plancheck.ResourceActionReplace),
+						plancheck.ExpectResourceAction("circleci_ios_signing_config.test", plancheck.ResourceActionReplace),
+					},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(
+						"circleci_ios_signing_config.test", "certificate_id",
+						"circleci_ios_signing_certificate.cert", "id",
+					),
+					resource.TestCheckResourceAttrWith("circleci_ios_signing_certificate.cert", "id", func(value string) error {
+						if value == beforeCertID {
+							return fmt.Errorf("certificate id %q is unchanged after rotation -- the replace did not happen", value)
+						}
+
+						return nil
+					}),
+					resource.TestCheckResourceAttrWith("circleci_ios_signing_config.test", "id", func(value string) error {
+						if value == beforeConfigID {
+							return fmt.Errorf("config id %q is unchanged after rotation -- the replace did not happen", value)
+						}
+
+						return nil
+					}),
+					// The load-bearing assertion: had the old certificate been
+					// destroyed before the old config that referenced it, this whole
+					// apply would have failed with a 409 rather than reaching this
+					// Check at all. Reaching here already proves the ordering: this
+					// additionally confirms the old certificate is actually gone
+					// (not merely dropped from Terraform state), by asking the real
+					// API directly rather than trusting a 2xx from a step that
+					// completed.
+					func(*terraform.State) error {
+						client := circleci.New(circleci.Config{Token: os.Getenv("CIRCLE_TOKEN")})
+
+						_, err := client.GetSigningCertificate(t.Context(), beforeCertID)
+						if !circleci.IsNotFound(err) {
+							return fmt.Errorf(
+								"GetSigningCertificate(%s) (the pre-rotation certificate) = %v, want a not-found "+
+									"error -- the rotation's destroy of the old certificate either did not happen "+
+									"or the id is somehow still live", beforeCertID, err,
+							)
+						}
+
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// TestAccIOSSigningCertificateDeleteWhileReferenced_RealAPI is the automated
+// [NET] proof of the fact this file's package comment says was, until now,
+// only "verified by hand": DeleteSigningCertificate answers 409 while a
+// circleci_ios_signing_config still references the certificate. It is also
+// the reason TestAccIOSSigningCertificateRotation_RealAPI's ordering matters
+// -- that 409 is exactly what a wrong destroy order would hit.
+//
+// This bypasses Terraform and the provider entirely, driving circleci.Client
+// straight against the real API, because the 409 is the *service's* own
+// referential-integrity check, not anything the provider computes. Terraform
+// never lets a practitioner hit it (its dependency graph destroys the
+// referencing config first, whenever certificate_id is what ties the two
+// together -- the only way to create the pair), so reproducing the 409 means
+// deliberately deleting in the wrong order, which there is no supported way
+// to do through the resources themselves.
+func TestAccIOSSigningCertificateDeleteWhileReferenced_RealAPI(t *testing.T) {
+	testAccPreCheck(t)
+	orgID := testOrgID(t)
+	ctx := t.Context()
+
+	client := circleci.New(circleci.Config{Token: os.Getenv("CIRCLE_TOKEN")})
+
+	artifacts := generateIOSSigningRealArtifacts(t, "iPhone Developer: tf-provider-circleci acctest (DELREF)", true)
+
+	cert, err := client.CreateSigningCertificate(ctx, circleci.CreateSigningCertificateRequest{
+		OrganizationID: orgID,
+		FileName:       "acctest-delref.p12",
+		CertBlob:       artifacts.CertBlobBase64,
+		CertPassword:   artifacts.CertPassword,
+	})
+	if err != nil {
+		t.Fatalf("CreateSigningCertificate: %v", err)
+	}
+	// Cleanup runs even if an assertion below fails partway, in the order the
+	// real API requires: the config (if it exists) before the certificate it
+	// references, exactly the ordering this whole test is about.
+	var cfg *circleci.SigningConfig
+	t.Cleanup(func() {
+		// context.Background(), not ctx: t.Context() is already canceled by the
+		// time Cleanup funcs run, and this cleanup has to make real DELETE calls
+		// after that point.
+		cleanupCtx := context.Background()
+
+		if cfg != nil {
+			if err := client.DeleteSigningConfig(cleanupCtx, cfg.ID); err != nil && !circleci.IsNotFound(err) {
+				t.Errorf("cleanup: DeleteSigningConfig(%s): %v", cfg.ID, err)
+			}
+		}
+		if err := client.DeleteSigningCertificate(cleanupCtx, cert.ID); err != nil && !circleci.IsNotFound(err) {
+			t.Errorf("cleanup: DeleteSigningCertificate(%s): %v", cert.ID, err)
+		}
+	})
+
+	cfg, err = client.CreateSigningConfig(ctx, circleci.CreateSigningConfigRequest{
+		OrganizationID: orgID,
+		CertificateID:  cert.ID,
+		Name:           "acctest-delref-config",
+		ProvisioningProfiles: []circleci.CreateSigningProvisioningProfile{
+			{FileName: "acctest-delref.mobileprovision", Blob: artifacts.ProfileBlobBase64},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSigningConfig: %v", err)
+	}
+
+	// The measurement: deleting the certificate while cfg still references it.
+	err = client.DeleteSigningCertificate(ctx, cert.ID)
+	if err == nil {
+		t.Fatal("DeleteSigningCertificate succeeded while a signing config still referenced it; " +
+			"want a 409 -- either the API's referential-integrity check is gone, or this certificate " +
+			"was not actually still referenced")
+	}
+	if !circleci.IsConflict(err) {
+		t.Fatalf("DeleteSigningCertificate while referenced = %v, want an HTTP 409 conflict", err)
+	}
+
+	// The certificate must still exist: a rejected delete must not have had a
+	// partial effect.
+	if _, err := client.GetSigningCertificate(ctx, cert.ID); err != nil {
+		t.Fatalf("GetSigningCertificate(%s) after the rejected delete: %v -- the 409 should have left "+
+			"the certificate untouched", cert.ID, err)
+	}
+
+	// Now delete in the order that actually works, confirming the 409 was
+	// solely about the reference and not, say, a permissions problem: the
+	// config first, then the certificate it no longer blocks.
+	if err := client.DeleteSigningConfig(ctx, cfg.ID); err != nil {
+		t.Fatalf("DeleteSigningConfig: %v", err)
+	}
+	cfg = nil // deleted; t.Cleanup above must not try again.
+
+	if err := client.DeleteSigningCertificate(ctx, cert.ID); err != nil {
+		t.Fatalf("DeleteSigningCertificate, after the referencing config was deleted: %v -- want success "+
+			"now that nothing references it", err)
+	}
 }
