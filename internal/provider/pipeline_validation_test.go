@@ -9,9 +9,6 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
-	"github.com/hashicorp/terraform-plugin-testing/statecheck"
-	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
 // Tests for pipeline_validation.go: the cross-attribute rules for
@@ -40,15 +37,18 @@ func TestPipelineResourceUnit_RejectsInvalidCombinationsAtPlanTime(t *testing.T)
 		attributes string
 		wantError  *regexp.Regexp
 	}{
-		"circleci config source with a repo external id": {
+		// "circleci" is not in circleci.PipelineConfigSourceProviders() at all — the
+		// create endpoint has never accepted it for a customer-plausible file path
+		// (see that function's doc comment) — so this is rejected regardless of
+		// whether a repo id is also set.
+		"circleci config source": {
 			attributes: `
   config_source_provider           = "circleci"
   config_source_file_path          = ".circleci/config.yml"
-  config_source_repo_external_id   = "123456"
   checkout_source_provider         = "github_app"
   checkout_source_repo_external_id = "123456"
 `,
-			wantError: regexp.MustCompile(`(?s)must\s+not\s+set\s+config_source_repo_external_id`),
+			wantError: regexp.MustCompile(`(?s)config_source_provider\s+"circleci"\s+is\s+not\s+accepted`),
 		},
 		"github_app config source without a repo external id": {
 			attributes: `
@@ -115,55 +115,37 @@ func TestPipelineResourceUnit_RejectsInvalidCombinationsAtPlanTime(t *testing.T)
 	}
 }
 
-// TestPipelineResourceUnit_CircleCIConfigSource is the fix for the unreachable
-// capability: a pipeline definition whose configuration is hosted by CircleCI
-// itself, rather than a VCS repository, can now be expressed and applies cleanly.
-// checkout_source still needs a real repository — checkout_source has no
-// repo-less branch — so this is the one combination the API accepts with
-// config_source_provider "circleci".
-func TestPipelineResourceUnit_CircleCIConfigSource(t *testing.T) {
+// TestPipelineResourceUnit_CircleCIConfigSourceIsRejected replaces what used to
+// be TestPipelineResourceUnit_CircleCIConfigSource, which pinned the opposite
+// belief — that a repo-less, CircleCI-hosted config source "can now be expressed
+// and applies cleanly." [NET] measurement against the real create endpoint found
+// that belief was never true for any file_path a customer configuration would
+// plausibly use (see circleci.PipelineConfigSourceProviderCircleCI), so
+// "circleci" was removed from circleci.PipelineConfigSourceProviders entirely.
+// This pins the replacement behaviour: the rejection happens at plan time, with
+// a message a practitioner who already has this in a configuration can act on,
+// and — unlike an apply-time API error — before any request reaches the API.
+func TestPipelineResourceUnit_CircleCIConfigSourceIsRejected(t *testing.T) {
 	api, host := newFakePipelineDefAPI(t)
 
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: pipelineConfig(host, `
+		Steps: []resource.TestStep{{
+			Config: pipelineConfig(host, `
   config_source_provider           = "circleci"
   config_source_file_path          = ".circleci/config.yml"
   checkout_source_provider         = "github_app"
   checkout_source_repo_external_id = "123456"
 `),
-				ConfigStateChecks: []statecheck.StateCheck{
-					statecheck.ExpectKnownValue("circleci_pipeline_definition.test",
-						tfjsonpath.New("config_source_provider"), knownvalue.StringExact("circleci")),
-					statecheck.ExpectKnownValue("circleci_pipeline_definition.test",
-						tfjsonpath.New("config_source_repo_external_id"), knownvalue.Null()),
-					statecheck.ExpectKnownValue("circleci_pipeline_definition.test",
-						tfjsonpath.New("config_source_repo_full_name"), knownvalue.StringExact("")),
-					statecheck.ExpectKnownValue("circleci_pipeline_definition.test",
-						tfjsonpath.New("checkout_source_repo_full_name"), knownvalue.StringExact(resolveFullName("123456"))),
-				},
-			},
-			{
-				// Refresh and re-plan: a repo-less config source must not show
-				// perpetual drift.
-				Config: pipelineConfig(host, `
-  config_source_provider           = "circleci"
-  config_source_file_path          = ".circleci/config.yml"
-  checkout_source_provider         = "github_app"
-  checkout_source_repo_external_id = "123456"
-`),
-			},
-		},
+			PlanOnly: true,
+			ExpectError: regexp.MustCompile(
+				`(?s)config_source_provider\s+"circleci"\s+is\s+not\s+accepted.*create\s+endpoint\s+rejects`,
+			),
+		}},
 	})
 
-	create := api.lastRequest(t, "POST", "/api/v2/projects/"+fakePipelineProjectID+"/pipeline-definitions")
-	configSource, _ := create.Body["config_source"].(map[string]any)
-	if configSource["provider"] != "circleci" {
-		t.Errorf("create config_source.provider = %v, want circleci", configSource["provider"])
-	}
-	if _, present := configSource["repo"]; present {
-		t.Errorf("create config_source carries repo = %v for a circleci-hosted config source, want it omitted entirely", configSource["repo"])
+	if requests := api.recorded(); len(requests) != 0 {
+		t.Errorf("the provider made %d request(s) for a configuration that fails validation, want 0: %+v",
+			len(requests), requests)
 	}
 }

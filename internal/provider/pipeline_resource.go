@@ -121,11 +121,13 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			},
 			"config_source_provider": schema.StringAttribute{
 				MarkdownDescription: "Where the pipeline's configuration is read from: " +
-					markdownValueList(circleci.PipelineConfigSourceProviders()) + ". `github_app` and " +
-					"`github_server` read configuration from a VCS repository, named by " +
-					"`config_source_repo_external_id`. `circleci` is a CircleCI-hosted configuration: " +
-					"there is no repository, and `config_source_repo_external_id` must be omitted — the " +
-					"API rejects a repo on this branch outright rather than ignoring it.\n\n" +
+					markdownValueList(circleci.PipelineConfigSourceProviders()) + ", both of which read " +
+					"configuration from a VCS repository named by `config_source_repo_external_id`.\n\n" +
+					"~> **`circleci` is not an accepted value here.** It names a CircleCI-internal, " +
+					"repo-less configuration source that this provider has never been able to create: " +
+					"the create endpoint 400s on it for every file path a customer configuration would " +
+					"plausibly use. A configuration written before this restriction was made explicit " +
+					"gets a plan-time error explaining why, rather than a plain \"must be one of\".\n\n" +
 					"~> **Changing this value forces a new resource to be created.** The update endpoint's " +
 					"`config_source` accepts only `file_path`; provider is immutable after creation.",
 				Required: true,
@@ -143,21 +145,19 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				},
 			},
 			"config_source_file_path": schema.StringAttribute{
-				MarkdownDescription: "The path to the pipeline configuration file. Required for every " +
-					"config_source_provider, including `circleci`, which still requires `file_path` " +
-					"even though it has no repository to be relative to.",
+				MarkdownDescription: "The path to the pipeline configuration file, relative to the " +
+					"repository named by `config_source_repo_external_id`. Required for every accepted " +
+					"config_source_provider.",
 				Required: true,
 			},
 			"config_source_repo_full_name": schema.StringAttribute{
-				MarkdownDescription: "The full name of the repository containing the pipeline configuration. " +
-					"Empty when config_source_provider is `circleci`, which has no repository.",
-				Computed: true,
+				MarkdownDescription: "The full name of the repository containing the pipeline configuration.",
+				Computed:            true,
 			},
 			"config_source_repo_external_id": schema.StringAttribute{
 				MarkdownDescription: "The external ID of the repository containing the pipeline " +
 					"configuration: the VCS provider's own numeric repository id, not its name. Required " +
-					"when config_source_provider is `github_app` or `github_server`; must be omitted when " +
-					"it is `circleci`, which has no repository.\n\n" +
+					"for both accepted config_source_provider values.\n\n" +
 					"~> **Changing this value forces a new resource to be created.**",
 				Optional: true,
 				PlanModifiers: []planmodifier.String{
@@ -172,11 +172,10 @@ func (r *pipelineResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			},
 			"checkout_source_provider": schema.StringAttribute{
 				MarkdownDescription: "The VCS provider for the pipeline's checkout source: " +
-					markdownValueList(circleci.PipelineCheckoutSourceProviders()) + ". Unlike " +
-					"config_source_provider, this has no `circleci` (repo-less) option: the API " +
-					"requires a real repository unconditionally, even when the pipeline's " +
-					"configuration is hosted by CircleCI itself — a definition always checks out " +
-					"code from somewhere.",
+					markdownValueList(circleci.PipelineCheckoutSourceProviders()) + ". checkout_source has " +
+					"no repo-less option at all — the API requires a real repository unconditionally, " +
+					"even for a definition whose configuration is hosted by CircleCI itself — so, unlike " +
+					"config_source_provider, there is nothing here that was ever removed.",
 				Required: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf(circleci.PipelineCheckoutSourceProviders()...),
@@ -419,7 +418,26 @@ func (r *pipelineResource) Configure(_ context.Context, req resource.ConfigureRe
 	r.client = client
 }
 
+// ImportState imports a pipeline definition from a "PROJECT_ID/PIPELINE_ID"
+// address.
+//
+// An OAuth-based (github_oauth) project carries an *implicit* pipeline
+// definition that CircleCI synthesizes rather than one a practitioner created.
+// [NET] GET answers 200 for it — it looks importable — but PATCH answers 400
+// "Failed to update pipeline definition." and DELETE answers 500 "Internal
+// server error" and the definition survives. Importing one would build a
+// Terraform resource that can never be updated or destroyed: every future
+// `terraform destroy` would error forever. This fetches the definition before
+// writing any state, and refuses the import outright when
+// circleci.PipelineDefinitionIsImplicit says it is implicit — see that
+// function for how "implicit" is told apart from an explicit definition,
+// including one whose own config_source_provider happens to read
+// "github_oauth" or "circleci".
 func (r *pipelineResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	if !requireCloud(r.client, r.typeName(), &resp.Diagnostics) {
+		return
+	}
+
 	// Expected format: "PROJECT_ID/PIPELINE_ID"
 	parts := strings.SplitN(req.ID, "/", 2)
 
@@ -433,6 +451,33 @@ func (r *pipelineResource) ImportState(ctx context.Context, req resource.ImportS
 
 	projectId := parts[0]
 	pipelineId := parts[1]
+
+	definition, err := r.client.GetPipelineDefinition(ctx, projectId, pipelineId)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Unable to Read CircleCI pipeline definition with id "+pipelineId,
+			circleci.Detail(err),
+		)
+
+		return
+	}
+
+	if circleci.PipelineDefinitionIsImplicit(*definition) {
+		resp.Diagnostics.AddError(
+			"Cannot Import Implicit Pipeline Definition",
+			"The pipeline definition with id "+pipelineId+" on project "+projectId+" is the implicit "+
+				"definition CircleCI manages for an OAuth-based (github_oauth) project, not one a "+
+				"practitioner created. It can be read, but CircleCI's API rejects both PATCH (\"Failed "+
+				"to update pipeline definition.\") and DELETE (the request fails with an internal server "+
+				"error, and the definition survives) — so this provider has no way to update or destroy "+
+				"it once imported, and `terraform destroy` would error forever.\n\n"+
+				"It cannot be managed by "+pipelineDefinitionTypeName+". If this project needs an "+
+				"explicit, manageable pipeline definition, create one with "+pipelineDefinitionTypeName+
+				" instead of importing the implicit one.",
+		)
+
+		return
+	}
 
 	// 1. Set the primary key 'id'
 	resp.Diagnostics.Append(resp.State.SetAttribute(
