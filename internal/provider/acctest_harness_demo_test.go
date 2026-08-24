@@ -30,8 +30,22 @@ import (
 // which is the "no shared mutable fixture" property in practice: nothing
 // here can be broken by, or break, another test that also uses this
 // organization's shared fixtures.
+//
+// None of the three is named TestAcc*, even though every one of them is
+// live against a real organization: that prefix is reserved for a test
+// driven through the plugin-testing framework's own runner (resource.Test,
+// resource.UnitTest or resource.ParallelTest — see
+// TestEveryTestAccFunctionUsesAnAcceptanceRunner in vcs_gating_test.go), and
+// none of these three can be. That is the whole point of this file: it is
+// proving the harness helpers themselves (testUniqueName,
+// testRegisterCleanup, testAssertContextGone and friends), not a Terraform
+// resource -- there is deliberately no circleci_context, circleci_group or
+// circleci_project configuration anywhere below for a plan/apply to drive.
+// A real acceptance test for each of those resources already exists
+// elsewhere and does go through the runner; this file is what that acceptance
+// test's own fixtures and cleanup logic get proven against, one level down.
 
-// TestAccHarnessContextLifecycle creates a context with a unique name in the
+// TestHarnessContextLifecycle creates a context with a unique name in the
 // active organization's primary org, using nothing but the harness defined
 // alongside this file (testUniqueName, testRegisterCleanup and friends) and
 // the raw API client -- no Terraform resource is involved, because a
@@ -49,7 +63,7 @@ import (
 // being the org admin that created it) never reliably distinguish the two at
 // all. Listing the organization's contexts and checking for absence, which
 // testAssertContextGone does, is what actually settles it.
-func TestAccHarnessContextLifecycle(t *testing.T) {
+func TestHarnessContextLifecycle(t *testing.T) {
 	testAccPreCheck(t)
 
 	client := testAPIClient(t)
@@ -116,7 +130,7 @@ func TestAccHarnessContextLifecycle(t *testing.T) {
 	testAssertContextGone(t, client, orgID, created.ID)
 }
 
-// TestAccHarnessProjectLifecycle proves testCreateStandaloneProject end to
+// TestHarnessProjectLifecycle proves testCreateStandaloneProject end to
 // end: create a private, per-test project, confirm it is readable, delete
 // it explicitly (rather than relying only on the registered cleanup, so this
 // test also exercises what testAssertProjectGone checks), and confirm a
@@ -124,7 +138,7 @@ func TestAccHarnessContextLifecycle(t *testing.T) {
 // like TestAccCircleCiProjectResource does, for the same reason: only a
 // standalone organization's create route makes a genuine project rather than
 // adopting a pre-existing repository.
-func TestAccHarnessProjectLifecycle(t *testing.T) {
+func TestHarnessProjectLifecycle(t *testing.T) {
 	testAccPreCheck(t)
 
 	orgID := testOrgID(t)
@@ -154,7 +168,7 @@ func TestAccHarnessProjectLifecycle(t *testing.T) {
 	testAssertProjectGone(t, client, project.Slug)
 }
 
-// TestAccHarnessGroupLifecycle is TestAccHarnessContextLifecycle's
+// TestHarnessGroupLifecycle is TestHarnessContextLifecycle's
 // counterpart for groups, and the harness's live confirmation of the other
 // half of the measurement: a deleted group answers 403, not 404, on both a
 // repeat DELETE and a GET -- measured directly against this organization
@@ -170,7 +184,7 @@ func TestAccHarnessProjectLifecycle(t *testing.T) {
 //
 // testRequireStandaloneOrg gates it because groups require a standalone
 // organization (see the "Accounts required" table in TESTING.md).
-func TestAccHarnessGroupLifecycle(t *testing.T) {
+func TestHarnessGroupLifecycle(t *testing.T) {
 	testAccPreCheck(t)
 
 	orgID := testOrgID(t)

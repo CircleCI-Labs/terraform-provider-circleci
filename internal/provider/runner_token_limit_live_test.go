@@ -13,7 +13,7 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// TestAccRunnerTokenResourceLimitLive proves, against the real runner admin
+// TestRunnerTokenResourceLimitLive proves, against the real runner admin
 // API, the limit this provider's documentation and error handling assume but
 // had never been checked against a live installation: a resource class holds
 // at most 10 tokens, and the 11th create is refused with HTTP 403 rather than
@@ -31,7 +31,13 @@ import (
 // The runner admin API is not gated to a VCS integration — it authorizes
 // purely off the resource class's namespace prefix — so this test carries no
 // VCS branching of its own.
-func TestAccRunnerTokenResourceLimitLive(t *testing.T) {
+//
+// Not named TestAcc*: it never calls resource.Test, resource.UnitTest or
+// resource.ParallelTest (see TestEveryTestAccFunctionUsesAnAcceptanceRunner
+// in vcs_gating_test.go), because there is no Terraform config that could
+// express "create 11 tokens and check the 11th is refused" without paying
+// for ten discardable resources it does not otherwise need.
+func TestRunnerTokenResourceLimitLive(t *testing.T) {
 	testAccPreCheck(t)
 
 	client := testAccClient(t)
