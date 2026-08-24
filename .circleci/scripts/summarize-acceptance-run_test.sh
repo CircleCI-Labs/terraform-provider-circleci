@@ -199,10 +199,64 @@ test_missing_log_exits_zero_without_a_report() {
   assert_contains "$out_text" "so the test step did not get far enough" "missing log: explains itself"
 }
 
+# --- Fixture 5: github_hybrid, but with networkCoverage's fix applied ---
+#
+# Same integration as gen_hybrid above (github_hybrid, zero testRequireVCSType/
+# testRequireStandaloneOrg coverage), but this is the block TestMain actually
+# prints after vcs_gating_test.go's networkCoverage instrument was added: the
+# iOS signing, notification, organization-contacts and URL-orb-allow-list
+# families need no VCS/org-class gate at all, and gh-oauth-cci-2 (the
+# organization acceptance-gh-hybrid points at) has everything they need
+# (testAccPreCheck's token, testOrgID's fixture). This is exactly the run the
+# acceptance-gh-hybrid job comment in .circleci/config.yml now describes: not
+# "zero real-API coverage" any more, without any test being newly gated to
+# github_hybrid.
+gen_hybrid_with_network_observed_tests() {
+  local xml="$1" log="$2"
+  cat > "$log" <<'LOG'
+=== VCS integration coverage (CIRCLECI_TEST_VCS_TYPE=github_hybrid) ===
+Exercised by this run (2):
+  TestAccIOSSigningCertificateResource_RealAPI (real API, not VCS/org-class-gated)
+  TestAccOrganizationContactsNet_Lifecycle (real API, not VCS/org-class-gated)
+Skipped, configured fixture is a different integration (2):
+  TestAccPipelineDefinitionResource (needs github_app, got github_hybrid)
+  TestAccTriggerResourceWebhook (needs github_app/github_oauth/github_server, got github_hybrid)
+Configured against an in-process fake this run (204 distinct test(s)): informational only, not a failure
+ok  	terraform-provider-circleci/internal/provider	588.000s
+LOG
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<testsuites tests="3" failures="0" errors="0" time="1.0">'
+    echo '<testsuite tests="3" failures="0" skipped="0" time="1.0" name="internal/provider">'
+    echo '<testcase classname="internal/provider" name="TestAccIOSSigningCertificateResource_RealAPI" time="12.010000"></testcase>'
+    echo '<testcase classname="internal/provider" name="TestAccOrganizationContactsNet_Lifecycle" time="4.010000"></testcase>'
+    echo '<testcase classname="internal/provider" name="TestAccPassing1" time="0.010000"></testcase>'
+    echo '</testsuite>'
+    echo '</testsuites>'
+  } > "$xml"
+}
+
+test_hybrid_with_network_observed_tests_passes_and_counts_them_separately() {
+  local xml="$tmp/hybrid2.xml" log="$tmp/hybrid2.log" out="$tmp/hybrid2.out"
+  gen_hybrid_with_network_observed_tests "$xml" "$log"
+
+  local rc=0
+  out_text="$(CIRCLECI_TEST_VCS_TYPE=github_hybrid bash "$script" "$log" "$xml" "$out" 2>&1)" || rc=$?
+
+  assert_eq "$rc" "0" "hybrid+network: exit code (network-observed coverage is real coverage, this job must not fail)"
+  assert_contains "$out_text" "REAL-API TESTS EXERCISED THIS RUN: 2" "hybrid+network: headline reflects the union, not zero"
+  assert_contains "$out_text" \
+    "of which, via network observation only (no VCS/org-class gate): 2" \
+    "hybrid+network: both exercised entries are attributed to network observation, not a VCS/org-class gate"
+  assert_contains "$out_text" "TestAccIOSSigningCertificateResource_RealAPI (real API, not VCS/org-class-gated)" \
+    "hybrid+network: the annotated entry survives the pass-through verbatim"
+}
+
 test_hybrid_reconciles_and_fails_on_zero_exercised
 test_app_passes_and_other_bucket_catches_unknown_message
 test_no_token_fails_before_the_zero_exercised_check
 test_missing_log_exits_zero_without_a_report
+test_hybrid_with_network_observed_tests_passes_and_counts_them_separately
 
 if [ "$fail" -ne 0 ]; then
   echo "FAILED"

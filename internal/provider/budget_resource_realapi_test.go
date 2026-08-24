@@ -89,19 +89,27 @@ func budgetRealAPIClient() *circleci.Client {
 	return circleci.New(circleci.Config{Token: os.Getenv("CIRCLE_TOKEN")})
 }
 
-// budgetRealAPILifecycle runs the shared create/update/import/destroy sequence
-// for one scope (org-level when projectID is "", per-project otherwise),
-// pinning the one behaviour this family was specifically flagged as needing
-// live coverage for: id churns on every write to an existing scope, including
-// one that only sends new credits, not a resource lifecycle bug the old
-// "reuse the id" plan modifier would have papered over silently.
+// budgetRealAPILifecycleCase builds the shared create/update/import/destroy
+// resource.TestCase for one scope (org-level when projectID is "",
+// per-project otherwise), pinning the one behaviour this family was
+// specifically flagged as needing live coverage for: id churns on every
+// write to an existing scope, including one that only sends new credits, not
+// a resource lifecycle bug the old "reuse the id" plan modifier would have
+// papered over silently.
 //
 // It skips, naming why, rather than disturbing an existing budget at this
 // scope it did not create: this is a singleton per scope, so there is no way
 // to tell "a leftover from a crashed run of this same test" apart from "a
 // budget someone is actually relying on," and only the first is safe to
 // destroy.
-func budgetRealAPILifecycle(t *testing.T, orgID, projectID string) {
+//
+// This builds a resource.TestCase rather than calling resource.Test itself
+// so that each TestAcc* entry point below can call resource.Test directly
+// with the result: that is what this package's network-coverage
+// instrumentation (see TestEveryTestAccFunctionUsesAnAcceptanceRunner in
+// vcs_gating_test.go) can actually see, where a call to resource.Test buried
+// inside a shared helper could not be.
+func budgetRealAPILifecycleCase(t *testing.T, orgID, projectID string) resource.TestCase {
 	t.Helper()
 
 	// The pre-flight FindBudget call below happens before resource.Test is
@@ -155,7 +163,7 @@ resource "circleci_budget" "test" {
 
 	var firstID, secondID string
 
-	resource.Test(t, resource.TestCase{
+	return resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
@@ -255,13 +263,15 @@ resource "circleci_budget" "test" {
 
 			return nil
 		},
-	})
+	}
 }
 
 // TestAccBudgetResource_RealAPI_OrgLevel is the org-level (project_id null)
-// half of the shared lifecycle above.
+// half of the shared lifecycle above. It calls resource.Test itself, rather
+// than leaving that call inside budgetRealAPILifecycleCase, so this
+// package's network-coverage instrumentation can see that it does.
 func TestAccBudgetResource_RealAPI_OrgLevel(t *testing.T) {
-	budgetRealAPILifecycle(t, testOrgID(t), "")
+	resource.Test(t, budgetRealAPILifecycleCase(t, testOrgID(t), ""))
 }
 
 // TestAccBudgetResource_RealAPI_ProjectLevel is the per-project half,
@@ -269,7 +279,7 @@ func TestAccBudgetResource_RealAPI_OrgLevel(t *testing.T) {
 // (FindBudget's own project_id-based matching), not just in the fake.
 func TestAccBudgetResource_RealAPI_ProjectLevel(t *testing.T) {
 	orgID := testOrgID(t)
-	budgetRealAPILifecycle(t, orgID, testProjectID(t))
+	resource.Test(t, budgetRealAPILifecycleCase(t, orgID, testProjectID(t)))
 }
 
 // TestBudgetRealAPI_ZeroCreditsRejectedOnTheWire is the live pin for the

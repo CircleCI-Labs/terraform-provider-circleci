@@ -11,7 +11,7 @@ import (
 	"terraform-provider-circleci/internal/circleci"
 )
 
-// TestAccWebhookResourceSigningSecretReachesTheWireLive proves, against the
+// TestWebhookResourceSigningSecretReachesTheWireLive proves, against the
 // real webhook service and independently of anything Terraform state ever
 // records, that a signing secret configured through this provider is genuinely
 // stored rather than accepted with a 2xx and silently dropped — the failure
@@ -45,7 +45,13 @@ import (
 // [NET]: exercised on whichever integration CIRCLECI_TEST_VCS_TYPE selects.
 // The webhook routes behave identically on every integration this provider
 // supports — nothing here is gated to a particular VCS type.
-func TestAccWebhookResourceSigningSecretReachesTheWireLive(t *testing.T) {
+//
+// Not named TestAcc*: it never calls resource.Test, resource.UnitTest or
+// resource.ParallelTest (see TestEveryTestAccFunctionUsesAnAcceptanceRunner
+// in vcs_gating_test.go). That is not an oversight — the paragraph above is
+// exactly why no Terraform-only test could ever do this test's job: state
+// itself cannot distinguish the two outcomes this test exists to tell apart.
+func TestWebhookResourceSigningSecretReachesTheWireLive(t *testing.T) {
 	testAccPreCheck(t)
 
 	client := testAccClient(t)
