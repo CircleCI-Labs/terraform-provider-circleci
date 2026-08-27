@@ -54,6 +54,18 @@ import (
 // real create route reject every single name this provider ever sent it. The fake
 // could not have caught its own resource's core bug, because it did not model the
 // one validation that mattered. See createOrb's own comment.
+//
+// That third gap is now covered, but not by teaching this fake to create a real
+// orb — nothing here can, since the real route has no way to undo one. This
+// family's real-API test files instead drive circleci_orb and
+// circleci_orb_version against a real account along the one path that can
+// never leave anything behind: a request guaranteed to be rejected (a
+// duplicate orb name, a republish of an already-published version),
+// asserting on the SPECIFIC rejection message that distinguishes
+// "the API never even looked at whether this exists" from "the API looked,
+// and it does." A regression that reintroduces the qualified-name bug changes
+// which of those two messages comes back, which is exactly what those tests
+// would catch.
 
 // orbFakeRequest is one request the fake received.
 type orbFakeRequest struct {
