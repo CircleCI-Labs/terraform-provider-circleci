@@ -321,7 +321,7 @@ terraform {
   required_providers {
     circleci = {
       source  = "CircleCI-Labs/circleci"
-      version = "~> 0.6"
+      version = "~> 0.7"
     }
   }
 }

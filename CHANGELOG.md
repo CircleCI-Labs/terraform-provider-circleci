@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-08-27)
+
+### BREAKING CHANGES
+
+Each of these is a bug fix, and each changes what an existing configuration does — so
+they are listed here rather than buried among the fixes. A practitioner pinning
+`~> 0.6` receives this release automatically.
+
+* **`config_source_provider = "circleci"` is no longer accepted.** A configuration using
+  it now fails at plan time instead of at apply. It never worked: the create route
+  answers `400 Invalid config file path.` for every customer-usable `file_path`, and
+  succeeds only under the literal prefix `circleci-agents/`, which is CircleCI's own
+  internal namespace. Remove the attribute; there is nothing it can be changed to.
+
+* **An OAuth-based project's implicit pipeline definition can no longer be imported.**
+  `terraform import` used to appear to succeed, because `GET` answers 200 for one. But
+  `PATCH` answers 400 and `DELETE` answers 500 while the definition survives, so the
+  imported resource could never be updated or destroyed and `terraform destroy` errored
+  forever. If you have one in state, `terraform state rm` it: there is nothing to manage,
+  and CircleCI runs the project's config without an explicit definition.
+
+* **`circleci_budget`'s `credits` no longer accepts `0`.** CircleCI answers
+  `400 Invalid budget settings`, so a configuration with `credits = 0` failed at apply
+  and now fails at plan. The floor is `1`.
+
+* **`terraform destroy` of a `circleci_orb_namespace` now completes with a warning
+  instead of attempting a delete.** Renaming and deleting a namespace both answer 403
+  unconditionally — including a no-op rename of a namespace to its own name — so the
+  previous behaviour was an error nobody could clear. The namespace survives; removing
+  it needs a CircleCI support ticket. A change to `name` now fails at plan time rather
+  than planning a replacement that could never apply.
 
 ### BUG FIXES
 
