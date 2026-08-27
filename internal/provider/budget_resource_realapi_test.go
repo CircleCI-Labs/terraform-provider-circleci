@@ -326,12 +326,23 @@ func TestBudgetRealAPI_ZeroCreditsRejectedOnTheWire(t *testing.T) {
 	}
 }
 
-// TestBudgetRealAPI_DeleteMissingAnswers500NotNotFound is the live pin for
-// budgetResource.Delete's documented reason it cannot trust
-// circleci.IsNotFound: deleting a budget_id that was never assigned answers
-// HTTP 500 with a generic error body, not 404. No object is created or
-// touched by this test.
-func TestBudgetRealAPI_DeleteMissingAnswers500NotNotFound(t *testing.T) {
+// TestBudgetRealAPI_DeleteMissingIsNotTrustworthyAsGone is the live pin for
+// budgetResource.Delete's reason it corroborates a delete failure instead of
+// trusting the status.
+//
+// It used to assert HTTP 500 specifically, because that is what this route
+// answered when it was measured. On 2026-08-27 the acceptance suite caught it
+// answering 404 {"error":"Budget not found"} instead — a cleaner answer, and a
+// change we do not control. Confirmed by hand on three organizations before
+// touching this test.
+//
+// So the assertion was pinning an incidental status rather than the property
+// Delete actually depends on, and it failed while the provider was behaving
+// correctly. It now asserts the property: the route reports a never-assigned id
+// as an ERROR of some kind, and Delete must not conclude "already gone" from
+// that error alone — whatever status CircleCI chooses next. The status is still
+// reported, so a future change is visible in the log without being fatal.
+func TestBudgetRealAPI_DeleteMissingIsNotTrustworthyAsGone(t *testing.T) {
 	testAccPreCheck(t)
 	testRequireTFACC(t)
 	orgID := testOrgID(t)
@@ -341,12 +352,16 @@ func TestBudgetRealAPI_DeleteMissingAnswers500NotNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("deleting a never-assigned budget_id succeeded, want an error")
 	}
-	if circleci.IsNotFound(err) {
-		t.Errorf("deleting a never-assigned budget_id satisfied IsNotFound (%v); measurement shows this "+
-			"route answers 500, never 404, so a caller relying on IsNotFound to mean \"already gone\" "+
-			"would treat this the same as a genuine failure", err)
-	}
-	if !circleci.HasStatus(err, http.StatusInternalServerError) {
-		t.Errorf("deleting a never-assigned budget_id returned %v, want HTTP %d", err, http.StatusInternalServerError)
-	}
+
+	// The observation, recorded rather than asserted: this route has already
+	// changed its status once under us, and the provider's correctness does not
+	// depend on which one it is.
+	t.Logf("deleting a never-assigned budget_id answered: %v", err)
+
+	// What the provider depends on is that Delete does not conclude "already
+	// gone" from this error alone, and that is asserted where it belongs — at the
+	// resource layer, against a double, in the two tests named for it
+	// (tolerates-already-deleted and errors-when-the-scope-still-has-a-budget).
+	// Re-asserting a specific status here would only re-create the brittleness
+	// this rewrite removed.
 }
