@@ -205,7 +205,7 @@ jobs:
       # between minor versions, so generate against the oldest one we support:
       # output that is stable there is stable on the newer ones too.
       - setup:
-          terraform-version: "1.13.5"
+          terraform-version: "1.14.9"
       - go/with-cache:
           golangci-lint: true
           steps:
@@ -549,10 +549,10 @@ workflows:
               # pull request when a newer patch of the current latest minor appears;
               # when a whole new minor ships, move each entry down by hand.
               terraform-version:
-                - "1.13.5"
                 - "1.14.9"
-                # renovate: terraform
                 - "1.15.9"
+                # renovate: terraform
+                - "1.16.0"
 
   release:
     jobs:
