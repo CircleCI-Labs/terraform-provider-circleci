@@ -36,7 +36,7 @@ orbs:
 executors:
   go:
     docker:
-      - image: cimg/go:1.26.6@sha256:5d257ec542d76847379b4a92e9c5d573fa0ec7c79c494caa53a9aebd813752df
+      - image: cimg/go:1.27.4@sha256:2d2d629e6e5a8f18924e1b6cd9d44312a9d3bc1a6cdb71dfec6927b6bb5db0fb
 
 commands:
   store_results:
